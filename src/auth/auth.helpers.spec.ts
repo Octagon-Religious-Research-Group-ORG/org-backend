@@ -10,7 +10,7 @@ function requestWith(permissions: unknown): AuthenticatedRequest {
   return {
     auth: {
       payload: {
-        sub: 'auth0|member',
+        sub: 'user_member',
         permissions,
       },
     },
@@ -19,7 +19,7 @@ function requestWith(permissions: unknown): AuthenticatedRequest {
 
 describe('auth permission helpers', () => {
   it('returns the authenticated subject', () => {
-    expect(getUserSub(requestWith([]))).toBe('auth0|member');
+    expect(getUserSub(requestWith([]))).toBe('user_member');
   });
 
   it('rejects a request without an authenticated subject', () => {

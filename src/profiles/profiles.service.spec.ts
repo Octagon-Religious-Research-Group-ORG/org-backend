@@ -11,9 +11,9 @@ function query<T>(value: T) {
 
 describe('ProfilesService', () => {
   it('creates lean and document member records on demand', async () => {
-    const leanQuery = query({ auth0Sub: 'auth0|member' });
+    const leanQuery = query({ authProviderId: 'user_member' });
     const documentQuery = {
-      exec: jest.fn().mockResolvedValue({ auth0Sub: 'auth0|member' }),
+      exec: jest.fn().mockResolvedValue({ authProviderId: 'user_member' }),
     };
     const model = {
       findOneAndUpdate: jest
@@ -23,16 +23,16 @@ describe('ProfilesService', () => {
     };
     const service = new ProfilesService(model as never);
 
-    await expect(service.getOrCreate('auth0|member')).resolves.toEqual({
-      auth0Sub: 'auth0|member',
+    await expect(service.getOrCreate('user_member')).resolves.toEqual({
+      authProviderId: 'user_member',
     });
-    await expect(service.getDocument('auth0|member')).resolves.toEqual({
-      auth0Sub: 'auth0|member',
+    await expect(service.getDocument('user_member')).resolves.toEqual({
+      authProviderId: 'user_member',
     });
     for (const call of model.findOneAndUpdate.mock.calls) {
       expect(call).toEqual([
-        { auth0Sub: 'auth0|member' },
-        { $setOnInsert: { auth0Sub: 'auth0|member' } },
+        { authProviderId: 'user_member' },
+        { $setOnInsert: { authProviderId: 'user_member' } },
         {
           returnDocument: 'after',
           upsert: true,
@@ -49,7 +49,7 @@ describe('ProfilesService', () => {
     const service = new ProfilesService(model as never);
 
     await expect(
-      service.update('auth0|member', {
+      service.update('user_member', {
         preferredName: '  Member ',
         email: ' MEMBER@EXAMPLE.TEST ',
         membershipType: 'private',
@@ -60,7 +60,7 @@ describe('ProfilesService', () => {
     ).resolves.toBe(result);
 
     expect(model.findOneAndUpdate).toHaveBeenCalledWith(
-      { auth0Sub: 'auth0|member' },
+      { authProviderId: 'user_member' },
       {
         $set: {
           preferredName: 'Member',
@@ -89,7 +89,7 @@ describe('ProfilesService', () => {
       const model = { findOneAndUpdate: jest.fn(() => updateQuery) };
       const service = new ProfilesService(model as never);
 
-      await service.updateShipping('auth0|member', {
+      await service.updateShipping('user_member', {
         recipientName: '  Member ',
         line1: ' 1 Main St ',
         line2,
@@ -122,10 +122,10 @@ describe('ProfilesService', () => {
     const model = { findOneAndUpdate: jest.fn(() => updateQuery) };
     const service = new ProfilesService(model as never);
 
-    await service.deleteShipping('auth0|member');
+    await service.deleteShipping('user_member');
 
     expect(model.findOneAndUpdate).toHaveBeenCalledWith(
-      { auth0Sub: 'auth0|member' },
+      { authProviderId: 'user_member' },
       { $unset: { shippingAddress: 1 } },
       {
         returnDocument: 'after',

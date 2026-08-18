@@ -67,7 +67,7 @@ describe('CartsService', () => {
   });
 
   it.each([
-    ['member', request({ sub: 'auth0|member' }), { ownerSub: 'auth0|member' }],
+    ['member', request({ sub: 'user_member' }), { ownerSub: 'user_member' }],
     [
       'guest',
       request({ guestToken: 'guest-token' }),
@@ -115,12 +115,10 @@ describe('CartsService', () => {
     const model = { findOneAndUpdate: jest.fn(() => query(current)) };
     const service = new CartsService(model as never, products() as never);
 
-    await expect(service.getUserDocument('auth0|member')).resolves.toBe(
-      current,
-    );
+    await expect(service.getUserDocument('user_member')).resolves.toBe(current);
     expect(model.findOneAndUpdate).toHaveBeenCalledWith(
-      { ownerSub: 'auth0|member' },
-      { $setOnInsert: { ownerSub: 'auth0|member', items: [] } },
+      { ownerSub: 'user_member' },
+      { $setOnInsert: { ownerSub: 'user_member', items: [] } },
       {
         upsert: true,
         returnDocument: 'after',
@@ -142,7 +140,7 @@ describe('CartsService', () => {
     const productService = products(1200);
     const service = new CartsService(model as never, productService as never);
 
-    const response = await service.setItem(request({ sub: 'auth0|member' }), {
+    const response = await service.setItem(request({ sub: 'user_member' }), {
       productSlug: 'mesh-tool',
       variantId: 'standard',
       quantity: 3,
@@ -165,7 +163,7 @@ describe('CartsService', () => {
     const model = { findOneAndUpdate: jest.fn(() => query(current)) };
     const service = new CartsService(model as never, products(100) as never);
 
-    await service.setItem(request({ sub: 'auth0|member' }), {
+    await service.setItem(request({ sub: 'user_member' }), {
       productSlug: 'mesh-tool',
       variantId: 'standard',
       quantity: 4,
@@ -218,7 +216,7 @@ describe('CartsService', () => {
     const service = new CartsService(model as never, products() as never);
 
     await expect(
-      service.setItem(request({ sub: 'auth0|member' }), {
+      service.setItem(request({ sub: 'user_member' }), {
         productSlug: 'mesh-tool',
         variantId: 'standard',
         quantity: 1,
@@ -241,7 +239,7 @@ describe('CartsService', () => {
     const service = new CartsService(model as never, products(1200) as never);
 
     const response = await service.deleteItem(
-      request({ sub: 'auth0|member' }),
+      request({ sub: 'user_member' }),
       'line-1',
     );
 
@@ -258,7 +256,7 @@ describe('CartsService', () => {
     const service = new CartsService(model as never, products() as never);
 
     await expect(
-      service.deleteItem(request({ sub: 'auth0|member' }), 'missing'),
+      service.deleteItem(request({ sub: 'user_member' }), 'missing'),
     ).rejects.toMatchObject({ message });
   });
 
@@ -271,7 +269,7 @@ describe('CartsService', () => {
     const service = new CartsService(model as never, products() as never);
 
     await expect(
-      service.merge('auth0|member', 'guest-token'),
+      service.merge('user_member', 'guest-token'),
     ).resolves.toMatchObject({ id: 'cart-1', items: [] });
     expect(userCart.save).not.toHaveBeenCalled();
   });
@@ -312,7 +310,7 @@ describe('CartsService', () => {
     };
     const service = new CartsService(model as never, productService as never);
 
-    const response = await service.merge('auth0|member', 'guest-token');
+    const response = await service.merge('user_member', 'guest-token');
 
     expect(userCart.items[0].quantity).toBe(10);
     expect(userCart.items[1]).toMatchObject({
@@ -351,7 +349,7 @@ describe('CartsService', () => {
     };
     const service = new CartsService(model as never, products(100) as never);
 
-    await service.merge('auth0|member', 'guest-token');
+    await service.merge('user_member', 'guest-token');
 
     expect(userCart.items[0].quantity).toBe(5);
   });
@@ -381,7 +379,7 @@ describe('CartsService', () => {
     };
     const service = new CartsService(model as never, products(0) as never);
 
-    await service.merge('auth0|member', 'guest-token');
+    await service.merge('user_member', 'guest-token');
 
     expect(userCart.items).toHaveLength(25);
   });
@@ -391,10 +389,10 @@ describe('CartsService', () => {
     const model = { updateOne: jest.fn(() => update) };
     const service = new CartsService(model as never, products() as never);
 
-    await service.clearUserCart('auth0|member');
+    await service.clearUserCart('user_member');
 
     expect(model.updateOne).toHaveBeenCalledWith(
-      { ownerSub: 'auth0|member' },
+      { ownerSub: 'user_member' },
       { $set: { items: [] } },
     );
   });

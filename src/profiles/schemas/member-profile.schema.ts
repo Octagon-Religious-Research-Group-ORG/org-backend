@@ -37,7 +37,7 @@ export const ShippingAddressSchema =
 @Schema({ timestamps: true })
 export class MemberProfile {
   @Prop({ type: String, required: true, unique: true, index: true })
-  auth0Sub: string;
+  authProviderId: string;
 
   @Prop({ type: String, trim: true, lowercase: true, index: true })
   authEmail?: string;

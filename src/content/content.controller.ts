@@ -10,7 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Auth0Guard } from '../auth/auth.guard';
+import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import { Permissions } from '../auth/permissions.decorator';
 import { PermissionsGuard } from '../auth/permissions.guard';
@@ -36,7 +36,7 @@ export class PublicContentController {
 }
 
 @Controller('admin/content/pages')
-@UseGuards(Auth0Guard, PermissionsGuard)
+@UseGuards(ClerkAuthGuard, PermissionsGuard)
 export class AdminContentController {
   constructor(private readonly content: ContentService) {}
 

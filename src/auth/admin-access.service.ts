@@ -7,7 +7,7 @@ import {
   MemberProfile,
   MemberProfileDocument,
 } from '../profiles/schemas/member-profile.schema';
-import { Auth0UserInfoService } from './auth0-user-info.service';
+import { ClerkUserInfoService } from './clerk-user-info.service';
 import { getUserSub } from './auth.helpers';
 import type { AuthenticatedRequest } from './auth.types';
 
@@ -17,7 +17,7 @@ export class AdminAccessService {
 
   constructor(
     config: ConfigService,
-    private readonly auth0UserInfo: Auth0UserInfoService,
+    private readonly clerkUserInfo: ClerkUserInfoService,
     @InjectModel(MemberProfile.name)
     private readonly profileModel: Model<MemberProfileDocument>,
   ) {
@@ -30,8 +30,8 @@ export class AdminAccessService {
   }
 
   async synchronizeProfile(request: AuthenticatedRequest) {
-    const auth0Sub = getUserSub(request);
-    const identity = await this.auth0UserInfo.getIdentity(request, auth0Sub);
+    const authProviderId = getUserSub(request);
+    const identity = await this.clerkUserInfo.getIdentity(authProviderId);
     const authEmail = identity?.email.trim().toLowerCase();
     const authEmailVerified = identity?.emailVerified === true;
     const isAdmin = authEmailVerified && this.isAllowlistedEmail(authEmail);
@@ -43,10 +43,10 @@ export class AdminAccessService {
 
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
+        { authProviderId },
         {
           $setOnInsert: {
-            auth0Sub,
+            authProviderId,
             ...(authEmail ? { email: authEmail } : {}),
           },
           $set: {
@@ -68,12 +68,12 @@ export class AdminAccessService {
   }
 
   async hasAdminAccess(request: AuthenticatedRequest): Promise<boolean> {
-    const auth0Sub = getUserSub(request);
+    const authProviderId = getUserSub(request);
     const accessTokenHash = this.getAccessTokenHash(request);
 
     if (accessTokenHash) {
       const profile = await this.profileModel
-        .findOne({ auth0Sub, authEmailTokenHash: accessTokenHash })
+        .findOne({ authProviderId, authEmailTokenHash: accessTokenHash })
         .lean()
         .exec();
 
@@ -83,7 +83,7 @@ export class AdminAccessService {
           this.isAllowlistedEmail(profile.authEmail);
         if (profile.isAdmin !== isAdmin) {
           await this.profileModel
-            .updateOne({ auth0Sub }, { $set: { isAdmin } })
+            .updateOne({ authProviderId }, { $set: { isAdmin } })
             .exec();
         }
         return isAdmin;

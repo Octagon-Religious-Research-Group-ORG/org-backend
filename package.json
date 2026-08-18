@@ -24,6 +24,7 @@
     "test:all": "npm run test:cov && npm run test:e2e"
   },
   "dependencies": {
+    "@clerk/backend": "^3.16.6",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
@@ -32,7 +33,6 @@
     "@nestjs/throttler": "^6.5.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
-    "express-oauth2-jwt-bearer": "^1.9.1",
     "helmet": "^8.3.0",
     "joi": "^18.2.3",
     "mongoose": "^9.8.0",
@@ -89,7 +89,7 @@
       "auth/auth.guard.ts",
       "auth/auth.helpers.ts",
       "auth/admin-access.service.ts",
-      "auth/auth0-user-info.service.ts",
+      "auth/clerk-user-info.service.ts",
       "auth/permissions.guard.ts",
       "carts/carts.controller.ts",
       "carts/carts.service.ts",

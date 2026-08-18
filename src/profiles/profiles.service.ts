@@ -14,11 +14,11 @@ export class ProfilesService {
     private readonly profileModel: Model<MemberProfileDocument>,
   ) {}
 
-  async getOrCreate(auth0Sub: string) {
+  async getOrCreate(authProviderId: string) {
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
-        { $setOnInsert: { auth0Sub } },
+        { authProviderId },
+        { $setOnInsert: { authProviderId } },
         {
           returnDocument: 'after',
           upsert: true,
@@ -29,11 +29,11 @@ export class ProfilesService {
       .exec();
   }
 
-  async getDocument(auth0Sub: string) {
+  async getDocument(authProviderId: string) {
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
-        { $setOnInsert: { auth0Sub } },
+        { authProviderId },
+        { $setOnInsert: { authProviderId } },
         {
           returnDocument: 'after',
           upsert: true,
@@ -43,10 +43,10 @@ export class ProfilesService {
       .exec();
   }
 
-  async update(auth0Sub: string, input: UpdateProfileDto) {
+  async update(authProviderId: string, input: UpdateProfileDto) {
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
+        { authProviderId },
         {
           $set: {
             preferredName: input.preferredName.trim(),
@@ -67,10 +67,10 @@ export class ProfilesService {
       .exec();
   }
 
-  async updateShipping(auth0Sub: string, input: ShippingAddressDto) {
+  async updateShipping(authProviderId: string, input: ShippingAddressDto) {
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
+        { authProviderId },
         {
           $set: {
             shippingAddress: {
@@ -96,10 +96,10 @@ export class ProfilesService {
       .exec();
   }
 
-  async deleteShipping(auth0Sub: string) {
+  async deleteShipping(authProviderId: string) {
     return this.profileModel
       .findOneAndUpdate(
-        { auth0Sub },
+        { authProviderId },
         { $unset: { shippingAddress: 1 } },
         {
           returnDocument: 'after',
