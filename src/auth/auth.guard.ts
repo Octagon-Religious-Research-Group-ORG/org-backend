@@ -5,53 +5,69 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { auth } from 'express-oauth2-jwt-bearer';
-import type { RequestHandler, Response } from 'express';
-import type { AuthenticatedRequest } from './auth.types';
+import { verifyToken } from '@clerk/backend';
+import type { AuthenticatedRequest, ClerkAuthPayload } from './auth.types';
+
+const BEARER_PREFIX = 'Bearer ';
 
 @Injectable()
-export class Auth0Guard implements CanActivate {
-  private readonly validateAccessToken: RequestHandler;
+export class ClerkAuthGuard implements CanActivate {
+  private readonly secretKey: string;
+  private readonly authorizedParties: string[];
 
   constructor(config: ConfigService) {
-    this.validateAccessToken = auth({
-      audience: config.getOrThrow<string>('AUTH0_AUDIENCE'),
-      issuerBaseURL: config.getOrThrow<string>('AUTH0_ISSUER_BASE_URL'),
-      tokenSigningAlg: 'RS256',
-    });
+    this.secretKey = config.getOrThrow<string>('CLERK_SECRET_KEY');
+    // Same parsing as the CORS origin list in main.ts. Passing these to
+    // verifyToken rejects tokens minted for a different frontend.
+    this.authorizedParties = config
+      .getOrThrow<string>('CLIENT_ORIGIN_URL')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
   }
 
-  canActivate(context: ExecutionContext): Promise<boolean> {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
-    const response = context.switchToHttp().getResponse<Response>();
+    const token = this.extractBearerToken(request);
 
-    return new Promise((resolve, reject) => {
-      this.validateAccessToken(request, response, (error?: unknown) => {
-        if (error) {
-          reject(
-            new UnauthorizedException('A valid access token is required.'),
-          );
-          return;
-        }
+    if (!token) {
+      throw new UnauthorizedException('A valid access token is required.');
+    }
 
-        if (!request.auth?.payload.sub) {
-          reject(new UnauthorizedException('The access token has no subject.'));
-          return;
-        }
-
-        resolve(true);
+    let payload: ClerkAuthPayload;
+    try {
+      payload = await verifyToken(token, {
+        secretKey: this.secretKey,
+        authorizedParties: this.authorizedParties,
       });
-    });
+    } catch {
+      throw new UnauthorizedException('A valid access token is required.');
+    }
+
+    if (!payload.sub) {
+      throw new UnauthorizedException('The access token has no subject.');
+    }
+
+    request.auth = { payload };
+    return true;
+  }
+
+  private extractBearerToken(
+    request: AuthenticatedRequest,
+  ): string | undefined {
+    const authorization = request.headers.authorization;
+    if (!authorization?.startsWith(BEARER_PREFIX)) return undefined;
+    return authorization.slice(BEARER_PREFIX.length).trim() || undefined;
   }
 }
 
 @Injectable()
-export class OptionalAuth0Guard implements CanActivate {
-  constructor(private readonly auth0Guard: Auth0Guard) {}
+export class OptionalClerkAuthGuard implements CanActivate {
+  constructor(private readonly clerkAuthGuard: ClerkAuthGuard) {}
 
   canActivate(context: ExecutionContext): boolean | Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     if (!request.headers.authorization) return true;
-    return this.auth0Guard.canActivate(context);
+    return this.clerkAuthGuard.canActivate(context);
   }
 }

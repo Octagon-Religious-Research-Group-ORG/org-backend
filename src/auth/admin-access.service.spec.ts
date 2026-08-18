@@ -19,7 +19,7 @@ function request(withAccessToken = true) {
   return {
     auth: {
       payload: {
-        sub: 'auth0|member',
+        sub: 'user_member',
       },
     },
     headers: withAccessToken ? { authorization: 'Bearer access-token' } : {},
@@ -37,7 +37,7 @@ describe('AdminAccessService', () => {
 
   it('synchronizes a verified allowlisted identity as an administrator', async () => {
     const profile = {
-      auth0Sub: 'auth0|member',
+      authProviderId: 'user_member',
       authEmail: 'admin@example.test',
       authEmailVerified: true,
       authEmailTokenHash: ACCESS_TOKEN_HASH,
@@ -61,10 +61,10 @@ describe('AdminAccessService', () => {
 
     await expect(service.synchronizeProfile(request())).resolves.toBe(profile);
     expect(model.findOneAndUpdate).toHaveBeenCalledWith(
-      { auth0Sub: 'auth0|member' },
+      { authProviderId: 'user_member' },
       {
         $setOnInsert: {
-          auth0Sub: 'auth0|member',
+          authProviderId: 'user_member',
           email: 'admin@example.test',
         },
         $set: {
@@ -104,7 +104,7 @@ describe('AdminAccessService', () => {
     });
     expect(model.findOneAndUpdate.mock.calls[0][1]).toEqual({
       $setOnInsert: {
-        auth0Sub: 'auth0|member',
+        authProviderId: 'user_member',
         email: 'admin@example.test',
       },
       $set: {
@@ -133,7 +133,7 @@ describe('AdminAccessService', () => {
     await service.synchronizeProfile(request(false));
 
     expect(model.findOneAndUpdate.mock.calls[0][1]).toEqual({
-      $setOnInsert: { auth0Sub: 'auth0|member' },
+      $setOnInsert: { authProviderId: 'user_member' },
       $set: {
         authEmailVerified: false,
         isAdmin: false,
@@ -164,7 +164,7 @@ describe('AdminAccessService', () => {
 
     await expect(service.hasAdminAccess(request())).resolves.toBe(true);
     expect(model.findOne).toHaveBeenCalledWith({
-      auth0Sub: 'auth0|member',
+      authProviderId: 'user_member',
       authEmailTokenHash: ACCESS_TOKEN_HASH,
     });
     expect(identity.getIdentity).not.toHaveBeenCalled();
@@ -192,7 +192,7 @@ describe('AdminAccessService', () => {
 
     await expect(service.hasAdminAccess(request())).resolves.toBe(false);
     expect(model.updateOne).toHaveBeenCalledWith(
-      { auth0Sub: 'auth0|member' },
+      { authProviderId: 'user_member' },
       { $set: { isAdmin: false } },
     );
   });

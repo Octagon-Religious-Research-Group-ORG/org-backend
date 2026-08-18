@@ -11,7 +11,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Auth0Guard } from '../auth/auth.guard';
+import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import { Permissions } from '../auth/permissions.decorator';
 import { PermissionsGuard } from '../auth/permissions.guard';
@@ -25,7 +25,7 @@ import { OrdersService } from './orders.service';
 import type { OrderStatus } from './schemas/order.schema';
 
 @Controller('orders')
-@UseGuards(Auth0Guard)
+@UseGuards(ClerkAuthGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
@@ -69,7 +69,7 @@ const ORDER_STATUSES: OrderStatus[] = [
 ];
 
 @Controller('admin/orders')
-@UseGuards(Auth0Guard, PermissionsGuard)
+@UseGuards(ClerkAuthGuard, PermissionsGuard)
 export class AdminOrdersController {
   constructor(private readonly orders: OrdersService) {}
 

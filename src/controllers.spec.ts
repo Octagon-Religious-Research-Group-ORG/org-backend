@@ -15,7 +15,7 @@ import { ProfilesController } from './profiles/profiles.controller';
 const request = {
   auth: {
     payload: {
-      sub: 'auth0|member',
+      sub: 'user_member',
       permissions: ['read:orders'],
     },
   },
@@ -47,7 +47,7 @@ describe('thin HTTP controllers', () => {
     );
     expect(carts.setItem).toHaveBeenCalledWith(request, item);
     expect(carts.deleteItem).toHaveBeenCalledWith(request, 'line-1');
-    expect(carts.merge).toHaveBeenCalledWith('auth0|member', 'guest-token');
+    expect(carts.merge).toHaveBeenCalledWith('user_member', 'guest-token');
   });
 
   it('validates product categories and returns donation configuration', () => {
@@ -126,12 +126,12 @@ describe('thin HTTP controllers', () => {
     await expect(controller.getShipping(request)).resolves.toBeNull();
     expect(controller.updateShipping(request, shipping)).toBe('shipping');
     expect(controller.deleteShipping(request)).toBe('deleted');
-    expect(profiles.update).toHaveBeenCalledWith('auth0|member', profile);
+    expect(profiles.update).toHaveBeenCalledWith('user_member', profile);
     expect(adminAccess.synchronizeProfile).toHaveBeenCalledWith(request);
     expect(adminAccess.hasAdminAccess).toHaveBeenCalledWith(request);
-    expect(profiles.getOrCreate).toHaveBeenCalledWith('auth0|member');
+    expect(profiles.getOrCreate).toHaveBeenCalledWith('user_member');
     expect(profiles.updateShipping).toHaveBeenCalledWith(
-      'auth0|member',
+      'user_member',
       shipping,
     );
   });
@@ -208,7 +208,7 @@ describe('thin HTTP controllers', () => {
     expect(admin.findOne('order-1')).toBe('admin-order');
     expect(admin.updateStatus('order-1', status)).toBe('updated');
     expect(orders.create).toHaveBeenCalledWith(
-      'auth0|member',
+      'user_member',
       'key-1',
       createInput,
     );
@@ -251,13 +251,13 @@ describe('thin HTTP controllers', () => {
       'community',
       2,
       saveBody.content,
-      'auth0|member',
+      'user_member',
     );
     expect(content.restoreRevision).toHaveBeenCalledWith(
       'community',
       1,
       2,
-      'auth0|member',
+      'user_member',
     );
   });
 });

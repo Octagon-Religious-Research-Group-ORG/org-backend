@@ -147,7 +147,7 @@ describe('OrdersService.create', () => {
       const deps = dependencies();
 
       await expect(
-        serviceOf(deps).create('auth0|member', key as string, {}),
+        serviceOf(deps).create('user_member', key as string, {}),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(deps.model.findOne).not.toHaveBeenCalled();
     },
@@ -158,7 +158,7 @@ describe('OrdersService.create', () => {
     const deps = dependencies({ prior });
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).resolves.toBe(prior);
     expect(deps.profiles.getDocument).not.toHaveBeenCalled();
   });
@@ -171,7 +171,7 @@ describe('OrdersService.create', () => {
     const deps = dependencies({ profile: profile(missing) });
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).rejects.toThrow('Complete your member profile');
   });
 
@@ -179,7 +179,7 @@ describe('OrdersService.create', () => {
     const deps = dependencies({ profile: profile({ shippingAddress: null }) });
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).rejects.toThrow('Add a U.S. shipping address');
   });
 
@@ -187,7 +187,7 @@ describe('OrdersService.create', () => {
     const deps = dependencies({ summary: cartSummary([]) });
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).rejects.toThrow('offering docket is empty');
   });
 
@@ -196,7 +196,7 @@ describe('OrdersService.create', () => {
     const deps = dependencies({ created });
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {
+      serviceOf(deps).create('user_member', 'key-1', {
         declaredDonationCents: 4000,
       }),
     ).resolves.toBe(created);
@@ -204,7 +204,7 @@ describe('OrdersService.create', () => {
     expect(deps.model.create).toHaveBeenCalledWith(
       expect.objectContaining({
         orderNumber: expect.stringMatching(/^ORG-\d{8}-[A-F0-9]{6}$/),
-        ownerSub: 'auth0|member',
+        ownerSub: 'user_member',
         idempotencyKey: 'key-1',
         declaredDonationCents: 4000,
         status: 'awaiting_donation',
@@ -239,7 +239,7 @@ describe('OrdersService.create', () => {
         },
       }),
     );
-    expect(deps.carts.clearUserCart).toHaveBeenCalledWith('auth0|member');
+    expect(deps.carts.clearUserCart).toHaveBeenCalledWith('user_member');
     expect(deps.notifications.sendOrderCreated).toHaveBeenCalledWith(created);
     expect(created.emailState).toBe('sent');
     expect(created.save).toHaveBeenCalled();
@@ -254,7 +254,7 @@ describe('OrdersService.create', () => {
       .mockReturnValueOnce(query(winner));
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).resolves.toBe(winner);
   });
 
@@ -273,7 +273,7 @@ describe('OrdersService.create', () => {
     }
 
     await expect(
-      serviceOf(deps).create('auth0|member', 'key-1', {}),
+      serviceOf(deps).create('user_member', 'key-1', {}),
     ).rejects.toBe(failure);
   });
 });
@@ -290,7 +290,7 @@ describe('OrdersService queries and updates', () => {
       .mockReturnValueOnce(filteredAdminQuery);
     const service = serviceOf(deps);
 
-    await expect(service.listForMember('auth0|member')).resolves.toEqual([
+    await expect(service.listForMember('user_member')).resolves.toEqual([
       { id: 'member-order' },
     ]);
     await expect(service.listForAdmin()).resolves.toEqual([
@@ -300,7 +300,7 @@ describe('OrdersService queries and updates', () => {
       { id: 'filtered-order' },
     ]);
     expect(deps.model.find).toHaveBeenNthCalledWith(1, {
-      ownerSub: 'auth0|member',
+      ownerSub: 'user_member',
     });
     expect(deps.model.find).toHaveBeenNthCalledWith(2, {});
     expect(deps.model.find).toHaveBeenNthCalledWith(3, {
@@ -317,7 +317,7 @@ describe('OrdersService queries and updates', () => {
 
     const result =
       method === 'findForMember'
-        ? await serviceOf(deps).findForMember('auth0|member', 'order-1')
+        ? await serviceOf(deps).findForMember('user_member', 'order-1')
         : await serviceOf(deps).findForAdmin('order-1');
 
     expect(result).toEqual({ id: 'order-1' });
@@ -331,7 +331,7 @@ describe('OrdersService queries and updates', () => {
     deps.model[modelMethod].mockReturnValue(query(null));
     const promise =
       method === 'findForMember'
-        ? serviceOf(deps).findForMember('auth0|member', 'missing')
+        ? serviceOf(deps).findForMember('user_member', 'missing')
         : serviceOf(deps).findForAdmin('missing');
 
     await expect(promise).rejects.toBeInstanceOf(NotFoundException);
@@ -343,7 +343,7 @@ describe('OrdersService queries and updates', () => {
     deps.model.findOne.mockReturnValue(query(current));
     const service = serviceOf(deps);
 
-    await service.reportDonation('auth0|member', 'order-1', {
+    await service.reportDonation('user_member', 'order-1', {
       method: 'paypal',
       amountCents: 4000,
     });
@@ -362,7 +362,7 @@ describe('OrdersService queries and updates', () => {
     ]);
     expect(current.save).toHaveBeenCalled();
 
-    await service.reportDonation('auth0|member', 'order-1', {
+    await service.reportDonation('user_member', 'order-1', {
       method: 'venmo',
     });
     expect(current.statusHistory).toHaveLength(1);
@@ -382,7 +382,7 @@ describe('OrdersService queries and updates', () => {
       deps.model.findOne.mockReturnValue(query(value));
 
       await expect(
-        serviceOf(deps).reportDonation('auth0|member', 'order-1', {
+        serviceOf(deps).reportDonation('user_member', 'order-1', {
           method: 'paypal',
         }),
       ).rejects.toBeInstanceOf(type);

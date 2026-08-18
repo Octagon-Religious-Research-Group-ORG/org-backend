@@ -8,14 +8,14 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AdminAccessService } from '../auth/admin-access.service';
-import { Auth0Guard } from '../auth/auth.guard';
+import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getCapabilities, getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { ProfilesService } from './profiles.service';
 import { ShippingAddressDto, UpdateProfileDto } from './profiles.dto';
 
 @Controller('me')
-@UseGuards(Auth0Guard)
+@UseGuards(ClerkAuthGuard)
 export class ProfilesController {
   constructor(
     private readonly profiles: ProfilesService,

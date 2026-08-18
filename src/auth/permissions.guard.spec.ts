@@ -8,7 +8,7 @@ function context(permissions: string[]): ExecutionContext {
     getClass: () => class Controller {},
     switchToHttp: () => ({
       getRequest: () => ({
-        auth: { payload: { sub: 'auth0|member', permissions } },
+        auth: { payload: { sub: 'user_member', permissions } },
       }),
     }),
   } as unknown as ExecutionContext;
@@ -56,7 +56,7 @@ describe('PermissionsGuard', () => {
       switchToHttp: () => ({
         getRequest: () => ({
           auth: {
-            payload: { sub: 'auth0|member', permissions: 'read:content' },
+            payload: { sub: 'user_member', permissions: 'read:content' },
           },
         }),
       }),

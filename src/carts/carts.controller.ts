@@ -9,7 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Auth0Guard, OptionalAuth0Guard } from '../auth/auth.guard';
+import { ClerkAuthGuard, OptionalClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { MergeCartDto, SetCartItemDto } from './carts.dto';
@@ -25,19 +25,19 @@ export class CartsController {
   }
 
   @Get('cart')
-  @UseGuards(OptionalAuth0Guard)
+  @UseGuards(OptionalClerkAuthGuard)
   getCart(@Req() request: AuthenticatedRequest) {
     return this.carts.getCurrent(request);
   }
 
   @Patch('cart/items')
-  @UseGuards(OptionalAuth0Guard)
+  @UseGuards(OptionalClerkAuthGuard)
   setItem(@Req() request: AuthenticatedRequest, @Body() body: SetCartItemDto) {
     return this.carts.setItem(request, body);
   }
 
   @Delete('cart/items/:itemId')
-  @UseGuards(OptionalAuth0Guard)
+  @UseGuards(OptionalClerkAuthGuard)
   deleteItem(
     @Req() request: AuthenticatedRequest,
     @Param('itemId') itemId: string,
@@ -46,7 +46,7 @@ export class CartsController {
   }
 
   @Post('cart/merge')
-  @UseGuards(Auth0Guard)
+  @UseGuards(ClerkAuthGuard)
   merge(@Req() request: AuthenticatedRequest, @Body() body: MergeCartDto) {
     return this.carts.merge(getUserSub(request), body.guestToken);
   }
