@@ -1,12 +1,11 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import helmet from 'helmet';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import { createCorsOptions } from './config/cors';
+import { configureHttpApp } from './config/http-app';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const config = app.get(ConfigService);
   const origins = config
     .getOrThrow<string>('CLIENT_ORIGIN_URL')
@@ -14,16 +13,10 @@ async function bootstrap() {
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-  app.setGlobalPrefix('api/v1');
-  app.use(helmet());
-  app.enableCors(createCorsOptions(origins));
-  app.useGlobalPipes(
-    new ValidationPipe({
-      transform: true,
-      whitelist: true,
-      forbidNonWhitelisted: true,
-    }),
-  );
+  configureHttpApp(app, {
+    origins,
+    trustProxyHops: config.get<number>('TRUST_PROXY_HOPS', 1),
+  });
   app.enableShutdownHooks();
 
   await app.listen(config.get<number>('PORT', 3001));

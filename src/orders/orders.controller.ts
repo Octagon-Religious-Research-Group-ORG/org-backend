@@ -15,6 +15,7 @@ import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import { Permissions } from '../auth/permissions.decorator';
 import { PermissionsGuard } from '../auth/permissions.guard';
+import { WriteThrottle } from '../config/throttle';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import {
   CreateOrderDto,
@@ -40,6 +41,7 @@ export class OrdersController {
   }
 
   @Post()
+  @WriteThrottle()
   create(
     @Req() request: AuthenticatedRequest,
     @Headers('idempotency-key') idempotencyKey: string,
@@ -49,6 +51,7 @@ export class OrdersController {
   }
 
   @Post(':id/donation-report')
+  @WriteThrottle()
   reportDonation(
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,

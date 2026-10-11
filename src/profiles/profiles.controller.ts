@@ -11,6 +11,7 @@ import { AdminAccessService } from '../auth/admin-access.service';
 import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getCapabilities, getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
+import { WriteThrottle } from '../config/throttle';
 import { toPublicProfile } from './profile.serializer';
 import { ProfilesService } from './profiles.service';
 import { ShippingAddressDto, UpdateProfileDto } from './profiles.dto';
@@ -41,6 +42,7 @@ export class ProfilesController {
   }
 
   @Patch()
+  @WriteThrottle()
   async updateMe(
     @Req() request: AuthenticatedRequest,
     @Body() body: UpdateProfileDto,
@@ -57,6 +59,7 @@ export class ProfilesController {
   }
 
   @Patch('shipping')
+  @WriteThrottle()
   async updateShipping(
     @Req() request: AuthenticatedRequest,
     @Body() body: ShippingAddressDto,

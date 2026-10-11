@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -25,7 +25,8 @@ import { ProductsController } from '../src/products/products.controller';
 import { ProductsService } from '../src/products/products.service';
 import { ProfilesController } from '../src/profiles/profiles.controller';
 import { ProfilesService } from '../src/profiles/profiles.service';
-import { createCorsOptions } from '../src/config/cors';
+import { configureHttpApp } from '../src/config/http-app';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 const product = {
   slug: 'mesh-tool',
@@ -155,17 +156,13 @@ describe('ORG API (e2e)', () => {
       .useValue(allowGuard)
       .compile();
 
-    app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api/v1');
-    app.enableCors(createCorsOptions(['http://localhost:50073']));
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    const nest = moduleFixture.createNestApplication<NestExpressApplication>();
+    configureHttpApp(nest, {
+      origins: ['http://localhost:50073'],
+      trustProxyHops: 1,
+    });
+    await nest.init();
+    app = nest;
   });
 
   afterAll(async () => {

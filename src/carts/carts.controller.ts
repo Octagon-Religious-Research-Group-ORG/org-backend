@@ -14,12 +14,14 @@ import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { MergeCartDto, SetCartItemDto } from './carts.dto';
 import { CartsService } from './carts.service';
+import { WriteThrottle } from '../config/throttle';
 
 @Controller()
 export class CartsController {
   constructor(private readonly carts: CartsService) {}
 
   @Post('carts/guest')
+  @WriteThrottle()
   createGuestCart() {
     return this.carts.createGuestCart();
   }

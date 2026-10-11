@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import * as Joi from 'joi';
+import { DEFAULT_THROTTLE } from './config/throttle';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { ProductsModule } from './products/products.module';
@@ -29,6 +30,7 @@ import { ContentModule } from './content/content.module';
         WHITE_LISTED_EMAILS: Joi.string().allow('').default(''),
         CLIENT_ORIGIN_URL: Joi.string().required(),
         PUBLIC_APP_URL: Joi.string().uri().required(),
+        TRUST_PROXY_HOPS: Joi.number().integer().min(0).max(5).default(1),
         PAYPAL_DONATION_URL: Joi.string().uri().required(),
         VENMO_DONATION_URL: Joi.string().uri().required(),
         RESEND_API_KEY: Joi.string().allow('').optional(),
@@ -45,12 +47,7 @@ import { ContentModule } from './content/content.module';
         };
       },
     }),
-    ThrottlerModule.forRoot([
-      {
-        ttl: 60_000,
-        limit: 120,
-      },
-    ]),
+    ThrottlerModule.forRoot([DEFAULT_THROTTLE]),
     AuthModule,
     NotificationsModule,
     ProductsModule,

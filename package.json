@@ -94,6 +94,8 @@
       "carts/carts.controller.ts",
       "carts/carts.service.ts",
       "config/dns.ts",
+      "config/http-app.ts",
+      "config/throttle.ts",
       "content/content.controller.ts",
       "content/content.presenters.ts",
       "content/content.service.ts",
