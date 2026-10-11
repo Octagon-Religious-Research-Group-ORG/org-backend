@@ -32,6 +32,7 @@ import { ContentModule } from './content/content.module';
         CLIENT_ORIGIN_URL: Joi.string().required(),
         PUBLIC_APP_URL: Joi.string().uri().required(),
         TRUST_PROXY_HOPS: Joi.number().integer().min(0).max(5).default(1),
+        MANAGE_INDEXES: Joi.string().valid('check', 'create').default('check'),
         PAYPAL_DONATION_URL: Joi.string().uri().required(),
         VENMO_DONATION_URL: Joi.string().uri().required(),
         RESEND_API_KEY: Joi.string().allow('').optional(),

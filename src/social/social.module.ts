@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BlockVersionsService } from './block-versions.service';
+import { SocialIndexesService } from './social-indexes.service';
 import {
   BlockVersion,
   BlockVersionSchema,
@@ -26,7 +27,7 @@ import {
       { name: BlockVersion.name, schema: BlockVersionSchema },
     ]),
   ],
-  providers: [BlockVersionsService],
+  providers: [BlockVersionsService, SocialIndexesService],
   exports: [BlockVersionsService],
 })
 export class SocialModule {}
