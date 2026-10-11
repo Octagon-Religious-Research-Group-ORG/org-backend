@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { SocialIndexesService } from './social-indexes.service';
+import { ManagedIndexesService } from './managed-indexes.service';
 
 function model(name: string, toCreate: unknown[] = [], toDrop: unknown[] = []) {
   return {
@@ -17,17 +17,19 @@ function build(mode: string | undefined, missing: unknown[] = []) {
     model('SocialProfile'),
     model('ProfileBlock'),
     model('BlockVersion', missing),
+    model('ModerationLogEntry'),
   ];
-  const service = new SocialIndexesService(
+  const service = new ManagedIndexesService(
     config as never,
     models[0] as never,
     models[1] as never,
     models[2] as never,
+    models[3] as never,
   );
   return { service, models };
 }
 
-describe('SocialIndexesService', () => {
+describe('ManagedIndexesService', () => {
   let log: jest.SpyInstance;
   let error: jest.SpyInstance;
 
@@ -48,7 +50,7 @@ describe('SocialIndexesService', () => {
     await service.onApplicationBootstrap();
 
     for (const m of models) expect(m.createIndexes).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith('Members-area indexes OK (check).');
+    expect(log).toHaveBeenCalledWith('Managed indexes OK (check).');
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -59,7 +61,7 @@ describe('SocialIndexesService', () => {
 
     expect(models[2].createIndexes).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledWith(
-      'Members-area indexes (check): BlockVersion: 1 missing',
+      'Managed indexes (check): BlockVersion: 1 missing',
     );
   });
 

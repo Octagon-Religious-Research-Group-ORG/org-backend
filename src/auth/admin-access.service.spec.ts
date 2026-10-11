@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { AdminAccessService } from './admin-access.service';
 import type { AuthenticatedRequest } from './auth.types';
 import { createHash } from 'node:crypto';
@@ -73,6 +74,7 @@ describe('AdminAccessService', () => {
           authEmailTokenHash: ACCESS_TOKEN_HASH,
           isAdmin: true,
         },
+        $unset: { authRole: 1 },
       },
       {
         returnDocument: 'after',
@@ -112,13 +114,13 @@ describe('AdminAccessService', () => {
         authEmailVerified: false,
         isAdmin: false,
       },
-      $unset: { authEmailTokenHash: 1 },
+      $unset: { authRole: 1, authEmailTokenHash: 1 },
     });
   });
 
   it('clears stale identity fields when Clerk supplies no email', async () => {
     const identity = {
-      getIdentity: jest.fn().mockResolvedValue(undefined),
+      getIdentity: jest.fn().mockResolvedValue({ emailVerified: false }),
     };
     const updateQuery = query({ isAdmin: false });
     const model = {
@@ -140,6 +142,7 @@ describe('AdminAccessService', () => {
       },
       $unset: {
         authEmail: 1,
+        authRole: 1,
         authEmailTokenHash: 1,
       },
     });
@@ -244,5 +247,133 @@ describe('AdminAccessService', () => {
     );
 
     await expect(service.hasAdminAccess(request(false))).resolves.toBe(false);
+  });
+
+  describe('Clerk roles', () => {
+    let warn: jest.SpyInstance;
+
+    beforeEach(() => {
+      warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+    });
+
+    afterEach(() => warn.mockRestore());
+
+    it('grants admin from the Clerk role alone and caches the role', async () => {
+      const identity = {
+        getIdentity: jest
+          .fn()
+          .mockResolvedValue({ emailVerified: false, role: 'admin' }),
+      };
+      const model = {
+        findOneAndUpdate: jest.fn<unknown, any[]>(() =>
+          query({ isAdmin: true }),
+        ),
+      };
+      const service = new AdminAccessService(
+        { get: jest.fn(() => '') } as never,
+        identity as never,
+        model as never,
+      );
+
+      await service.synchronizeProfile(request(false));
+
+      expect(model.findOneAndUpdate.mock.calls[0][1]).toMatchObject({
+        $set: { authRole: 'admin', isAdmin: true },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('sends no $unset when email, role and token are all present', async () => {
+      const identity = {
+        getIdentity: jest.fn().mockResolvedValue({
+          email: 'admin@example.test',
+          emailVerified: true,
+          role: 'admin',
+        }),
+      };
+      const model = {
+        findOneAndUpdate: jest.fn<unknown, any[]>(() =>
+          query({ isAdmin: true }),
+        ),
+      };
+      const service = new AdminAccessService(
+        config as never,
+        identity as never,
+        model as never,
+      );
+
+      await service.synchronizeProfile(request());
+
+      expect(model.findOneAndUpdate.mock.calls[0][1]).not.toHaveProperty(
+        '$unset',
+      );
+    });
+
+    it('does not grant admin for the moderator role', async () => {
+      const identity = {
+        getIdentity: jest
+          .fn()
+          .mockResolvedValue({ emailVerified: false, role: 'moderator' }),
+      };
+      const model = {
+        findOneAndUpdate: jest.fn<unknown, any[]>(() =>
+          query({ isAdmin: false }),
+        ),
+      };
+      const service = new AdminAccessService(
+        { get: jest.fn(() => '') } as never,
+        identity as never,
+        model as never,
+      );
+
+      await service.synchronizeProfile(request(false));
+
+      expect(model.findOneAndUpdate.mock.calls[0][1]).toMatchObject({
+        $set: { authRole: 'moderator', isAdmin: false },
+      });
+    });
+
+    it('trusts a cached admin role for the current token', async () => {
+      const model = {
+        findOne: jest.fn(() =>
+          query({ authRole: 'admin', authEmailVerified: false, isAdmin: true }),
+        ),
+        updateOne: jest.fn(),
+      };
+      const service = new AdminAccessService(
+        { get: jest.fn(() => '') } as never,
+        { getIdentity: jest.fn() } as never,
+        model as never,
+      );
+
+      await expect(service.hasAdminAccess(request())).resolves.toBe(true);
+      expect(model.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('warns once per member when only the allowlist grants admin', async () => {
+      const model = {
+        findOne: jest.fn(() =>
+          query({
+            authEmail: 'admin@example.test',
+            authEmailVerified: true,
+            isAdmin: true,
+          }),
+        ),
+        updateOne: jest.fn(),
+      };
+      const service = new AdminAccessService(
+        config as never,
+        { getIdentity: jest.fn() } as never,
+        model as never,
+      );
+
+      await service.hasAdminAccess(request());
+      await service.hasAdminAccess(request());
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('user_member'));
+    });
   });
 });

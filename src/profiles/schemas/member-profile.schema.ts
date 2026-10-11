@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
+import { MEMBER_ROLES, type MemberRole } from '../../auth/roles';
 
 export type MembershipType = 'public' | 'private' | 'anonymous';
 export type ContactMethod = 'email' | 'signal' | 'telegram';
@@ -50,6 +51,10 @@ export class MemberProfile {
 
   @Prop({ type: Boolean, default: false })
   isAdmin: boolean;
+
+  /** Clerk role cached at the last sync (see AdminAccessService). */
+  @Prop({ type: String, enum: MEMBER_ROLES })
+  authRole?: MemberRole;
 
   @Prop({ type: String, default: '' })
   preferredName: string;

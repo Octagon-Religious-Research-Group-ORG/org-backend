@@ -6,14 +6,17 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
+import { type MemberRole, parseRole } from './roles';
 
 export interface ClerkIdentity {
-  email: string;
+  /** Normalised primary email; absent for username-only accounts. */
+  email?: string;
   emailVerified: boolean;
+  role?: MemberRole;
 }
 
 /**
- * Resolves a member's verified email from Clerk.
+ * Resolves a member's verified email and role from Clerk, and sets roles.
  *
  * Clerk's default session token does NOT carry the email, so it has to be read
  * from the Backend API. Callers cache the result against a token hash, so this
@@ -34,30 +37,51 @@ export class ClerkUserInfoService {
     });
   }
 
-  async getIdentity(userId: string): Promise<ClerkIdentity | undefined> {
-    let user: Awaited<ReturnType<ClerkClient['users']['getUser']>>;
-
-    try {
-      user = await this.clerk.users.getUser(userId);
-    } catch (error) {
-      if (this.isNotFound(error)) {
-        throw new UnauthorizedException('The member profile was rejected.');
-      }
-      throw new ServiceUnavailableException(
-        'The member profile is temporarily unavailable.',
-      );
-    }
-
+  async getIdentity(userId: string): Promise<ClerkIdentity> {
+    const user = await this.fetchUser(userId);
     const primary = user.emailAddresses.find(
       (address) => address.id === user.primaryEmailAddressId,
     );
-    const email = primary?.emailAddress.trim().toLowerCase();
-    if (!email) return undefined;
+    const email = primary?.emailAddress.trim().toLowerCase() || undefined;
+    const role = parseRole(user.publicMetadata);
 
     return {
-      email,
-      emailVerified: primary?.verification?.status === 'verified',
+      ...(email ? { email } : {}),
+      emailVerified:
+        email !== undefined && primary?.verification?.status === 'verified',
+      ...(role ? { role } : {}),
     };
+  }
+
+  /**
+   * Writes a member's role to Clerk public metadata; `null` removes it.
+   * Callers are responsible for authorisation and the audit log.
+   */
+  async setRole(userId: string, role: MemberRole | null): Promise<void> {
+    try {
+      await this.clerk.users.updateUserMetadata(userId, {
+        publicMetadata: { role },
+      });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  private async fetchUser(userId: string) {
+    try {
+      return await this.clerk.users.getUser(userId);
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  private translate(error: unknown) {
+    if (this.isNotFound(error)) {
+      return new UnauthorizedException('The member profile was rejected.');
+    }
+    return new ServiceUnavailableException(
+      'The member profile is temporarily unavailable.',
+    );
   }
 
   private isNotFound(error: unknown): boolean {

@@ -11,6 +11,7 @@ jest.mock('@clerk/backend', () => ({
 
 const createClerkClientMock = jest.mocked(createClerkClient);
 const getUser = jest.fn();
+const updateUserMetadata = jest.fn();
 
 const config = {
   getOrThrow: jest.fn(() => 'sk_test_secret'),
@@ -18,7 +19,7 @@ const config = {
 
 function build(): ClerkUserInfoService {
   createClerkClientMock.mockReturnValue({
-    users: { getUser },
+    users: { getUser, updateUserMetadata },
   } as never);
   return new ClerkUserInfoService(config as never);
 }
@@ -41,6 +42,7 @@ describe('ClerkUserInfoService', () => {
   beforeEach(() => {
     createClerkClientMock.mockReset();
     getUser.mockReset();
+    updateUserMetadata.mockReset();
     config.getOrThrow.mockClear();
   });
 
@@ -110,10 +112,12 @@ describe('ClerkUserInfoService', () => {
         ],
       },
     ],
-  ])('returns undefined when %s', async (_label, overrides) => {
+  ])('returns no email when %s', async (_label, overrides) => {
     getUser.mockResolvedValue(user(overrides));
 
-    await expect(build().getIdentity('user_123')).resolves.toBeUndefined();
+    await expect(build().getIdentity('user_123')).resolves.toEqual({
+      emailVerified: false,
+    });
   });
 
   it('rejects an unknown member as unauthorized', async () => {
@@ -134,6 +138,51 @@ describe('ClerkUserInfoService', () => {
 
     await expect(build().getIdentity('user_123')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
+    );
+  });
+
+  it('reads the role from public metadata', async () => {
+    getUser.mockResolvedValue(user({ publicMetadata: { role: 'admin' } }));
+
+    await expect(build().getIdentity('user_123')).resolves.toEqual({
+      email: 'member@example.org',
+      emailVerified: true,
+      role: 'admin',
+    });
+  });
+
+  it('returns the role of a username-only account with no email', async () => {
+    getUser.mockResolvedValue(
+      user({ emailAddresses: [], publicMetadata: { role: 'moderator' } }),
+    );
+
+    await expect(build().getIdentity('user_123')).resolves.toEqual({
+      emailVerified: false,
+      role: 'moderator',
+    });
+  });
+
+  it.each([['moderator' as const], [null]])(
+    'writes role %s to public metadata',
+    async (role) => {
+      updateUserMetadata.mockResolvedValue({});
+
+      await build().setRole('user_123', role);
+
+      expect(updateUserMetadata).toHaveBeenCalledWith('user_123', {
+        publicMetadata: { role },
+      });
+    },
+  );
+
+  it.each([
+    ['an unknown member', { status: 404 }, UnauthorizedException],
+    ['an outage', new Error('down'), ServiceUnavailableException],
+  ])('translates a failed role write for %s', async (_label, thrown, type) => {
+    updateUserMetadata.mockRejectedValue(thrown);
+
+    await expect(build().setRole('user_123', 'admin')).rejects.toBeInstanceOf(
+      type,
     );
   });
 });

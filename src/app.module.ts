@@ -6,6 +6,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import * as Joi from 'joi';
 import { DEFAULT_THROTTLE } from './config/throttle';
 import { SocialModule } from './social/social.module';
+import { DbModule } from './db/db.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { ProductsModule } from './products/products.module';
@@ -58,6 +59,7 @@ import { ContentModule } from './content/content.module';
     OrdersModule,
     ContentModule,
     SocialModule,
+    DbModule,
   ],
   controllers: [AppController],
   providers: [

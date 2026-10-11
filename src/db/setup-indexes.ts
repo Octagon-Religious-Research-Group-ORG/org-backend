@@ -1,5 +1,5 @@
 /**
- * Creates the members-area indexes in the database named by MONGODB_URI.
+ * Creates the managed (members-area) indexes in the database named by MONGODB_URI.
  *
  *   npm run build
  *   npm run db:indexes -- --dry-run              # report only
@@ -15,6 +15,7 @@ import {
   formatIndexOutcome,
   reconcileIndexes,
 } from './index-setup';
+import { ModerationLogEntrySchema } from '../moderation/schemas/moderation-log.schema';
 import { BlockVersionSchema } from '../social/schemas/block-version.schema';
 import { ProfileBlockSchema } from '../social/schemas/profile-block.schema';
 import { SocialProfileSchema } from '../social/schemas/social-profile.schema';
@@ -45,6 +46,7 @@ async function main(): Promise<number> {
       connection.model('SocialProfile', SocialProfileSchema),
       connection.model('ProfileBlock', ProfileBlockSchema),
       connection.model('BlockVersion', BlockVersionSchema),
+      connection.model('ModerationLogEntry', ModerationLogEntrySchema),
     ];
     const outcome = await reconcileIndexes(models, { dryRun });
     for (const line of formatIndexOutcome(outcome, dryRun)) console.warn(line);
