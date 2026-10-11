@@ -59,13 +59,16 @@ export interface ProposalInput {
   visibility: ProfileVisibility;
 }
 
-type Kind = 'bio' | 'beliefs' | 'contact' | 'legal' | 'other';
+type Kind = 'bio' | 'beliefs' | 'bio-beliefs' | 'contact' | 'legal' | 'other';
 
 /** Section headings as members wrote them, matched case- and space-insensitively. */
 function sectionKind(heading: string): Kind {
   const text = heading.toLowerCase().replace(/\s+/g, ' ').trim();
   if (/^bio(graphy)?$/.test(text)) return 'bio';
   if (/^(my )?beliefs?$/.test(text)) return 'beliefs';
+  if (/^bio(graphy)? ?(&|and|\+) ?(my )?beliefs?$/.test(text)) {
+    return 'bio-beliefs';
+  }
   if (/^contact( info(rmation)?)?$/.test(text)) return 'contact';
   if (/^legal\b/.test(text)) return 'legal';
   return 'other';
@@ -73,6 +76,27 @@ function sectionKind(heading: string): Kind {
 
 /** A typed top-level label: a Roman numeral ("III.") or "Belief 3". */
 const LITERAL_TOP_LABEL = /^\s*(?:([IVXLC]+)[.)]|belief\s+(\d+)[.:)]?)\s+/i;
+
+/** A bullet character starting a paragraph ("•I believe…"). Not "-": members use "---" as separators. */
+const BULLET = /^\s*[•●▪◦‣]\s*/;
+
+/** A paragraph that is only a separator line ("---", "***"). */
+const SEPARATOR = /^\s*([-*_=~]\s*){3,}$/;
+
+/**
+ * Tripp's onboarding template wraps its instructions in parentheses ("(Add any
+ * beliefs/ideas you want…)"). A paragraph that is ONLY a parenthesis is an
+ * unfilled hint, not the member's words. Always flagged for review.
+ */
+const PLACEHOLDER = /^\s*\([\s\S]*\)\s*$/;
+
+/** First line of Tripp's onboarding template, copied to the top of new pages. */
+const ONBOARDING_TEMPLATE = /^public membership:?$/i;
+
+export const PLACEHOLDER_REASON =
+  'Unfilled template placeholder (instructions in parentheses)';
+export const ONBOARDING_REASON =
+  "Onboarding template copied into the page (Tripp's membership instructions), not the member's own text";
 
 const ROMAN: [number, string][] = [
   [100, 'C'],
@@ -132,24 +156,108 @@ export function contentParagraphs(docx: DocxDocument): DocxParagraph[] {
 }
 
 function tabTitle(paragraph: DocxParagraph): string {
-  const firstLine = paragraph.text.trim().split('\n')[0].trim();
+  const firstLine = paragraph.text
+    .trim()
+    .split('\n')[0]
+    .replace(BULLET, '')
+    .trim();
   const label = paragraph.numbering?.label ?? '';
   const title = label ? `${label} ${firstLine}` : firstLine;
   return title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
 }
 
+interface BeliefEntry {
+  paragraph: DocxParagraph;
+  group?: string;
+}
+
+/**
+ * Splits one run of belief paragraphs (one category) into tabs:
+ *
+ * - a category written as a single short numbered item with lettered
+ *   sub-points ("I. Christian beliefs", A., B., …) names the group, and each
+ *   sub-point is a tab;
+ * - otherwise a tab starts at Word numbering level 0, at a typed label that is
+ *   NEXT in sequence ("C." after "III." is a sub-point, not Roman 100), or at
+ *   a bullet;
+ * - with no labels or bullets at all, each paragraph is its own tab.
+ * Text before the first belief becomes its own "(introduction)" tab.
+ */
+function splitBeliefs(
+  entries: BeliefEntry[],
+  structure: number[],
+): ProposalTab[] {
+  const group = entries[0].group;
+  const numbered = entries.filter((entry) => entry.paragraph.numbering);
+  const topLevel = numbered.filter(
+    (entry) => entry.paragraph.numbering!.level === 0,
+  );
+  const firstTop = topLevel[0]?.paragraph;
+  const categoryItem =
+    topLevel.length === 1 &&
+    numbered.filter((entry) => entry.paragraph.numbering!.level === 1).length >=
+      2 &&
+    firstTop.text.trim().length <= 60 &&
+    !/[.!?]$/.test(firstTop.text.trim())
+      ? firstTop
+      : undefined;
+  const splitLevel = categoryItem ? 1 : 0;
+  const tabGroup = categoryItem ? categoryItem.text.trim() : group;
+
+  const labelled = entries.some(
+    (entry) =>
+      entry.paragraph.numbering !== undefined ||
+      BULLET.test(entry.paragraph.text) ||
+      literalTopNumber(entry.paragraph.text.trim()) !== undefined,
+  );
+
+  let lastTop = 0;
+  const tabs: ProposalTab[] = [];
+  let tab: ProposalTab | undefined;
+  for (const { paragraph } of entries) {
+    if (paragraph === categoryItem) {
+      structure.push(paragraph.index);
+      continue;
+    }
+    const text = paragraph.text.trim();
+    const typed = paragraph.numbering ? undefined : literalTopNumber(text);
+    const sequential =
+      typed !== undefined && (typed === lastTop + 1 || typed === 1);
+    const startsBelief =
+      !labelled ||
+      paragraph.numbering?.level === splitLevel ||
+      BULLET.test(text) ||
+      sequential;
+    if (paragraph.numbering?.level === 0) lastTop += 1;
+    else if (sequential) lastTop = typed;
+    if (startsBelief || !tab) {
+      tab = {
+        title: startsBelief
+          ? tabTitle(paragraph)
+          : `${tabGroup ?? 'Beliefs'} (introduction)`,
+        ...(tabGroup ? { group: tabGroup } : {}),
+        paragraphs: [],
+      };
+      tabs.push(tab);
+    }
+    tab.paragraphs.push(paragraph.index);
+  }
+  return tabs;
+}
+
 /**
  * Proposes the structure of one profile:
  *
- * - Section headings (any heading level) named Bio, Beliefs, Contact, Legal
- *   start those sections; any other non-empty heading at the same level starts
- *   an `other` section under the member's own words.
+ * - Section headings (any heading level) named Bio, Beliefs, "Bio & Beliefs",
+ *   Contact, Legal start those sections; any other non-empty heading at the
+ *   same level starts an `other` section under the member's own words.
  * - Inside Beliefs, a deeper heading names a category (`group`), and each
- *   top-level belief (Word numbering level 0, or a typed "III." / "Belief 3")
- *   starts a tab. Text before the first belief of a category becomes its own
- *   tab, so nothing is silently merged.
- * - Legal is dropped (Tripp, §2b: it becomes a separate private form).
- *   Everything before the first section (title, navigation art) is dropped.
+ *   category is split into tabs by `splitBeliefs`. In a combined "Bio &
+ *   Beliefs" section, bullet paragraphs are beliefs (one tab each) and the
+ *   rest is the bio.
+ * - Dropped, each with its reason: everything before the first section (or
+ *   the onboarding template, named as such), Legal (Tripp, §2b), unfilled
+ *   template placeholders, separator lines.
  * - Images: Pages' full-size photos, excluding navigation art
  *   ("pasted-movie-…") and thumbnails; the largest is proposed as the picture.
  */
@@ -170,13 +278,23 @@ export function proposeStructure(
 
   const preamble: number[] = [];
   const legal: number[] = [];
+  const placeholders: number[] = [];
+  const separators: number[] = [];
+  const beliefRuns: BeliefEntry[][] = [];
   let kind: Kind | undefined;
   let sectionLevel = 0;
   let current: ProposalSection | undefined;
-  let tab: ProposalTab | undefined;
+  let run: BeliefEntry[] | undefined;
   let group: string | undefined;
-  /** Number of the last top-level belief seen, for typed-label sequencing. */
-  let lastTop = 0;
+
+  const openSection = (
+    section: ProposalSection['section'],
+    heading?: string,
+  ): ProposalSection => {
+    current = { section, ...(heading ? { heading } : {}), paragraphs: [] };
+    proposal.sections.push(current);
+    return current;
+  };
 
   for (const paragraph of contentParagraphs(docx)) {
     const text = paragraph.text.trim();
@@ -193,17 +311,11 @@ export function proposeStructure(
       kind = sectionKind(text);
       sectionLevel = level;
       proposal.structure.push(paragraph.index);
-      tab = undefined;
+      run = undefined;
       group = undefined;
       current = undefined;
-      if (kind === 'bio' || kind === 'contact' || kind === 'other') {
-        current = {
-          section: kind,
-          ...(kind === 'other' ? { heading: text } : {}),
-          paragraphs: [],
-        };
-        proposal.sections.push(current);
-      }
+      if (kind === 'bio' || kind === 'contact') openSection(kind);
+      if (kind === 'other') openSection('other', text);
       continue;
     }
 
@@ -215,49 +327,55 @@ export function proposeStructure(
       legal.push(paragraph.index);
       continue;
     }
-    if (kind !== 'beliefs') {
+    if (PLACEHOLDER.test(text)) {
+      placeholders.push(paragraph.index);
+      continue;
+    }
+    if (SEPARATOR.test(text)) {
+      separators.push(paragraph.index);
+      continue;
+    }
+    if (kind === 'bio' || kind === 'contact' || kind === 'other') {
       current!.paragraphs.push(paragraph.index);
       continue;
     }
-
-    if (level !== undefined && text !== '') {
+    if (kind === 'bio-beliefs' && !BULLET.test(text)) {
+      (current ?? openSection('bio')).paragraphs.push(paragraph.index);
+      continue;
+    }
+    if (kind === 'beliefs' && level !== undefined && text !== '') {
       group = text;
-      lastTop = 0;
-      tab = undefined;
+      run = undefined;
       proposal.structure.push(paragraph.index);
       continue;
     }
-    const typed = paragraph.numbering ? undefined : literalTopNumber(text);
-    const startsBelief =
-      paragraph.numbering?.level === 0 ||
-      (typed !== undefined && (typed === lastTop + 1 || typed === 1));
-    if (paragraph.numbering?.level === 0) lastTop += 1;
-    else if (startsBelief) lastTop = typed!;
-    if (startsBelief || !tab) {
-      tab = {
-        title: startsBelief
-          ? tabTitle(paragraph)
-          : `${group ?? 'Beliefs'} (introduction)`,
-        ...(group ? { group } : {}),
-        paragraphs: [],
-      };
-      proposal.tabs.push(tab);
+    if (!run) {
+      run = [];
+      beliefRuns.push(run);
     }
-    tab.paragraphs.push(paragraph.index);
+    run.push({ paragraph, group });
   }
 
-  if (preamble.length > 0) {
-    proposal.dropped.push({
-      paragraphs: preamble,
-      reason: 'Before the first section: title and navigation',
-    });
+  for (const entries of beliefRuns) {
+    proposal.tabs.push(...splitBeliefs(entries, proposal.structure));
   }
-  if (legal.length > 0) {
-    proposal.dropped.push({
-      paragraphs: legal,
-      reason: 'Legal section: not migrated (Tripp, plan §2b)',
-    });
-  }
+  proposal.structure.sort((a, b) => a - b);
+
+  const isTemplate = preamble.some((index) =>
+    ONBOARDING_TEMPLATE.test(docx.paragraphs[index].text.trim()),
+  );
+  const drop = (paragraphs: number[], reason: string) => {
+    if (paragraphs.length > 0) proposal.dropped.push({ paragraphs, reason });
+  };
+  drop(
+    preamble,
+    isTemplate
+      ? ONBOARDING_REASON
+      : 'Before the first section: title and navigation',
+  );
+  drop(legal, 'Legal section: not migrated (Tripp, plan §2b)');
+  drop(placeholders, PLACEHOLDER_REASON);
+  drop(separators, 'Separator lines');
 
   const photos = (pages?.dataFiles ?? []).filter(
     (file) => file.image && !file.thumbnail && !/pasted-movie/i.test(file.path),
@@ -417,7 +535,11 @@ export function checkProposal(
       (sum, index) => sum + docx.paragraphs[index].text.trim().length,
       0,
     );
-    if (kept.length > DROP_REVIEW_PARAGRAPHS) {
+    // A hint in parentheses could be the member's own aside: always look.
+    if (
+      kept.length > DROP_REVIEW_PARAGRAPHS ||
+      drop.reason === PLACEHOLDER_REASON
+    ) {
       reviewFlags.push(
         `${kept.length} paragraphs (${characters} characters) dropped: ${drop.reason}.`,
       );

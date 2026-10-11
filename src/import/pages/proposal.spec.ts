@@ -208,6 +208,115 @@ describe('proposeStructure', () => {
     ]);
   });
 
+  it('names a category item and splits its lettered sub-points into tabs', () => {
+    const lettered = (text: string) => ({
+      text,
+      numbering: { numId: '1', level: 1, label: 'A.' },
+    });
+    const proposal = proposeStructure(
+      INPUT,
+      docx([
+        h('Beliefs'),
+        num('Christian beliefs', 0),
+        lettered('Monotheism'),
+        lettered('God is omniscient'),
+        { text: 'continued', numbering: { numId: '1', level: 2, label: '1.' } },
+      ]),
+    );
+
+    expect(proposal.tabs).toEqual([
+      { title: 'A. Monotheism', group: 'Christian beliefs', paragraphs: [2] },
+      {
+        title: 'A. God is omniscient',
+        group: 'Christian beliefs',
+        paragraphs: [3, 4],
+      },
+    ]);
+    expect(proposal.structure).toEqual([0, 1]);
+  });
+
+  it('keeps a single long or sentence-like top item as the belief', () => {
+    const lettered = (text: string) => ({
+      text,
+      numbering: { numId: '1', level: 1, label: 'A.' },
+    });
+    const proposal = proposeStructure(
+      INPUT,
+      docx([
+        h('Beliefs'),
+        num('God is love.', 0),
+        lettered('Point one'),
+        lettered('Point two'),
+      ]),
+    );
+    expect(proposal.tabs).toEqual([
+      { title: 'I. God is love.', paragraphs: [1, 2, 3] },
+    ]);
+  });
+
+  it('makes each unlabelled belief paragraph its own tab', () => {
+    const proposal = proposeStructure(
+      INPUT,
+      docx([h('Beliefs'), { text: 'First belief.' }, { text: 'Second.' }]),
+    );
+    expect(proposal.tabs).toEqual([
+      { title: 'First belief.', paragraphs: [1] },
+      { title: 'Second.', paragraphs: [2] },
+    ]);
+  });
+
+  it('splits a combined Bio & Beliefs section: story to bio, bullets to tabs', () => {
+    const proposal = proposeStructure(
+      INPUT,
+      docx([
+        h('Bio & Beliefs', 3),
+        { text: 'I was raised to seek knowledge.' },
+        { text: '•I believe there was a flood.' },
+        { text: '---' },
+        { text: 'More of my story.' },
+        { text: '● Bodily autonomy is tantamount.' },
+      ]),
+    );
+    expect(proposal.sections).toEqual([{ section: 'bio', paragraphs: [1, 4] }]);
+    expect(proposal.tabs).toEqual([
+      { title: 'I believe there was a flood.', paragraphs: [2] },
+      { title: 'Bodily autonomy is tantamount.', paragraphs: [5] },
+    ]);
+    expect(proposal.dropped).toEqual([
+      { paragraphs: [3], reason: 'Separator lines' },
+    ]);
+  });
+
+  it('drops template hints and names the onboarding template', () => {
+    const doc = docx([
+      { text: 'Public Membership:' },
+      { text: 'I. Check out other pages.' },
+      h('Bio'),
+      { text: '(Your bio here)' },
+      { text: 'Real bio.' },
+      h('Beliefs'),
+      { text: '(Add any beliefs/ideas you want…)' },
+    ]);
+    const proposal = proposeStructure(INPUT, doc);
+
+    expect(proposal.dropped).toEqual([
+      {
+        paragraphs: [0, 1],
+        reason:
+          "Onboarding template copied into the page (Tripp's membership instructions), not the member's own text",
+      },
+      {
+        paragraphs: [3, 6],
+        reason: 'Unfilled template placeholder (instructions in parentheses)',
+      },
+    ]);
+    expect(proposal.sections).toEqual([{ section: 'bio', paragraphs: [4] }]);
+    expect(checkProposal(proposal, doc).reviewFlags).toEqual([
+      'No belief tabs.',
+      '2 paragraphs (48 characters) dropped: Unfilled template placeholder (instructions in parentheses).',
+    ]);
+  });
+
   it('counts only paragraphs with text or images as content', () => {
     expect(
       contentParagraphs(
