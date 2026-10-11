@@ -5,7 +5,8 @@ export const COMMENT_SOURCES = ['migrated', 'native'] as const;
 export type CommentSource = (typeof COMMENT_SOURCES)[number];
 
 export const MAX_COMMENT_LENGTH = 10_000;
-export const MAX_ANCHOR_TEXT_LENGTH = 4_000;
+// As long as a paragraph: one real highlight spans 6,378 characters.
+export const MAX_ANCHOR_TEXT_LENGTH = 20_000;
 
 /**
  * A comment on a profile.

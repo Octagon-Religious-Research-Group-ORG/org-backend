@@ -28,6 +28,10 @@ export class BeliefTab {
   @Prop({ type: String, required: true, trim: true, maxlength: 120 })
   title: string;
 
+  /** The member's category, e.g. Tripp's "Theology" (plan D03), if any. */
+  @Prop({ type: String, trim: true, maxlength: 120 })
+  group?: string;
+
   @Prop({ type: Number, required: true, min: 0 })
   order: number;
 

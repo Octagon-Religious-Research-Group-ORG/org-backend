@@ -23,6 +23,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:indexes": "node dist/db/setup-indexes.js",
+    "import:pages": "node dist/import/import-pages.js",
     "test:all": "npm run typecheck && npm run test:cov && npm run test:e2e"
   },
   "dependencies": {
@@ -42,7 +43,8 @@
     "mongoose": "^9.8.0",
     "reflect-metadata": "^0.2.2",
     "resend": "^6.18.0",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
@@ -115,6 +117,10 @@
       "import/pages/docx-reader.ts",
       "import/pages/pages-reader.ts",
       "import/pages/proposal.ts",
+      "import/pages/import-plan.ts",
+      "import/pages/execute-import.ts",
+      "import/pages/image.ts",
+      "import/pages/report.ts",
       "import/pages/snappy.ts",
       "import/pages/xml.ts",
       "social/block-versions.service.ts",
