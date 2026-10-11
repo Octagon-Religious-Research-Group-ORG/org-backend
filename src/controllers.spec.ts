@@ -20,7 +20,7 @@ const request = {
     },
   },
   headers: {},
-} as AuthenticatedRequest;
+} as unknown as AuthenticatedRequest;
 
 describe('thin HTTP controllers', () => {
   it('delegates cart operations with the authenticated request', () => {
@@ -187,7 +187,7 @@ describe('thin HTTP controllers', () => {
           ],
         },
       },
-    } as AuthenticatedRequest;
+    } as unknown as AuthenticatedRequest;
 
     await expect(
       controller.getCapabilities(administratorRequest),

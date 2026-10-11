@@ -17,7 +17,7 @@ function request(options?: {
   } as AuthenticatedRequest;
 }
 
-function cart(overrides: Record<string, unknown> = {}) {
+function cart(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
     id: 'cart-1',
     items: [],
@@ -83,7 +83,7 @@ describe('CartsService', () => {
     async (_name, ownerRequest, owner) => {
       const current = cart();
       const model = {
-        findOneAndUpdate: jest.fn(() => query(current)),
+        findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
       };
       const service = new CartsService(model as never, products() as never);
 
@@ -112,7 +112,9 @@ describe('CartsService', () => {
 
   it('gets a mutable member cart document', async () => {
     const current = cart();
-    const model = { findOneAndUpdate: jest.fn(() => query(current)) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+    };
     const service = new CartsService(model as never, products() as never);
 
     await expect(service.getUserDocument('user_member')).resolves.toBe(current);
@@ -136,7 +138,9 @@ describe('CartsService', () => {
       note: 'Blue',
     };
     const current = cart({ items: [existing] });
-    const model = { findOneAndUpdate: jest.fn(() => query(current)) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+    };
     const productService = products(1200);
     const service = new CartsService(model as never, productService as never);
 
@@ -160,7 +164,9 @@ describe('CartsService', () => {
       quantity: 1,
     };
     const current = cart({ items: [existing] });
-    const model = { findOneAndUpdate: jest.fn(() => query(current)) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+    };
     const service = new CartsService(model as never, products(100) as never);
 
     await service.setItem(request({ sub: 'user_member' }), {
@@ -183,7 +189,9 @@ describe('CartsService', () => {
         guestTokenHash: 'hash',
         expiresAt: new Date(0),
       });
-      const model = { findOneAndUpdate: jest.fn(() => query(current)) };
+      const model = {
+        findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+      };
       const service = new CartsService(model as never, products(1200) as never);
 
       await service.setItem(request({ guestToken: 'guest-token' }), {
@@ -212,7 +220,9 @@ describe('CartsService', () => {
         quantity: 1,
       })),
     });
-    const model = { findOneAndUpdate: jest.fn(() => query(current)) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+    };
     const service = new CartsService(model as never, products() as never);
 
     await expect(
@@ -264,7 +274,7 @@ describe('CartsService', () => {
     const userCart = cart();
     const model = {
       findOne: jest.fn(() => query(null)),
-      findOneAndUpdate: jest.fn(() => query(userCart)),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(userCart)),
     };
     const service = new CartsService(model as never, products() as never);
 
@@ -306,7 +316,7 @@ describe('CartsService', () => {
     const productService = products(100);
     const model = {
       findOne: jest.fn(() => query(guestCart)),
-      findOneAndUpdate: jest.fn(() => query(userCart)),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(userCart)),
     };
     const service = new CartsService(model as never, productService as never);
 
@@ -345,7 +355,7 @@ describe('CartsService', () => {
     });
     const model = {
       findOne: jest.fn(() => query(guestCart)),
-      findOneAndUpdate: jest.fn(() => query(userCart)),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(userCart)),
     };
     const service = new CartsService(model as never, products(100) as never);
 
@@ -375,7 +385,7 @@ describe('CartsService', () => {
     });
     const model = {
       findOne: jest.fn(() => query(guestCart)),
-      findOneAndUpdate: jest.fn(() => query(userCart)),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(userCart)),
     };
     const service = new CartsService(model as never, products(0) as never);
 

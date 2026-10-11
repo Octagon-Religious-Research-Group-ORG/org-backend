@@ -57,7 +57,7 @@ function cartSummary(items: unknown[] = [{ productSlug: 'mesh-tool' }]) {
   };
 }
 
-function order(overrides: Record<string, unknown> = {}) {
+function order(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
     id: 'order-1',
     orderNumber: 'ORG-20260723-ABC123',

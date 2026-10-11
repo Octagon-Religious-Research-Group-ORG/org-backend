@@ -51,7 +51,7 @@ describe('AdminAccessService', () => {
     };
     const updateQuery = query(profile);
     const model = {
-      findOneAndUpdate: jest.fn(() => updateQuery),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
     };
     const service = new AdminAccessService(
       config as never,
@@ -91,7 +91,7 @@ describe('AdminAccessService', () => {
     };
     const updateQuery = query({ isAdmin: false });
     const model = {
-      findOneAndUpdate: jest.fn(() => updateQuery),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
     };
     const service = new AdminAccessService(
       config as never,
@@ -122,7 +122,7 @@ describe('AdminAccessService', () => {
     };
     const updateQuery = query({ isAdmin: false });
     const model = {
-      findOneAndUpdate: jest.fn(() => updateQuery),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
     };
     const service = new AdminAccessService(
       { get: jest.fn(() => undefined) } as never,
@@ -207,7 +207,7 @@ describe('AdminAccessService', () => {
       const synchronizedQuery = query({ isAdmin: true });
       const model = {
         findOne: jest.fn(() => currentQuery),
-        findOneAndUpdate: jest.fn(() => synchronizedQuery),
+        findOneAndUpdate: jest.fn<unknown, any[]>(() => synchronizedQuery),
       };
       const identity = {
         getIdentity: jest.fn().mockResolvedValue({
@@ -229,7 +229,7 @@ describe('AdminAccessService', () => {
 
   it('denies access when synchronization does not return an admin profile', async () => {
     const model = {
-      findOneAndUpdate: jest.fn(() => query(null)),
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query(null)),
     };
     const identity = {
       getIdentity: jest.fn().mockResolvedValue({

@@ -14,7 +14,7 @@ function requestWith(permissions: unknown): AuthenticatedRequest {
         permissions,
       },
     },
-  } as AuthenticatedRequest;
+  } as unknown as AuthenticatedRequest;
 }
 
 describe('auth permission helpers', () => {
@@ -23,9 +23,9 @@ describe('auth permission helpers', () => {
   });
 
   it('rejects a request without an authenticated subject', () => {
-    expect(() => getUserSub({ headers: {} } as AuthenticatedRequest)).toThrow(
-      'A valid member identity is required.',
-    );
+    expect(() =>
+      getUserSub({ headers: {} } as unknown as AuthenticatedRequest),
+    ).toThrow('A valid member identity is required.');
   });
 
   it('maps independent shop and website capabilities', () => {

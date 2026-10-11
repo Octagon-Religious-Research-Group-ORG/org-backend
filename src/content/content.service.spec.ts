@@ -20,7 +20,7 @@ function query<T>(value: T): MockQuery<T> {
 
 function pageFixture() {
   const content = INITIAL_WEBSITE_PAGES[1];
-  return {
+  const page = {
     pageId: content.id,
     published: {
       revision: 3,
@@ -44,6 +44,9 @@ function pageFixture() {
       publishedAt: new Date('2026-07-19T00:00:00.000Z'),
       publishedBy: 'user_publisher',
     })),
+  };
+  return page as Omit<typeof page, 'draft'> & {
+    draft?: typeof page.draft;
   };
 }
 
@@ -166,7 +169,7 @@ describe('ContentService', () => {
       service.saveDraft(
         current.pageId,
         2,
-        current.draft.content,
+        current.draft?.content,
         'user_editor',
       ),
     ).rejects.toBeInstanceOf(ConflictException);
@@ -178,7 +181,7 @@ describe('ContentService', () => {
       ...current,
       published: {
         revision: 4,
-        content: current.draft.content,
+        content: current.draft?.content,
         publishedAt: new Date('2026-07-22T00:00:00.000Z'),
         publishedBy: 'user_next-publisher',
       },
@@ -258,7 +261,7 @@ describe('ContentService', () => {
       service.saveDraft(
         current.pageId,
         1,
-        current.draft.content,
+        current.draft?.content,
         'user_editor',
       ),
     ).rejects.toBeInstanceOf(ConflictException);

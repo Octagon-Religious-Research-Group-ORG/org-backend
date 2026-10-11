@@ -21,7 +21,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:all": "npm run test:cov && npm run test:e2e"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:all": "npm run typecheck && npm run test:cov && npm run test:e2e"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.6",

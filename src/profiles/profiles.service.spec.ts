@@ -45,7 +45,9 @@ describe('ProfilesService', () => {
   it('normalizes editable profile fields', async () => {
     const result = { preferredName: 'Member' };
     const updateQuery = query(result);
-    const model = { findOneAndUpdate: jest.fn(() => updateQuery) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
+    };
     const service = new ProfilesService(model as never);
 
     await expect(
@@ -86,7 +88,9 @@ describe('ProfilesService', () => {
     'normalizes a shipping address %s',
     async (_name, line2, phone, expectedLine2, expectedPhone) => {
       const updateQuery = query({ shippingAddress: {} });
-      const model = { findOneAndUpdate: jest.fn(() => updateQuery) };
+      const model = {
+        findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
+      };
       const service = new ProfilesService(model as never);
 
       await service.updateShipping('user_member', {
@@ -119,7 +123,9 @@ describe('ProfilesService', () => {
 
   it('removes a shipping address', async () => {
     const updateQuery = query({ shippingAddress: undefined });
-    const model = { findOneAndUpdate: jest.fn(() => updateQuery) };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => updateQuery),
+    };
     const service = new ProfilesService(model as never);
 
     await service.deleteShipping('user_member');
