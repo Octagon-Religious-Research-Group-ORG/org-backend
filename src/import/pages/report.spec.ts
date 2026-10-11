@@ -47,8 +47,9 @@ const plan = {
   unmappedPagesLinks: ['https://www.icloud.com/pages/X'],
 } as unknown as ImportPlan;
 
-const check = (errors: string[] = []) => ({
+const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
   errors,
+  reviewFlags,
   placements: [
     { commentId: '1', tab: 0, paragraph: 0, spansTabs: true },
     { commentId: '2', unplaced: 'not-anchored' as const },
@@ -79,7 +80,34 @@ describe('buildProfileReport', () => {
       readerWarnings: [],
       proposalErrors: [],
       unmappedPagesLinks: ['https://www.icloud.com/pages/X'],
+      reviewFlags: [],
+      reviewed: false,
     });
+  });
+
+  it('blocks a proposal with review flags until a reviewer is recorded', () => {
+    const flagged = check([], ['No belief tabs.']);
+
+    const blocked = buildProfileReport('t', docx(), flagged, plan, cross('ok'));
+    expect(blocked.status).toBe('mismatch');
+    expect(blocked.reasons).toEqual([
+      'needs review: 1 flag(s), no reviewer recorded',
+    ]);
+    expect(blocked.reviewFlags).toEqual(['No belief tabs.']);
+
+    const reviewed = buildProfileReport(
+      't',
+      docx(),
+      flagged,
+      plan,
+      cross('ok'),
+      true,
+    );
+    expect([reviewed.status, reviewed.reasons, reviewed.reviewed]).toEqual([
+      'ok',
+      [],
+      true,
+    ]);
   });
 
   it('is a mismatch for proposal errors, reader warnings or a cross-check miss', () => {

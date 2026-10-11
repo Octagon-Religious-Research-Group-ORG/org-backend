@@ -267,6 +267,49 @@ describe('checkProposal', () => {
     ]);
   });
 
+  it('flags what is valid but needs a person to look', () => {
+    const flaggedDoc = docx(
+      [
+        { text: 'Title page' },
+        { text: 'nav 1' },
+        { text: 'nav 2' },
+        { text: 'nav 3' },
+        h('Beliefs'),
+        ...Array.from({ length: 17 }, (_, i) => num(`belief part ${i}`, 1)),
+        h('Legal'),
+        ...Array.from({ length: 5 }, () => ({ text: 'legal text' })),
+      ],
+      [comment('1', [5, 6]), comment('2', [], false)],
+    );
+    const proposal = proposeStructure(INPUT, flaggedDoc);
+    // Split the long tab so one comment spans two tabs.
+    proposal.tabs.push({ title: 'Second', paragraphs: [6] });
+    proposal.tabs[0].paragraphs = proposal.tabs[0].paragraphs.filter(
+      (index) => index !== 6,
+    );
+
+    expect(checkProposal(proposal, flaggedDoc).reviewFlags).toEqual([
+      '4 paragraphs (25 characters) dropped: Before the first section: title and navigation.',
+      'Tab 1 ("Beliefs (introduction)") holds 16 paragraphs.',
+      '1 comment(s) could not be placed on a paragraph.',
+      '1 comment(s) highlight text across tabs.',
+    ]);
+    expect(
+      checkProposal(
+        { ...proposal, tabs: [], structure: [], dropped: [] },
+        flaggedDoc,
+      ).reviewFlags[0],
+    ).toBe('No belief tabs.');
+  });
+
+  it('ignores a dropped index that does not exist when sizing a drop', () => {
+    const proposal = valid();
+    proposal.dropped.push({ paragraphs: [97, 98, 99, 100, 101], reason: 'x' });
+    expect(checkProposal(proposal, doc).reviewFlags).not.toContainEqual(
+      expect.stringContaining('dropped: x'),
+    );
+  });
+
   it('accepts images that exist in the .pages or the .docx', () => {
     const proposal = valid();
     proposal.images = {

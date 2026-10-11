@@ -153,11 +153,11 @@ function writeReports(dir: string, reports: ProfileReport[], extra: object) {
   const lines = [
     `# Pages import report: ${status.toUpperCase()}`,
     '',
-    '| Profile | Status | Tabs | Blocks | Comments (replies) | On tabs | Unplaced | Images | Pages links left | Reasons |',
-    '|---|---|---|---|---|---|---|---|---|---|',
+    '| Profile | Status | Tabs | Blocks | Comments (replies) | On tabs | Unplaced | Images | Pages links left | Review flags | Reasons |',
+    '|---|---|---|---|---|---|---|---|---|---|---|',
     ...reports.map(
       (r) =>
-        `| ${r.slug} | ${r.status} | ${r.counts.tabs} | ${r.counts.blocks} | ${r.counts.comments} (${r.counts.replies}) | ${r.counts.commentsOnTabs} | ${r.unplacedComments.length} | ${r.counts.profileImages} | ${r.unmappedPagesLinks.length} | ${r.reasons.join('; ') || '—'} |`,
+        `| ${r.slug} | ${r.status} | ${r.counts.tabs} | ${r.counts.blocks} | ${r.counts.comments} (${r.counts.replies}) | ${r.counts.commentsOnTabs} | ${r.unplacedComments.length} | ${r.counts.profileImages} | ${r.unmappedPagesLinks.length} | ${r.reviewFlags.length}${r.reviewed ? ' (reviewed)' : ''} | ${r.reasons.join('; ') || '—'} |`,
     ),
   ];
   writeFileSync(join(dir, 'import-report.md'), `${lines.join('\n')}\n`);
@@ -238,6 +238,7 @@ async function main(): Promise<number> {
       check,
       plan,
       loaded.pages ? crossCheck(loaded.docx, loaded.pages) : undefined,
+      proposal.reviewed !== undefined,
     );
     prepared.push({ loaded, proposal, plan, report });
   }

@@ -29,6 +29,9 @@ export interface ProfileReport {
   readerWarnings: string[];
   proposalErrors: string[];
   unmappedPagesLinks: string[];
+  /** Valid-but-suspicious findings; they block the import until reviewed. */
+  reviewFlags: string[];
+  reviewed: boolean;
 }
 
 /**
@@ -42,8 +45,14 @@ export function buildProfileReport(
   check: ProposalCheck,
   plan: ImportPlan | undefined,
   crossCheck: CrossCheck | undefined,
+  reviewed = false,
 ): ProfileReport {
   const reasons: string[] = [];
+  if (check.reviewFlags.length > 0 && !reviewed) {
+    reasons.push(
+      `needs review: ${check.reviewFlags.length} flag(s), no reviewer recorded`,
+    );
+  }
   if (check.errors.length > 0) {
     reasons.push(`${check.errors.length} proposal error(s)`);
   }
@@ -88,6 +97,8 @@ export function buildProfileReport(
     readerWarnings: docx.warnings,
     proposalErrors: check.errors,
     unmappedPagesLinks: plan?.unmappedPagesLinks ?? [],
+    reviewFlags: check.reviewFlags,
+    reviewed,
   };
 }
 

@@ -25,7 +25,18 @@ export interface ProfileProposal {
   dropped: { paragraphs: number[]; reason: string }[];
   /** Package paths: a Pages `Data/` file or a .docx `word/media/` file. */
   images: { picture?: string; gallery: string[] };
+  /**
+   * Set by the person who checked this proposal against the document. A
+   * proposal with review flags (see `checkProposal`) is not imported without it.
+   */
+  reviewed?: { by: string; at: string; note?: string };
 }
+
+/** A tab longer than this is probably several beliefs (one belief per tab, §2c). */
+export const LONG_TAB_PARAGRAPHS = 15;
+
+/** Dropping more than this outside the Legal section needs a person's look. */
+export const DROP_REVIEW_PARAGRAPHS = 3;
 
 export interface ProposalSection {
   section: Exclude<BlockSection, 'beliefs' | 'legal'>;
@@ -275,6 +286,13 @@ export interface CommentPlacement {
 export interface ProposalCheck {
   errors: string[];
   placements: CommentPlacement[];
+  /**
+   * Things that are valid but need a person's look before import: no belief
+   * tabs, content dropped outside Legal, very long tabs, comments that could
+   * not be placed or span tabs. A plausible split is not a correct one, so
+   * these block the import until `reviewed` is set.
+   */
+  reviewFlags: string[];
 }
 
 /**
@@ -390,5 +408,38 @@ export function checkProposal(
     };
   });
 
-  return { errors, placements };
+  const reviewFlags: string[] = [];
+  if (proposal.tabs.length === 0) reviewFlags.push('No belief tabs.');
+  for (const drop of proposal.dropped) {
+    if (/^Legal/.test(drop.reason)) continue;
+    const kept = drop.paragraphs.filter((index) => docx.paragraphs[index]);
+    const characters = kept.reduce(
+      (sum, index) => sum + docx.paragraphs[index].text.trim().length,
+      0,
+    );
+    if (kept.length > DROP_REVIEW_PARAGRAPHS) {
+      reviewFlags.push(
+        `${kept.length} paragraphs (${characters} characters) dropped: ${drop.reason}.`,
+      );
+    }
+  }
+  proposal.tabs.forEach((tab, at) => {
+    if (tab.paragraphs.length > LONG_TAB_PARAGRAPHS) {
+      reviewFlags.push(
+        `Tab ${at + 1} ("${tab.title}") holds ${tab.paragraphs.length} paragraphs.`,
+      );
+    }
+  });
+  const unplaced = placements.filter((p) => p.unplaced).length;
+  if (unplaced > 0) {
+    reviewFlags.push(
+      `${unplaced} comment(s) could not be placed on a paragraph.`,
+    );
+  }
+  const spanning = placements.filter((p) => p.spansTabs).length;
+  if (spanning > 0) {
+    reviewFlags.push(`${spanning} comment(s) highlight text across tabs.`);
+  }
+
+  return { errors, placements, reviewFlags };
 }
