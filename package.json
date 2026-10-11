@@ -113,6 +113,8 @@
       "db/managed-indexes.service.ts",
       "import/pages/docx-numbering.ts",
       "import/pages/docx-reader.ts",
+      "import/pages/pages-reader.ts",
+      "import/pages/snappy.ts",
       "import/pages/xml.ts",
       "social/block-versions.service.ts",
       "social/version-chain.ts",
