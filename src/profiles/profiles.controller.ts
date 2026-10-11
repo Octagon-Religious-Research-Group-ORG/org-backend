@@ -11,6 +11,7 @@ import { AdminAccessService } from '../auth/admin-access.service';
 import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getCapabilities, getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
+import { toPublicProfile } from './profile.serializer';
 import { ProfilesService } from './profiles.service';
 import { ShippingAddressDto, UpdateProfileDto } from './profiles.dto';
 
@@ -24,7 +25,7 @@ export class ProfilesController {
 
   @Get()
   async getMe(@Req() request: AuthenticatedRequest) {
-    return this.adminAccess.synchronizeProfile(request);
+    return toPublicProfile(await this.adminAccess.synchronizeProfile(request));
   }
 
   @Get('capabilities')
@@ -40,11 +41,13 @@ export class ProfilesController {
   }
 
   @Patch()
-  updateMe(
+  async updateMe(
     @Req() request: AuthenticatedRequest,
     @Body() body: UpdateProfileDto,
   ) {
-    return this.profiles.update(getUserSub(request), body);
+    return toPublicProfile(
+      await this.profiles.update(getUserSub(request), body),
+    );
   }
 
   @Get('shipping')
@@ -54,15 +57,19 @@ export class ProfilesController {
   }
 
   @Patch('shipping')
-  updateShipping(
+  async updateShipping(
     @Req() request: AuthenticatedRequest,
     @Body() body: ShippingAddressDto,
   ) {
-    return this.profiles.updateShipping(getUserSub(request), body);
+    return toPublicProfile(
+      await this.profiles.updateShipping(getUserSub(request), body),
+    );
   }
 
   @Delete('shipping')
-  deleteShipping(@Req() request: AuthenticatedRequest) {
-    return this.profiles.deleteShipping(getUserSub(request));
+  async deleteShipping(@Req() request: AuthenticatedRequest) {
+    return toPublicProfile(
+      await this.profiles.deleteShipping(getUserSub(request)),
+    );
   }
 }

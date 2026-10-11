@@ -104,6 +104,7 @@
       "orders/orders.service.ts",
       "products/products.controller.ts",
       "products/products.service.ts",
+      "profiles/profile.serializer.ts",
       "profiles/profiles.controller.ts",
       "profiles/profiles.service.ts"
     ],

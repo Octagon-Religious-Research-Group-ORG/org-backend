@@ -81,19 +81,42 @@ describe('thin HTTP controllers', () => {
   });
 
   it('delegates profile operations and exposes capabilities', async () => {
-    const synchronizedProfile = {
-      shippingAddress: { city: 'Nashville' },
+    // A stored document as Mongo returns it, server-only fields included.
+    const stored = {
+      _id: 'mongo-id',
+      __v: 0,
+      authProviderId: 'user_member',
+      authEmail: 'member@example.test',
+      authEmailVerified: true,
+      authEmailTokenHash: 'a'.repeat(64),
       isAdmin: true,
+      preferredName: 'Member',
+      email: 'member@example.test',
+      membershipType: 'public' as const,
+      contactMethod: 'email' as const,
+      contactHandle: 'member@example.test',
+      beliefsSummary: '',
+      shippingAddress: { city: 'Nashville' },
     };
+    const expectedPublic = {
+      preferredName: 'Member',
+      email: 'member@example.test',
+      membershipType: 'public',
+      contactMethod: 'email',
+      contactHandle: 'member@example.test',
+      beliefsSummary: '',
+      shippingAddress: { city: 'Nashville' },
+    };
+    const synchronizedProfile = stored;
     const adminAccess = {
       synchronizeProfile: jest.fn().mockResolvedValue(synchronizedProfile),
       hasAdminAccess: jest.fn().mockResolvedValue(true),
     };
     const profiles = {
       getOrCreate: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockReturnValue('updated'),
-      updateShipping: jest.fn().mockReturnValue('shipping'),
-      deleteShipping: jest.fn().mockReturnValue('deleted'),
+      update: jest.fn().mockResolvedValue(stored),
+      updateShipping: jest.fn().mockResolvedValue(stored),
+      deleteShipping: jest.fn().mockResolvedValue(null),
     };
     const controller = new ProfilesController(
       profiles as never,
@@ -116,16 +139,23 @@ describe('thin HTTP controllers', () => {
       country: 'US' as const,
     };
 
-    await expect(controller.getMe(request)).resolves.toBe(synchronizedProfile);
+    const me = await controller.getMe(request);
+    expect(me).toEqual(expectedPublic);
+    expect(me).not.toHaveProperty('authEmailTokenHash');
+    expect(me).not.toHaveProperty('isAdmin');
     await expect(controller.getCapabilities(request)).resolves.toEqual({
       canManageOrders: true,
       canEditWebsite: true,
       canPublishWebsite: true,
     });
-    expect(controller.updateMe(request, profile)).toBe('updated');
+    await expect(controller.updateMe(request, profile)).resolves.toEqual(
+      expectedPublic,
+    );
     await expect(controller.getShipping(request)).resolves.toBeNull();
-    expect(controller.updateShipping(request, shipping)).toBe('shipping');
-    expect(controller.deleteShipping(request)).toBe('deleted');
+    await expect(controller.updateShipping(request, shipping)).resolves.toEqual(
+      expectedPublic,
+    );
+    await expect(controller.deleteShipping(request)).resolves.toBeNull();
     expect(profiles.update).toHaveBeenCalledWith('user_member', profile);
     expect(adminAccess.synchronizeProfile).toHaveBeenCalledWith(request);
     expect(adminAccess.hasAdminAccess).toHaveBeenCalledWith(request);
