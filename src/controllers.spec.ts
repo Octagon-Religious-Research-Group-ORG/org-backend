@@ -56,6 +56,7 @@ describe('thin HTTP controllers', () => {
       findBySlug: jest.fn().mockReturnValue('product'),
     };
     const config = {
+      get: jest.fn(() => undefined),
       getOrThrow: jest.fn((key: string) => `${key}-value`),
     };
     const controller = new ProductsController(
@@ -77,7 +78,38 @@ describe('thin HTTP controllers', () => {
       paypalHandle: '@trippaardema',
       venmoHandle: '@the_org',
       verification: 'manual',
+      testSite: false,
     });
+  });
+
+  it('never returns the real payment accounts on the test site', () => {
+    const config = {
+      get: jest.fn((key: string) => (key === 'SITE_ENV' ? 'test' : undefined)),
+      getOrThrow: jest.fn((key: string) =>
+        key === 'PUBLIC_APP_URL'
+          ? 'https://test.example.test'
+          : 'https://paypal.example.test/real-account',
+      ),
+    };
+    const controller = new ProductsController({} as never, config as never);
+
+    const donation = controller.getDonationConfig();
+
+    expect(donation).toEqual({
+      currency: 'USD',
+      suggestedShippingCents: 1500,
+      verification: 'manual',
+      testSite: true,
+      paypalUrl: 'https://test.example.test/offerings',
+      venmoUrl: 'https://test.example.test/offerings',
+      paypalHandle: '(test site: no real payment)',
+      venmoHandle: '(test site: no real payment)',
+    });
+    expect(JSON.stringify(donation)).not.toMatch(
+      /real-account|trippaardema|the_org/,
+    );
+    expect(config.getOrThrow).not.toHaveBeenCalledWith('PAYPAL_DONATION_URL');
+    expect(config.getOrThrow).not.toHaveBeenCalledWith('VENMO_DONATION_URL');
   });
 
   it('delegates profile operations and exposes capabilities', async () => {

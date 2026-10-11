@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 import type { OrderDocument } from '../orders/schemas/order.schema';
+import {
+  readSiteEnv,
+  TEST_SITE_EMAIL_NOTICE,
+  TEST_SITE_SUBJECT_PREFIX,
+} from '../config/site-env';
 
 @Injectable()
 export class NotificationsService {
@@ -10,6 +15,7 @@ export class NotificationsService {
   private readonly from?: string;
   private readonly hostEmail?: string;
   private readonly publicAppUrl: string;
+  private readonly testSite: boolean;
 
   constructor(config: ConfigService) {
     const apiKey = config.get<string>('RESEND_API_KEY');
@@ -17,9 +23,22 @@ export class NotificationsService {
     this.hostEmail =
       config.get<string>('ORDER_NOTIFICATION_EMAIL') || undefined;
     this.publicAppUrl = config.getOrThrow<string>('PUBLIC_APP_URL');
+    this.testSite = readSiteEnv(config) === 'test';
     if (apiKey && this.from && this.hostEmail) {
       this.resend = new Resend(apiKey);
     }
+  }
+
+  /** Marks the subject when this backend is the test site. */
+  private subject(subject: string): string {
+    return this.testSite ? TEST_SITE_SUBJECT_PREFIX + subject : subject;
+  }
+
+  /** Joins body lines, opening with the test-site notice on the test site. */
+  private body(lines: string[], separator = '\n'): string {
+    return (this.testSite ? [TEST_SITE_EMAIL_NOTICE, ...lines] : lines).join(
+      separator,
+    );
   }
 
   async sendOrderCreated(
@@ -41,8 +60,8 @@ export class NotificationsService {
           {
             from: this.from,
             to: order.contact.email,
-            subject: `Offering request ${order.orderNumber}`,
-            text: [
+            subject: this.subject(`Offering request ${order.orderNumber}`),
+            text: this.body([
               `Your offering request ${order.orderNumber} is recorded.`,
               '',
               itemLines,
@@ -52,7 +71,7 @@ export class NotificationsService {
               '',
               'Any donation is completed separately through the ORG PayPal or Venmo account and is verified manually.',
               `View your request: ${this.publicAppUrl}/orders/${order.id}`,
-            ].join('\n'),
+            ]),
           },
           { idempotencyKey: `${order.id}-member-created` },
         ),
@@ -60,14 +79,14 @@ export class NotificationsService {
           {
             from: this.from,
             to: this.hostEmail,
-            subject: `New offering request ${order.orderNumber}`,
-            text: [
+            subject: this.subject(`New offering request ${order.orderNumber}`),
+            text: this.body([
               `${order.contact.preferredName} submitted a new offering request.`,
               '',
               itemLines,
               '',
               `Open the admin queue: ${this.publicAppUrl}/admin/orders`,
-            ].join('\n'),
+            ]),
           },
           { idempotencyKey: `${order.id}-host-created` },
         ),
@@ -93,16 +112,19 @@ export class NotificationsService {
         {
           from: this.from,
           to: order.contact.email,
-          subject: `${order.orderNumber} is ${order.status.replaceAll('_', ' ')}`,
-          text: [
-            `Your offering request is now ${order.status.replaceAll('_', ' ')}.`,
-            order.trackingNumber
-              ? `Tracking number: ${order.trackingNumber}`
-              : '',
-            `${this.publicAppUrl}/orders/${order.id}`,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
+          subject: this.subject(
+            `${order.orderNumber} is ${order.status.replaceAll('_', ' ')}`,
+          ),
+          text: this.body(
+            [
+              `Your offering request is now ${order.status.replaceAll('_', ' ')}.`,
+              order.trackingNumber
+                ? `Tracking number: ${order.trackingNumber}`
+                : '',
+              `${this.publicAppUrl}/orders/${order.id}`,
+            ].filter(Boolean),
+            '\n\n',
+          ),
         },
         {
           idempotencyKey: `${order.id}-status-${order.status}-${order.statusHistory.length}`,

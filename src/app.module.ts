@@ -5,6 +5,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import * as Joi from 'joi';
 import { DEFAULT_THROTTLE } from './config/throttle';
+import { SITE_ENVS } from './config/site-env';
 import { SocialModule } from './social/social.module';
 import { DbModule } from './db/db.module';
 import { AppController } from './app.controller';
@@ -34,6 +35,9 @@ import { ContentModule } from './content/content.module';
         PUBLIC_APP_URL: Joi.string().uri().required(),
         TRUST_PROXY_HOPS: Joi.number().integer().min(0).max(5).default(1),
         MANAGE_INDEXES: Joi.string().valid('check', 'create').default('check'),
+        SITE_ENV: Joi.string()
+          .valid(...SITE_ENVS)
+          .default('production'),
         PAYPAL_DONATION_URL: Joi.string().uri().required(),
         VENMO_DONATION_URL: Joi.string().uri().required(),
         RESEND_API_KEY: Joi.string().allow('').optional(),

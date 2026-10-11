@@ -1,5 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Resend } from 'resend';
+import {
+  TEST_SITE_EMAIL_NOTICE,
+  TEST_SITE_SUBJECT_PREFIX,
+} from '../config/site-env';
 import { NotificationsService } from './notifications.service';
 
 const mockSend = jest.fn();
@@ -46,6 +50,17 @@ function configuredService() {
       RESEND_API_KEY: 'api-key',
       ORDER_FROM_EMAIL: 'orders@example.test',
       ORDER_NOTIFICATION_EMAIL: 'host@example.test',
+    }) as never,
+  );
+}
+
+function testSiteService() {
+  return new NotificationsService(
+    config({
+      RESEND_API_KEY: 'api-key',
+      ORDER_FROM_EMAIL: 'orders@example.test',
+      ORDER_NOTIFICATION_EMAIL: 'host@example.test',
+      SITE_ENV: 'test',
     }) as never,
   );
 }
@@ -217,5 +232,33 @@ describe('NotificationsService', () => {
     await service.sendStatusChanged(order() as never);
 
     expect(logger).toHaveBeenCalledWith(expect.stringContaining(message));
+  });
+
+  it('marks every email from the test site in subject and body', async () => {
+    mockSend.mockResolvedValue({ data: { id: 'email-1' }, error: null });
+    const service = testSiteService();
+
+    await service.sendOrderCreated(order() as never);
+    await service.sendStatusChanged(order() as never);
+
+    expect(mockSend).toHaveBeenCalledTimes(3);
+    for (const [message] of mockSend.mock.calls as [
+      { subject: string; text: string },
+    ][]) {
+      expect(message.subject.startsWith(TEST_SITE_SUBJECT_PREFIX)).toBe(true);
+      expect(message.text.startsWith(TEST_SITE_EMAIL_NOTICE)).toBe(true);
+    }
+  });
+
+  it('leaves production emails unmarked', async () => {
+    mockSend.mockResolvedValue({ data: { id: 'email-1' }, error: null });
+
+    await configuredService().sendStatusChanged(order() as never);
+
+    const [[message]] = mockSend.mock.calls as [
+      [{ subject: string; text: string }],
+    ];
+    expect(message.subject).toBe('ORG-20260723-ABC123 is preparing');
+    expect(message.text).not.toContain(TEST_SITE_EMAIL_NOTICE);
   });
 });

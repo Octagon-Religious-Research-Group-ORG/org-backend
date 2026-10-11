@@ -140,6 +140,7 @@ describe('ORG API (e2e)', () => {
         {
           provide: ConfigService,
           useValue: {
+            get: () => undefined,
             getOrThrow: (key: string) =>
               key === 'PAYPAL_DONATION_URL'
                 ? 'https://example.test/paypal'
