@@ -26,7 +26,7 @@ function pageFixture() {
       revision: 3,
       content,
       publishedAt: new Date('2026-07-20T00:00:00.000Z'),
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     },
     draft: {
       revision: 2,
@@ -36,13 +36,13 @@ function pageFixture() {
         title: 'Edited community',
       },
       updatedAt: new Date('2026-07-21T00:00:00.000Z'),
-      updatedBy: 'auth0|editor',
+      updatedBy: 'user_editor',
     },
     history: Array.from({ length: 10 }, (_, index) => ({
       revision: 2 - index,
       content,
       publishedAt: new Date('2026-07-19T00:00:00.000Z'),
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     })),
   };
 }
@@ -123,7 +123,7 @@ describe('ContentService', () => {
           basedOnPublishedRevision: 3,
           content: current.published.content,
           updatedAt: new Date(),
-          updatedBy: 'auth0|editor',
+          updatedBy: 'user_editor',
         },
       };
       let updateFilter: Record<string, unknown> | undefined;
@@ -140,7 +140,7 @@ describe('ContentService', () => {
         current.pageId,
         expected,
         current.published.content,
-        'auth0|editor',
+        'user_editor',
       );
 
       expect(updateFilter).toMatchObject({
@@ -167,7 +167,7 @@ describe('ContentService', () => {
         current.pageId,
         2,
         current.draft.content,
-        'auth0|editor',
+        'user_editor',
       ),
     ).rejects.toBeInstanceOf(ConflictException);
   });
@@ -180,7 +180,7 @@ describe('ContentService', () => {
         revision: 4,
         content: current.draft.content,
         publishedAt: new Date('2026-07-22T00:00:00.000Z'),
-        publishedBy: 'auth0|next-publisher',
+        publishedBy: 'user_next-publisher',
       },
       draft: undefined,
       history: [current.published, ...current.history].slice(0, 10),
@@ -218,7 +218,7 @@ describe('ContentService', () => {
     const result = await service.publish(
       current.pageId,
       2,
-      'auth0|next-publisher',
+      'user_next-publisher',
     );
 
     expect(publishFilter).toMatchObject({
@@ -242,7 +242,7 @@ describe('ContentService', () => {
     const service = new ContentService(model as never);
 
     await expect(
-      service.publish(current.pageId, 2, 'auth0|publisher'),
+      service.publish(current.pageId, 2, 'user_publisher'),
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
@@ -259,7 +259,7 @@ describe('ContentService', () => {
         current.pageId,
         1,
         current.draft.content,
-        'auth0|editor',
+        'user_editor',
       ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(model.findOneAndUpdate).not.toHaveBeenCalled();
@@ -328,7 +328,7 @@ describe('ContentService', () => {
         basedOnPublishedRevision: 3,
         content: source.content,
         updatedAt: new Date('2026-07-23T00:00:00.000Z'),
-        updatedBy: 'auth0|restorer',
+        updatedBy: 'user_restorer',
       },
     };
     const model = {
@@ -347,7 +347,7 @@ describe('ContentService', () => {
       current.pageId,
       source.revision,
       2,
-      'auth0|restorer',
+      'user_restorer',
     );
 
     expect(restoreFilter).toMatchObject({
@@ -372,7 +372,7 @@ describe('ContentService', () => {
         basedOnPublishedRevision: 3,
         content: source.content,
         updatedAt: new Date(),
-        updatedBy: 'auth0|restorer',
+        updatedBy: 'user_restorer',
       },
     };
     let filter: Record<string, unknown> | undefined;
@@ -389,7 +389,7 @@ describe('ContentService', () => {
       current.pageId,
       source.revision,
       null,
-      'auth0|restorer',
+      'user_restorer',
     );
 
     expect(filter).toMatchObject({ draft: { $exists: false } });
@@ -408,7 +408,7 @@ describe('ContentService', () => {
         current.pageId,
         current.history[0].revision,
         2,
-        'auth0|restorer',
+        'user_restorer',
       ),
     ).rejects.toBeInstanceOf(ConflictException);
   });

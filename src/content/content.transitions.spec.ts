@@ -23,20 +23,20 @@ function pageFixture(): StoredWebsitePage {
       revision: 3,
       content,
       publishedAt: new Date('2026-07-20T00:00:00.000Z'),
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     },
     draft: {
       revision: 2,
       basedOnPublishedRevision: 3,
       content: { ...content, title: 'Edited community' },
       updatedAt: new Date('2026-07-21T00:00:00.000Z'),
-      updatedBy: 'auth0|editor',
+      updatedBy: 'user_editor',
     },
     history: Array.from({ length: 10 }, (_, index) => ({
       revision: 2 - index,
       content: { ...content, title: `Community revision ${2 - index}` },
       publishedAt: new Date('2026-07-19T00:00:00.000Z'),
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     })),
   };
 }
@@ -51,7 +51,7 @@ describe('content transitions', () => {
       page,
       null,
       { ...content, title: 'Next title' },
-      'auth0|editor',
+      'user_editor',
       updatedAt,
     );
 
@@ -60,7 +60,7 @@ describe('content transitions', () => {
       basedOnPublishedRevision: 3,
       content: { ...content, title: 'Next title' },
       updatedAt,
-      updatedBy: 'auth0|editor',
+      updatedBy: 'user_editor',
     });
   });
 
@@ -71,7 +71,7 @@ describe('content transitions', () => {
     const transition = createPublication(
       page,
       2,
-      'auth0|publisher',
+      'user_publisher',
       publishedAt,
     );
 
@@ -79,7 +79,7 @@ describe('content transitions', () => {
       revision: 4,
       content: page.draft?.content,
       publishedAt,
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     });
     expect(transition.history).toHaveLength(10);
     expect(transition.history[0]).toBe(page.published);
@@ -87,7 +87,7 @@ describe('content transitions', () => {
 
   it('rejects a stale draft before making a transition', () => {
     expect(() =>
-      createDraft(pageFixture(), 1, content, 'auth0|editor', new Date()),
+      createDraft(pageFixture(), 1, content, 'user_editor', new Date()),
     ).toThrow(ConflictException);
   });
 
@@ -96,7 +96,7 @@ describe('content transitions', () => {
     page.draft = null;
 
     expect(() =>
-      createPublication(page, null, 'auth0|publisher', new Date()),
+      createPublication(page, null, 'user_publisher', new Date()),
     ).toThrow(ConflictException);
   });
 
@@ -105,7 +105,7 @@ describe('content transitions', () => {
     page.draft!.basedOnPublishedRevision = 2;
 
     expect(() =>
-      createPublication(page, 2, 'auth0|publisher', new Date()),
+      createPublication(page, 2, 'user_publisher', new Date()),
     ).toThrow(ConflictException);
   });
 
@@ -114,7 +114,7 @@ describe('content transitions', () => {
     page.history = undefined;
 
     expect(
-      createPublication(page, 2, 'auth0|publisher', new Date()).history,
+      createPublication(page, 2, 'user_publisher', new Date()).history,
     ).toEqual([page.published]);
   });
 
@@ -127,7 +127,7 @@ describe('content transitions', () => {
       page,
       source!.revision,
       2,
-      'auth0|restorer',
+      'user_restorer',
       updatedAt,
     );
 
@@ -136,14 +136,14 @@ describe('content transitions', () => {
       basedOnPublishedRevision: 3,
       content: source!.content,
       updatedAt,
-      updatedBy: 'auth0|restorer',
+      updatedBy: 'user_restorer',
     });
   });
 
   it('rejects invalid or missing historical revisions', () => {
     expect(() => assertHistoricalRevision(0)).toThrow(NotFoundException);
     expect(() =>
-      createRestoredDraft(pageFixture(), 999, 2, 'auth0|restorer', new Date()),
+      createRestoredDraft(pageFixture(), 999, 2, 'user_restorer', new Date()),
     ).toThrow(NotFoundException);
   });
 });

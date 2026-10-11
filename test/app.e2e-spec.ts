@@ -7,7 +7,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppController } from '../src/app.controller';
 import { AdminAccessService } from '../src/auth/admin-access.service';
-import { Auth0Guard, OptionalAuth0Guard } from '../src/auth/auth.guard';
+import { ClerkAuthGuard, OptionalClerkAuthGuard } from '../src/auth/auth.guard';
 import { PermissionsGuard } from '../src/auth/permissions.guard';
 import { CartsController } from '../src/carts/carts.controller';
 import { CartsService } from '../src/carts/carts.service';
@@ -51,18 +51,21 @@ describe('ORG API (e2e)', () => {
     findBySlug: jest.fn().mockResolvedValue(product),
   };
   const profiles = {
-    getOrCreate: jest
-      .fn()
-      .mockResolvedValue({ auth0Sub: 'auth0|e2e', preferredName: 'Member' }),
-    update: jest.fn().mockResolvedValue({ auth0Sub: 'auth0|e2e' }),
+    getOrCreate: jest.fn().mockResolvedValue({
+      authProviderId: 'user_e2e',
+      preferredName: 'Member',
+    }),
+    update: jest.fn().mockResolvedValue({ authProviderId: 'user_e2e' }),
     updateShipping: jest.fn(),
     deleteShipping: jest.fn(),
   };
   const adminAccess = {
     synchronizeProfile: jest.fn().mockResolvedValue({
-      auth0Sub: 'auth0|e2e',
+      authProviderId: 'user_e2e',
       authEmail: 'admin@example.test',
+      authEmailTokenHash: 'a'.repeat(64),
       isAdmin: true,
+      preferredName: 'Member',
     }),
     hasAdminAccess: jest.fn().mockResolvedValue(true),
   };
@@ -99,7 +102,7 @@ describe('ORG API (e2e)', () => {
       const memberRequest = context.switchToHttp().getRequest();
       memberRequest.auth = {
         payload: {
-          sub: 'auth0|e2e',
+          sub: 'user_e2e',
           permissions: [
             'read:orders',
             'update:orders',
@@ -144,9 +147,9 @@ describe('ORG API (e2e)', () => {
         },
       ],
     })
-      .overrideGuard(Auth0Guard)
+      .overrideGuard(ClerkAuthGuard)
       .useValue(authenticatedGuard)
-      .overrideGuard(OptionalAuth0Guard)
+      .overrideGuard(OptionalClerkAuthGuard)
       .useValue(authenticatedGuard)
       .overrideGuard(PermissionsGuard)
       .useValue(allowGuard)
@@ -235,7 +238,10 @@ describe('ORG API (e2e)', () => {
       .set('Authorization', 'Bearer e2e')
       .expect(200)
       .expect(({ body }) => {
-        expect(body.auth0Sub).toBe('auth0|e2e');
+        expect(body.preferredName).toBe('Member');
+        expect(body).not.toHaveProperty('authEmailTokenHash');
+        expect(body).not.toHaveProperty('isAdmin');
+        expect(body).not.toHaveProperty('authProviderId');
       });
     await request(app.getHttpServer())
       .get('/api/v1/orders')
@@ -243,7 +249,7 @@ describe('ORG API (e2e)', () => {
       .expect(200)
       .expect([{ id: 'order-1' }]);
     expect(adminAccess.synchronizeProfile).toHaveBeenCalled();
-    expect(orders.listForMember).toHaveBeenCalledWith('auth0|e2e');
+    expect(orders.listForMember).toHaveBeenCalledWith('user_e2e');
   });
 
   it('validates profile and administrator order bodies', async () => {
@@ -282,7 +288,7 @@ describe('ORG API (e2e)', () => {
       'community',
       null,
       { kind: 'reference' },
-      'auth0|e2e',
+      'user_e2e',
     );
   });
 

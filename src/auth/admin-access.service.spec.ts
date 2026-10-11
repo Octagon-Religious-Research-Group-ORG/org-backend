@@ -116,7 +116,7 @@ describe('AdminAccessService', () => {
     });
   });
 
-  it('clears stale identity fields when Auth0 supplies no email', async () => {
+  it('clears stale identity fields when Clerk supplies no email', async () => {
     const identity = {
       getIdentity: jest.fn().mockResolvedValue(undefined),
     };
@@ -201,7 +201,7 @@ describe('AdminAccessService', () => {
     ['a new token', request(), true],
     ['a request without an access token', request(false), false],
   ])(
-    'synchronizes Auth0 identity for %s',
+    'synchronizes Clerk identity for %s',
     async (_name, memberRequest, queryCurrentProfile) => {
       const currentQuery = query(null);
       const synchronizedQuery = query({ isAdmin: true });

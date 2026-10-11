@@ -166,7 +166,7 @@ describe('thin HTTP controllers', () => {
     );
   });
 
-  it('uses complete Auth0 token capabilities without an allowlist lookup', async () => {
+  it('uses complete Clerk token capabilities without an allowlist lookup', async () => {
     const adminAccess = {
       hasAdminAccess: jest.fn(),
     };
@@ -177,7 +177,7 @@ describe('thin HTTP controllers', () => {
     const administratorRequest = {
       auth: {
         payload: {
-          sub: 'auth0|admin',
+          sub: 'user_admin',
           permissions: [
             'read:orders',
             'update:orders',

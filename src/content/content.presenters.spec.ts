@@ -12,21 +12,21 @@ const page: StoredWebsitePage = {
     revision: 3,
     content: INITIAL_WEBSITE_PAGES[1],
     publishedAt: new Date('2026-07-20T00:00:00.000Z'),
-    publishedBy: 'auth0|publisher',
+    publishedBy: 'user_publisher',
   },
   draft: {
     revision: 4,
     basedOnPublishedRevision: 3,
     content: INITIAL_WEBSITE_PAGES[1],
     updatedAt: '2026-07-21T00:00:00.000Z',
-    updatedBy: 'auth0|editor',
+    updatedBy: 'user_editor',
   },
   history: [
     {
       revision: 2,
       content: INITIAL_WEBSITE_PAGES[1],
       publishedAt: '2026-07-19T00:00:00.000Z',
-      publishedBy: 'auth0|publisher',
+      publishedBy: 'user_publisher',
     },
   ],
 };
