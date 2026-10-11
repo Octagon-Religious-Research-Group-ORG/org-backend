@@ -93,6 +93,9 @@ const PLACEHOLDER = /^\s*\([\s\S]*\)\s*$/;
 /** First line of Tripp's onboarding template, copied to the top of new pages. */
 const ONBOARDING_TEMPLATE = /^public membership:?$/i;
 
+/** Image formats the converter cannot read (sharp ships without HEVC). */
+export const UNREADABLE_IMAGE = /.(heic|heif)$/i;
+
 export const PLACEHOLDER_REASON =
   'Unfilled template placeholder (instructions in parentheses)';
 export const ONBOARDING_REASON =
@@ -258,13 +261,16 @@ function splitBeliefs(
  * - Dropped, each with its reason: everything before the first section (or
  *   the onboarding template, named as such), Legal (Tripp, §2b), unfilled
  *   template placeholders, separator lines.
- * - Images: Pages' full-size photos, excluding navigation art
- *   ("pasted-movie-…") and thumbnails; the largest is proposed as the picture.
+ * - Images: Pages' full-size photos, excluding template art (the same file in
+ *   several members' pages: navigation tiles, the example picture), HEIC and
+ *   thumbnails; the largest is proposed as the picture. File names are NOT a
+ *   signal: two members' real photos are named "pasted-movie-…".
  */
 export function proposeStructure(
   input: ProposalInput,
   docx: DocxDocument,
   pages?: PagesPackage,
+  options: { templateSha256?: ReadonlySet<string> } = {},
 ): ProfileProposal {
   const proposal: ProfileProposal = {
     version: PROPOSAL_VERSION,
@@ -377,8 +383,15 @@ export function proposeStructure(
   drop(placeholders, PLACEHOLDER_REASON);
   drop(separators, 'Separator lines');
 
+  // Never a template asset (the same file in several members' pages, e.g. the
+  // example picture in Tripp's onboarding template) and never a format the
+  // converter cannot read (HEIC: the .docx export holds a JPEG copy instead).
   const photos = (pages?.dataFiles ?? []).filter(
-    (file) => file.image && !file.thumbnail && !/pasted-movie/i.test(file.path),
+    (file) =>
+      file.image &&
+      !file.thumbnail &&
+      !UNREADABLE_IMAGE.test(file.path) &&
+      !options.templateSha256?.has(file.sha256),
   );
   if (photos.length > 0) {
     proposal.images = {
@@ -479,6 +492,11 @@ export function checkProposal(
     ...proposal.images.gallery,
   ]) {
     if (!available.has(path)) errors.push(`Image ${path} is not in the files.`);
+    else if (UNREADABLE_IMAGE.test(path)) {
+      errors.push(
+        `Image ${path} is HEIC, which cannot be converted: use the JPEG copy in the .docx (word/media/).`,
+      );
+    }
   }
 
   const tabOf = new Map<number, number>();

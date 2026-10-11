@@ -5,6 +5,8 @@
  *   npm run import:pages -- --dir <folder> --propose           # write missing <slug>.proposal.json
  *   npm run import:pages -- --dir <folder> --dry-run           # check everything, write nothing
  *   npm run import:pages -- --dir <folder> --confirm <database>
+ *   npm run import:pages -- --dir <folder> --confirm <database> --replace
+ *     (test databases only: first removes earlier imports of these profiles)
  *
  * <folder>/manifest.json lists the profiles:
  *   [{ "slug", "displayName", "pagesUrl", "visibility", "docx", "pages" }]
@@ -178,6 +180,19 @@ async function main(): Promise<number> {
   const manifest = readManifest(dir);
 
   if (args.includes('--propose')) {
+    // A picture whose exact bytes appear in more than one member's package is
+    // template art (Tripp's onboarding template ships an example picture).
+    const seen = new Map<string, Set<string>>();
+    for (const entry of manifest) {
+      for (const file of load(dir, entry).pages?.dataFiles ?? []) {
+        const owners = seen.get(file.sha256) ?? new Set<string>();
+        owners.add(entry.slug);
+        seen.set(file.sha256, owners);
+      }
+    }
+    const templateSha256 = new Set(
+      [...seen].filter(([, owners]) => owners.size > 1).map(([sha]) => sha),
+    );
     for (const entry of manifest) {
       const path = proposalPath(dir, entry.slug);
       if (existsSync(path)) {
@@ -194,6 +209,7 @@ async function main(): Promise<number> {
         },
         loaded.docx,
         loaded.pages,
+        { templateSha256 },
       );
       writeFileSync(path, JSON.stringify(proposal, null, 2));
       console.warn(
@@ -276,6 +292,15 @@ async function main(): Promise<number> {
         'Refused: managed indexes are missing; run db:indexes first.',
       );
       return 2;
+    }
+
+    if (args.includes('--replace')) {
+      // Test database only (checked above): removes earlier imports of these
+      // profiles and rows a failed import left without a profile.
+      const removed = await store.removeImported(
+        prepared.map((item) => item.plan!.slug),
+      );
+      console.warn(`Replaced: removed ${JSON.stringify(removed)}`);
     }
 
     const results: Record<string, unknown>[] = [];

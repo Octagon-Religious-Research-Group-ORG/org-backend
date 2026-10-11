@@ -85,6 +85,78 @@ export class MongoImportStore implements ImportStore {
     await this.models.ImportRecord.create(row);
   }
 
+  /**
+   * TEST DATABASES ONLY (the CLI refuses any other): deletes migrated profiles
+   * with these addresses, every row of theirs (append-only versions and import
+   * records included, through the raw driver on purpose), rows a failed
+   * import left without a profile, and their pictures.
+   */
+  async removeImported(slugs: string[]) {
+    const db = this.connection.db!;
+    const profiles = await db
+      .collection('socialprofiles')
+      .find({ slug: { $in: slugs }, source: 'migrated' })
+      .project({ _id: 1 })
+      .toArray();
+    const existing = new Set(
+      (
+        await db
+          .collection('socialprofiles')
+          .find()
+          .project({ _id: 1 })
+          .toArray()
+      ).map((row) => String(row._id)),
+    );
+    const profileIds: unknown[] = profiles.map((row) => row._id as unknown);
+    const targets: unknown[] = [...profileIds];
+    for (const name of [
+      'belieftabs',
+      'profileblocks',
+      'comments',
+      'importrecords',
+    ]) {
+      for (const id of await db.collection(name).distinct('profileId')) {
+        if (!existing.has(String(id))) targets.push(id);
+      }
+    }
+    const blockIds = (
+      await db
+        .collection('profileblocks')
+        .find({ profileId: { $in: targets } })
+        .project({ blockId: 1 })
+        .toArray()
+    ).map((row) => row.blockId as string);
+
+    const counts: Record<string, number> = {};
+    const remove = async (name: string, filter: object) => {
+      counts[name] = (
+        await db.collection(name).deleteMany(filter)
+      ).deletedCount;
+    };
+    await remove('blockversions', { blockId: { $in: blockIds } });
+    for (const name of [
+      'belieftabs',
+      'profileblocks',
+      'comments',
+      'importrecords',
+    ]) {
+      await remove(name, { profileId: { $in: targets } });
+    }
+    await remove('socialprofiles', {
+      _id: { $in: profileIds },
+    });
+
+    const bucket = new mongoose.mongo.GridFSBucket(db, {
+      bucketName: PROFILE_IMAGE_BUCKET,
+    });
+    const files = await bucket
+      .find({ 'metadata.profileSlug': { $in: slugs } })
+      .toArray();
+    for (const file of files) await bucket.delete(file._id);
+    counts.images = files.length;
+    return counts;
+  }
+
   async createProfile(row: Record<string, unknown>) {
     await this.models.SocialProfile.create(row);
   }

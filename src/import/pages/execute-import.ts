@@ -78,6 +78,26 @@ export async function executeImport(
     }
   }
 
+  // Convert every picture BEFORE writing anything: a file the converter
+  // cannot read (a HEIC photo did) must fail the profile with zero writes.
+  const processed = new Map<string, ProcessedImage>();
+  const imagePaths = [
+    ...plan.blocks
+      .filter((block) => block.kind === 'image')
+      .map((block) => block.text),
+    ...plan.images.map((image) => image.path),
+  ];
+  for (const path of imagePaths) {
+    if (processed.has(path)) continue;
+    try {
+      processed.set(path, await processImage(inputs.files.get(path)!));
+    } catch (error) {
+      throw new Error(
+        `Image ${path} could not be converted: ${(error as Error).message}`,
+      );
+    }
+  }
+
   const profileId = new Types.ObjectId();
   const now = inputs.now ?? new Date();
 
@@ -99,10 +119,11 @@ export async function executeImport(
       if (!inlineImageIds.has(block.text)) {
         inlineImageIds.set(
           block.text,
-          await store.storeImage(
-            await processImage(inputs.files.get(block.text)!),
-            { profileSlug: plan.slug, source: block.text, role: 'inline' },
-          ),
+          await store.storeImage(processed.get(block.text)!, {
+            profileSlug: plan.slug,
+            source: block.text,
+            role: 'inline',
+          }),
         );
       }
       text = `image:${inlineImageIds.get(block.text)}`;
@@ -153,10 +174,11 @@ export async function executeImport(
   const imageIds: string[] = [];
   for (const image of plan.images) {
     imageIds.push(
-      await store.storeImage(
-        await processImage(inputs.files.get(image.path)!),
-        { profileSlug: plan.slug, source: image.path, role: image.role },
-      ),
+      await store.storeImage(processed.get(image.path)!, {
+        profileSlug: plan.slug,
+        source: image.path,
+        role: image.role,
+      }),
     );
   }
 

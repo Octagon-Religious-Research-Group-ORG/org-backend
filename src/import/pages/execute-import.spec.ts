@@ -309,6 +309,20 @@ describe('executeImport', () => {
     },
   );
 
+  it('converts every picture before writing anything', async () => {
+    const { store, calls } = memoryStore();
+    const failing = jest.fn((bytes: Uint8Array) =>
+      bytes[0] === 2
+        ? Promise.reject(new Error('heif: unsupported'))
+        : Promise.resolve(processed),
+    );
+
+    await expect(executeImport(plan, inputs, store, failing)).rejects.toThrow(
+      'Image Data/g.jpeg could not be converted: heif: unsupported',
+    );
+    expect(calls).toEqual([]);
+  });
+
   it('never writes the profile when an earlier write fails', async () => {
     const { store, calls } = memoryStore();
     store.createComment = () => Promise.reject(new Error('write failed'));

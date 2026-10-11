@@ -101,10 +101,15 @@ describe('proposeStructure', () => {
       pages([
         dataFile('Data/pasted-image-24.tiff', 900),
         dataFile('Data/IMG_4970-55.jpeg', 500),
-        dataFile('Data/pasted-movie-32.png', 2000),
+        {
+          ...dataFile('Data/pasted-movie-32.png', 2000),
+          sha256: 'n'.repeat(64),
+        },
         dataFile('Data/IMG_4970-small-56.jpeg', 50),
         dataFile('Data/notes.plist', 9999),
       ]),
+      // The navigation tile is in every member's page: template art.
+      { templateSha256: new Set(['n'.repeat(64)]) },
     );
 
     expect(proposal).toEqual({
@@ -417,6 +422,34 @@ describe('checkProposal', () => {
     expect(checkProposal(proposal, doc).reviewFlags).not.toContainEqual(
       expect.stringContaining('dropped: x'),
     );
+  });
+
+  it('never proposes a template picture or a HEIC photo', () => {
+    const template = {
+      ...dataFile('Data/IMG_3087-49.jpeg', 900),
+      sha256: 'a'.repeat(64),
+    };
+    const proposal = proposeStructure(
+      INPUT,
+      doc,
+      pages([
+        template,
+        dataFile('Data/IMG_4500-56.heic', 800),
+        dataFile('Data/me.jpeg', 10),
+      ]),
+      { templateSha256: new Set(['a'.repeat(64)]) },
+    );
+    expect(proposal.images).toEqual({ picture: 'Data/me.jpeg', gallery: [] });
+  });
+
+  it('refuses a HEIC picture chosen by hand', () => {
+    const proposal = valid();
+    proposal.images = { picture: 'Data/x.heic', gallery: [] };
+    expect(
+      checkProposal(proposal, doc, pages([dataFile('Data/x.heic', 1)])).errors,
+    ).toEqual([
+      'Image Data/x.heic is HEIC, which cannot be converted: use the JPEG copy in the .docx (word/media/).',
+    ]);
   });
 
   it('accepts images that exist in the .pages or the .docx', () => {
