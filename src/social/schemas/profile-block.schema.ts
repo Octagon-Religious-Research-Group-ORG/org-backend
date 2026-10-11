@@ -41,6 +41,10 @@ export class ProfileBlock {
   @Prop({ type: String, enum: BLOCK_KINDS, required: true })
   kind: BlockKind;
 
+  /** The belief tab this block belongs to; set only in the beliefs section. */
+  @Prop({ type: String })
+  tabId?: string;
+
   /** Outline label as written, e.g. "II." or "A."; empty when unnumbered. */
   @Prop({ type: String, default: '', maxlength: 20 })
   label: string;
@@ -67,3 +71,16 @@ export const ProfileBlockSchema = SchemaFactory.createForClass(ProfileBlock);
 
 ProfileBlockSchema.index({ blockId: 1 }, { unique: true });
 ProfileBlockSchema.index({ profileId: 1, section: 1, order: 1 });
+ProfileBlockSchema.index(
+  { tabId: 1, order: 1 },
+  { partialFilterExpression: { tabId: { $type: 'string' } } },
+);
+
+ProfileBlockSchema.pre('validate', function () {
+  if (this.tabId && this.section !== 'beliefs') {
+    this.invalidate(
+      'tabId',
+      'Only blocks in the beliefs section belong to a tab.',
+    );
+  }
+});

@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ManagedIndexesService } from './managed-indexes.service';
+import { MANAGED_SCHEMAS } from './managed-schemas';
 
 function model(name: string, toCreate: unknown[] = [], toDrop: unknown[] = []) {
   return {
@@ -13,20 +14,19 @@ function build(mode: string | undefined, missing: unknown[] = []) {
   const config = {
     get: jest.fn((_key: string, fallback: string) => mode ?? fallback),
   };
-  const models = [
-    model('SocialProfile'),
-    model('ProfileBlock'),
-    model('BlockVersion', missing),
-    model('ModerationLogEntry'),
-  ];
+  const byName = new Map(
+    MANAGED_SCHEMAS.map(({ name }) => [
+      name,
+      model(name, name === 'BlockVersion' ? missing : []),
+    ]),
+  );
+  const connection = { model: jest.fn((name: string) => byName.get(name)) };
   const service = new ManagedIndexesService(
     config as never,
-    models[0] as never,
-    models[1] as never,
-    models[2] as never,
-    models[3] as never,
+    connection as never,
   );
-  return { service, models };
+  const models = [...byName.values()];
+  return { service, models, blockVersion: byName.get('BlockVersion')! };
 }
 
 describe('ManagedIndexesService', () => {
@@ -55,21 +55,21 @@ describe('ManagedIndexesService', () => {
   });
 
   it('logs missing indexes as an error in check mode without creating them', async () => {
-    const { service, models } = build('check', [{ blockId: 1, seq: 1 }]);
+    const { service, blockVersion } = build('check', [{ blockId: 1, seq: 1 }]);
 
     await service.onApplicationBootstrap();
 
-    expect(models[2].createIndexes).not.toHaveBeenCalled();
+    expect(blockVersion.createIndexes).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledWith(
       'Managed indexes (check): BlockVersion: 1 missing',
     );
   });
 
   it('creates missing indexes in create mode', async () => {
-    const { service, models } = build('create', [{ blockId: 1, seq: 1 }]);
+    const { service, blockVersion } = build('create', [{ blockId: 1, seq: 1 }]);
 
     await service.onApplicationBootstrap();
 
-    expect(models[2].createIndexes).toHaveBeenCalledTimes(1);
+    expect(blockVersion.createIndexes).toHaveBeenCalledTimes(1);
   });
 });

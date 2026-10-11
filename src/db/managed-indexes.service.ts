@@ -1,16 +1,13 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { InjectConnection } from '@nestjs/mongoose';
+import type { Connection } from 'mongoose';
 import {
   formatIndexOutcome,
   type IndexedModel,
   reconcileIndexes,
 } from './index-setup';
-import { ModerationLogEntry } from '../moderation/schemas/moderation-log.schema';
-import { BlockVersion } from '../social/schemas/block-version.schema';
-import { ProfileBlock } from '../social/schemas/profile-block.schema';
-import { SocialProfile } from '../social/schemas/social-profile.schema';
+import { MANAGED_SCHEMAS } from './managed-schemas';
 
 export type IndexMode = 'check' | 'create';
 
@@ -29,23 +26,16 @@ export class ManagedIndexesService implements OnApplicationBootstrap {
 
   constructor(
     config: ConfigService,
-    @InjectModel(SocialProfile.name) private readonly profiles: Model<unknown>,
-    @InjectModel(ProfileBlock.name) private readonly blocks: Model<unknown>,
-    @InjectModel(BlockVersion.name) private readonly versions: Model<unknown>,
-    @InjectModel(ModerationLogEntry.name)
-    private readonly moderationLog: Model<unknown>,
+    @InjectConnection() private readonly connection: Connection,
   ) {
     this.mode = config.get<IndexMode>('MANAGE_INDEXES', 'check');
   }
 
   async onApplicationBootstrap() {
     const dryRun = this.mode !== 'create';
-    const models: IndexedModel[] = [
-      this.profiles,
-      this.blocks,
-      this.versions,
-      this.moderationLog,
-    ];
+    const models: IndexedModel[] = MANAGED_SCHEMAS.map(({ name }) =>
+      this.connection.model(name),
+    );
     const outcome = await reconcileIndexes(models, { dryRun });
     const lines = formatIndexOutcome(outcome, dryRun);
 

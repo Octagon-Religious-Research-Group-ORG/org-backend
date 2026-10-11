@@ -15,10 +15,7 @@ import {
   formatIndexOutcome,
   reconcileIndexes,
 } from './index-setup';
-import { ModerationLogEntrySchema } from '../moderation/schemas/moderation-log.schema';
-import { BlockVersionSchema } from '../social/schemas/block-version.schema';
-import { ProfileBlockSchema } from '../social/schemas/profile-block.schema';
-import { SocialProfileSchema } from '../social/schemas/social-profile.schema';
+import { MANAGED_SCHEMAS } from './managed-schemas';
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
@@ -42,12 +39,9 @@ async function main(): Promise<number> {
       return 2;
     }
 
-    const models = [
-      connection.model('SocialProfile', SocialProfileSchema),
-      connection.model('ProfileBlock', ProfileBlockSchema),
-      connection.model('BlockVersion', BlockVersionSchema),
-      connection.model('ModerationLogEntry', ModerationLogEntrySchema),
-    ];
+    const models = MANAGED_SCHEMAS.map(({ name, schema }) =>
+      connection.model(name, schema),
+    );
     const outcome = await reconcileIndexes(models, { dryRun });
     for (const line of formatIndexOutcome(outcome, dryRun)) console.warn(line);
     return EXIT_CODES[outcome.status];
