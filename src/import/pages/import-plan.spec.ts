@@ -150,6 +150,7 @@ describe('buildImportPlan', () => {
       displayName: 'Tripp',
       pagesUrl: 'https://www.icloud.com/pages/T',
       visibility: 'public',
+      anonymous: false,
       tabs: [
         {
           tabId: 'tab_7',
@@ -267,6 +268,17 @@ describe('buildImportPlan', () => {
       ],
       unmappedPagesLinks: [],
     });
+  });
+
+  it('carries a nickname profile as anonymous (plan §2b)', () => {
+    const plan = buildImportPlan(
+      { ...proposal, anonymous: true },
+      doc,
+      [],
+      SLUGS,
+      sequentialIds(),
+    );
+    expect(plan.anonymous).toBe(true);
   });
 
   it('ignores a placement paragraph that produced no block, and has default ids', () => {

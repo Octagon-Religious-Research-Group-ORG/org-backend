@@ -1,4 +1,7 @@
 import type { Schema } from 'mongoose';
+import { ConsentRecordSchema } from '../membership/schemas/consent-record.schema';
+import { MemberContactsSchema } from '../membership/schemas/member-contacts.schema';
+import { VisitRecordSchema } from '../membership/schemas/visit-record.schema';
 import { ModerationLogEntrySchema } from '../moderation/schemas/moderation-log.schema';
 import { BeliefTabSchema } from '../social/schemas/belief-tab.schema';
 import { BlockVersionSchema } from '../social/schemas/block-version.schema';
@@ -24,4 +27,7 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'Comment', schema: CommentSchema },
     { name: 'ImportRecord', schema: ImportRecordSchema },
     { name: 'ModerationLogEntry', schema: ModerationLogEntrySchema },
+    { name: 'ConsentRecord', schema: ConsentRecordSchema },
+    { name: 'MemberContacts', schema: MemberContactsSchema },
+    { name: 'VisitRecord', schema: VisitRecordSchema },
   ];

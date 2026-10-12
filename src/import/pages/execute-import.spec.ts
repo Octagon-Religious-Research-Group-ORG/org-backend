@@ -45,6 +45,7 @@ const plan: ImportPlan = {
   displayName: 'Tripp',
   pagesUrl: 'https://www.icloud.com/pages/T',
   visibility: 'public',
+  anonymous: true,
   tabs: [
     { tabId: 'tab_1', title: 'I. God', group: 'Theology', order: 0 },
     { tabId: 'tab_2', title: 'II. Soul', order: 1 },
@@ -238,6 +239,7 @@ describe('executeImport', () => {
       displayName: 'Tripp',
       imageIds: ['img2', 'img3'],
       visibility: 'public',
+      anonymous: true,
       source: 'migrated',
       legacy: {
         pagesUrl: 'https://www.icloud.com/pages/T',

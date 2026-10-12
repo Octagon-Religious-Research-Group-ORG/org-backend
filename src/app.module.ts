@@ -17,6 +17,7 @@ import { OrdersModule } from './orders/orders.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { configureDnsServers } from './config/dns';
 import { ContentModule } from './content/content.module';
+import { MembershipModule } from './membership/membership.module';
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { ContentModule } from './content/content.module';
     OrdersModule,
     ContentModule,
     SocialModule,
+    MembershipModule,
     DbModule,
   ],
   controllers: [AppController],

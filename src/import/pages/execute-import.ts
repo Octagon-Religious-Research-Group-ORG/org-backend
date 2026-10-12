@@ -199,6 +199,7 @@ export async function executeImport(
     displayName: plan.displayName,
     imageIds,
     visibility: plan.visibility,
+    anonymous: plan.anonymous,
     source: 'migrated',
     legacy: { pagesUrl: plan.pagesUrl, importedAt: now },
   });

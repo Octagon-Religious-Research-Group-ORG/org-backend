@@ -18,6 +18,8 @@ export interface ProfileProposal {
   displayName: string;
   pagesUrl: string;
   visibility: ProfileVisibility;
+  /** The member uses a nickname (plan §2b); absent means false. */
+  anonymous?: boolean;
   sections: ProposalSection[];
   tabs: ProposalTab[];
   /** Headings consumed as structure (section titles, category names). */
@@ -57,6 +59,7 @@ export interface ProposalInput {
   displayName: string;
   pagesUrl: string;
   visibility: ProfileVisibility;
+  anonymous?: boolean;
 }
 
 type Kind = 'bio' | 'beliefs' | 'bio-beliefs' | 'contact' | 'legal' | 'other';

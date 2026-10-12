@@ -51,6 +51,7 @@ export interface ImportPlan {
   displayName: string;
   pagesUrl: string;
   visibility: ProfileVisibility;
+  anonymous: boolean;
   tabs: PlannedTab[];
   blocks: PlannedBlock[];
   comments: PlannedComment[];
@@ -247,6 +248,7 @@ export function buildImportPlan(
     displayName: proposal.displayName,
     pagesUrl: proposal.pagesUrl,
     visibility: proposal.visibility,
+    anonymous: proposal.anonymous ?? false,
     tabs,
     blocks,
     comments,

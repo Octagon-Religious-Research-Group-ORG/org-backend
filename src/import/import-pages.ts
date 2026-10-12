@@ -66,6 +66,7 @@ interface ManifestEntry {
   displayName: string;
   pagesUrl: string;
   visibility: ProfileProposal['visibility'];
+  anonymous?: boolean;
   docx: string;
   pages?: string;
 }
@@ -206,6 +207,7 @@ async function main(): Promise<number> {
           displayName: entry.displayName,
           pagesUrl: entry.pagesUrl,
           visibility: entry.visibility,
+          ...(entry.anonymous ? { anonymous: true } : {}),
         },
         loaded.docx,
         loaded.pages,

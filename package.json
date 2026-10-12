@@ -133,7 +133,11 @@
       "products/products.service.ts",
       "profiles/profile.serializer.ts",
       "profiles/profiles.controller.ts",
-      "profiles/profiles.service.ts"
+      "profiles/profiles.service.ts",
+      "membership/membership.service.ts",
+      "membership/membership.controller.ts",
+      "membership/membership-terms.ts",
+      "membership/reserved-slugs.ts"
     ],
     "coverageThreshold": {
       "global": {

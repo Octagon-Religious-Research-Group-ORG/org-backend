@@ -2,14 +2,52 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 
 /**
- * Who can see a profile (plan D4 + §2d):
- * - `public`: everyone, and listed in the directory;
- * - `members`: name visible to everyone, content to signed-in members only;
+ * Who can see a profile (plan D4, §2b D11, §2d), from widest to narrowest:
+ * - `public`: everyone, guests and anyone holding the link included;
+ * - `members`: every member, anonymous members included;
+ * - `named-members`: only members who joined under their own name (Tripp,
+ *   D11: "some members may not want an anonymous member or guest to see
+ *   their page");
  * - `unlisted`: Tripp's "Private" — never listed in the Members Community,
  *   though the member keeps a full timestamped record.
  */
-export const PROFILE_VISIBILITIES = ['public', 'members', 'unlisted'] as const;
+export const PROFILE_VISIBILITIES = [
+  'public',
+  'members',
+  'named-members',
+  'unlisted',
+] as const;
 export type ProfileVisibility = (typeof PROFILE_VISIBILITIES)[number];
+
+/**
+ * - `pending`: a new member's page waiting for an admin (Tripp's approval
+ *   step, plan §2d); shown only to its owner and admins;
+ * - `approved`: shown according to its visibility.
+ * Rows written before this field existed read as approved (schema default).
+ */
+export const PROFILE_REVIEW_STATUSES = ['pending', 'approved'] as const;
+export type ProfileReviewStatus = (typeof PROFILE_REVIEW_STATUSES)[number];
+
+/** How a member can be reached (plan §2d item 4). */
+export const CONTACT_METHODS = [
+  'telegram',
+  'signal',
+  'email',
+  'phone',
+  'other',
+] as const;
+export type ContactMethod = (typeof CONTACT_METHODS)[number];
+
+@Schema({ _id: false })
+export class ContactEntry {
+  @Prop({ type: String, enum: CONTACT_METHODS, required: true })
+  method: ContactMethod;
+
+  @Prop({ type: String, required: true, trim: true, maxlength: 200 })
+  value: string;
+}
+
+export const ContactEntrySchema = SchemaFactory.createForClass(ContactEntry);
 
 export const PROFILE_SOURCES = ['migrated', 'native'] as const;
 export type ProfileSource = (typeof PROFILE_SOURCES)[number];
@@ -57,6 +95,28 @@ export class SocialProfile {
     default: 'members',
   })
   visibility: ProfileVisibility;
+
+  /**
+   * The member uses a nickname rather than their own name (D2; §2b: the
+   * migrated Stalemate, James Karma and Novi start this way). Self-declared.
+   */
+  @Prop({ type: Boolean, default: false })
+  anonymous: boolean;
+
+  @Prop({
+    type: String,
+    enum: PROFILE_REVIEW_STATUSES,
+    required: true,
+    default: 'approved',
+  })
+  reviewStatus: ProfileReviewStatus;
+
+  /**
+   * Contact rows the member chose to show on their page. Admin-only backup
+   * contacts live in `membercontacts`, never here.
+   */
+  @Prop({ type: [ContactEntrySchema], default: [] })
+  contacts: ContactEntry[];
 
   /** Clerk user id of the member who owns the page; absent until claimed. */
   @Prop({ type: String })
