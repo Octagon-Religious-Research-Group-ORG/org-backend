@@ -2,6 +2,7 @@
 import { ConflictException } from '@nestjs/common';
 import { ContentService } from './content.service';
 import { INITIAL_WEBSITE_PAGES } from './initial-content';
+import { WEBSITE_PAGE_IDS } from './content.types';
 
 interface MockQuery<T> {
   lean: () => MockQuery<T>;
@@ -65,7 +66,7 @@ describe('ContentService', () => {
 
     await service.onApplicationBootstrap();
 
-    expect(model.updateOne).toHaveBeenCalledTimes(8);
+    expect(model.updateOne).toHaveBeenCalledTimes(WEBSITE_PAGE_IDS.length);
     for (const update of updates) {
       expect(update).toHaveProperty('$setOnInsert');
       expect(update).not.toHaveProperty('$set');

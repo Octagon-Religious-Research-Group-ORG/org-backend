@@ -7,6 +7,7 @@ export const WEBSITE_PAGE_IDS = [
   'legal',
   'future',
   'donations',
+  'membership',
 ] as const;
 
 export type WebsitePageId = (typeof WEBSITE_PAGE_IDS)[number];
