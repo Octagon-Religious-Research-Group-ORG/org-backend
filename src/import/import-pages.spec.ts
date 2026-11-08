@@ -8,7 +8,11 @@ import { main } from './import-pages';
 import { buildDocx, buildPages, p } from './pages/docx-fixture';
 import { readDocx } from './pages/docx-reader';
 import { MongoImportStore } from './pages/mongo-store';
-import { type ProfileProposal, proposeStructure } from './pages/proposal';
+import {
+  type ProfileProposal,
+  proposalSha256,
+  proposeStructure,
+} from './pages/proposal';
 
 jest.mock('./pages/mongo-store');
 jest.mock('../db/index-setup');
@@ -140,10 +144,33 @@ describe('import:pages database guard (the CLI itself)', () => {
         status: string;
         profiles: { slug: string; reasons: string[] }[];
       };
-    const sha = (slug: string) =>
+    const fileSha = (name: string) =>
       createHash('sha256')
-        .update(readFileSync(join(dir, `${slug}.docx`)))
+        .update(readFileSync(join(dir, name)))
         .digest('hex');
+    const proposalOf = (slug: string) =>
+      JSON.parse(
+        readFileSync(join(dir, `${slug}.proposal.json`), 'utf8'),
+      ) as ProfileProposal;
+    const bindingOf = (slug: string) => ({
+      sourceSha256: fileSha(`${slug}.docx`),
+      pagesSha256: fileSha(`${slug}.pages`),
+      proposalSha256: proposalSha256(proposalOf(slug)),
+    });
+    /** Records a sound review of the profile exactly as it now stands. */
+    const review = (slug: string, extra: object = {}) => {
+      const proposal = proposalOf(slug);
+      proposal.reviewed = {
+        by: 'Sam',
+        at: '2026-11-08T10:00:00Z',
+        ...bindingOf(slug),
+        ...extra,
+      };
+      writeFileSync(
+        join(dir, `${slug}.proposal.json`),
+        JSON.stringify(proposal),
+      );
+    };
 
     /** A store that keeps rows in memory; `createConnection` is faked. */
     function memoryStore() {
@@ -290,8 +317,15 @@ describe('import:pages database guard (the CLI itself)', () => {
         'blocks a review that is %s, saying how to fix it',
         async (_n, reviewed) => {
           writeMembers([flagged(reviewed)]);
-          await refusesInDryRun('Re-review the profile against its .docx');
-          expect(reportJson().profiles[0].reasons[0]).toContain(sha('alpha'));
+          await refusesInDryRun('Review is void');
+          const reasons = reportJson().profiles[0].reasons.join(' ');
+          expect(reasons).toContain('set "reviewed" in its proposal to');
+          expect(reasons).toContain(bindingOf('alpha').sourceSha256);
+          expect(reasons).toContain(bindingOf('alpha').pagesSha256);
+          expect(reasons).toContain(bindingOf('alpha').proposalSha256);
+          expect(console.error).toHaveBeenCalledWith(
+            expect.stringContaining('set "reviewed" in its proposal to'),
+          );
         },
       );
 
@@ -306,20 +340,65 @@ describe('import:pages database guard (the CLI itself)', () => {
         await refusesInDryRun('the .docx has changed since this review');
       });
 
-      it('accepts a review tied to the document as it is', async () => {
+      it('accepts a review tied to what would be imported', async () => {
         writeMembers([flagged(undefined)]);
-        const path = join(dir, 'alpha.proposal.json');
-        const proposal = JSON.parse(
-          readFileSync(path, 'utf8'),
-        ) as ProfileProposal;
-        proposal.reviewed = {
-          by: 'Sam',
-          at: '2026-11-08T10:00:00Z',
-          sourceSha256: sha('alpha'),
-        };
-        writeFileSync(path, JSON.stringify(proposal));
+        review('alpha');
 
         await expect(run('--dry-run')).resolves.toBe(0);
+      });
+
+      it('voids a review when the .pages changes afterwards', async () => {
+        writeMembers([flagged(undefined)]);
+        review('alpha');
+        writeFileSync(join(dir, 'alpha.pages'), buildPages('', '\u0000'));
+
+        await refusesInDryRun('the .pages has changed since this review');
+      });
+
+      it('voids a review when a belief is moved to dropped afterwards', async () => {
+        writeMembers([flagged(undefined)]);
+        review('alpha');
+        const proposal = proposalOf('alpha');
+        const moved = proposal.tabs.pop()!;
+        proposal.dropped.push({ paragraphs: moved.paragraphs, reason: 'x' });
+        writeFileSync(
+          join(dir, 'alpha.proposal.json'),
+          JSON.stringify(proposal),
+        );
+
+        await refusesInDryRun('the proposal has changed since this review');
+      });
+
+      describe('reader warnings', () => {
+        const footnote = member(
+          'alpha',
+          '<w:p><w:r><w:t>II. a</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>',
+        );
+        const warning =
+          'Paragraph 4: a footnote or endnote cannot be imported.';
+
+        it('blocks an unnamed warning, printing the text to add', async () => {
+          writeMembers([footnote]);
+          await refusesInDryRun('.docx reader warning(s)');
+          expect(reportJson().profiles[0].reasons.join(' ')).toContain(
+            `"acceptedWarnings":["${warning}"]`,
+          );
+        });
+
+        it('accepts a warning named by a review of this exact source', async () => {
+          writeMembers([footnote]);
+          review('alpha', { acceptedWarnings: [warning] });
+          await expect(run('--dry-run')).resolves.toBe(0);
+        });
+
+        it('still blocks a warning named by a void review', async () => {
+          writeMembers([footnote]);
+          review('alpha', {
+            acceptedWarnings: [warning],
+            sourceSha256: 'b'.repeat(64),
+          });
+          await refusesInDryRun('.docx reader warning(s)');
+        });
       });
     });
 
@@ -344,20 +423,11 @@ describe('import:pages database guard (the CLI itself)', () => {
             p('I. MEMBER_BELIEF_MARKER') +
             p('Legal', H2) +
             p('A LEGAL_SECTION_MARKER'),
-          edit: (proposal) => {
-            proposal.reviewed = { by: 'S', at: '2026-11-08' };
-          },
         },
       ]);
       connectTo('org-testing');
       const store = memoryStore();
-      // The review is rewritten once the document's hash is known.
-      const path = join(dir, 'alpha.proposal.json');
-      const proposal = JSON.parse(
-        readFileSync(path, 'utf8'),
-      ) as ProfileProposal;
-      proposal.reviewed!.sourceSha256 = sha('alpha');
-      writeFileSync(path, JSON.stringify(proposal));
+      review('alpha');
 
       await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
 

@@ -1,7 +1,11 @@
-import type { DocxDocument } from './docx-reader';
+import { type DocxDocument, warningParagraph } from './docx-reader';
 import type { ImportPlan } from './import-plan';
 import type { CheckStatus, CrossCheck } from './pages-reader';
-import type { ProposalCheck } from './proposal';
+import {
+  type ProposalCheck,
+  type ReviewBinding,
+  reviewInstruction,
+} from './proposal';
 
 export interface ProfileReport {
   slug: string;
@@ -27,6 +31,10 @@ export interface ProfileReport {
   unplacedComments: { commentId: string; reason: string }[];
   crossCheck?: CrossCheck;
   readerWarnings: string[];
+  /** Reader warnings that only concern dropped Legal paragraphs; they do not block. */
+  warningsInLegal: string[];
+  /** Exact texts a reviewer may name in `reviewed.acceptedWarnings`. */
+  acceptableWarnings: string[];
   proposalErrors: string[];
   unmappedPagesLinks: string[];
   /** Addresses removed as unsafe; the visible text of each link is kept. */
@@ -40,10 +48,33 @@ export interface ProfileReport {
   legalDropped: ProposalCheck['legalDropped'];
 }
 
+export interface ReportOptions {
+  reviewProblems?: string[];
+  preflightErrors?: string[];
+  /** Current hashes, so the block message can say exactly what to add. */
+  binding?: ReviewBinding;
+  /** From a valid review only; ignored unless `reviewed` is true. */
+  acceptedWarnings?: string[];
+}
+
+/** Author problems a person may accept, one exact text for each. */
+function authorWarnings(crossCheck: CrossCheck): string[] {
+  if (crossCheck.authors.status === 'cannot-measure') {
+    return [
+      'The .pages has no comment-author table, so comment authors could not be checked.',
+    ];
+  }
+  return crossCheck.authors.missing.map(
+    (author) => `Comment author "${author}" is not in the .pages author table.`,
+  );
+}
+
 /**
  * Summarises one profile's import checks. A profile is `ok` only when every
  * check ran and passed; an unplaced comment is NOT a failure (it is placed on
- * the profile with its reason, and listed here), everything else is.
+ * the profile with its reason, and listed here), everything else is. Reader
+ * warnings and author differences can be accepted by a valid review that
+ * names them; a comment missing from the .pages can never be.
  */
 export function buildProfileReport(
   slug: string,
@@ -52,15 +83,19 @@ export function buildProfileReport(
   plan: ImportPlan | undefined,
   crossCheck: CrossCheck | undefined,
   reviewed = false,
-  reviewProblems: string[] = [],
-  preflightErrors: string[] = [],
+  options: ReportOptions = {},
 ): ProfileReport {
+  const { reviewProblems = [], preflightErrors = [] } = options;
   const reasons: string[] = [...reviewProblems];
   if (preflightErrors.length > 0) {
     reasons.push(`${preflightErrors.length} row or picture check(s) failed`);
   }
   const reviewFlags = [...check.reviewFlags];
-  if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
+  if (crossCheck?.commentsLost) {
+    reviewFlags.push(
+      `The .docx has no comments, but the .pages names comment author(s): ${crossCheck.authors.pagesOnly.join(', ')}. Confirm no comments were lost.`,
+    );
+  } else if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
     reviewFlags.push(
       `The .pages names author(s) with no comment in the .docx, so comments may be lost: ${crossCheck.authors.pagesOnly.join(', ')}.`,
     );
@@ -78,20 +113,52 @@ export function buildProfileReport(
   if (check.errors.length > 0) {
     reasons.push(`${check.errors.length} proposal error(s)`);
   }
-  if (docx.warnings.length > 0) {
-    reasons.push(`${docx.warnings.length} .docx reader warning(s)`);
+  const legal = new Set(check.legalParagraphs);
+  const warningsInLegal = docx.warnings.filter((warning) =>
+    legal.has(warningParagraph(warning) ?? -1),
+  );
+  const warnings = docx.warnings.filter(
+    (warning) => !warningsInLegal.includes(warning),
+  );
+  const accepted = new Set(reviewed ? (options.acceptedWarnings ?? []) : []);
+  const pendingWarnings = warnings.filter((w) => !accepted.has(w));
+  if (pendingWarnings.length > 0) {
+    reasons.push(`${pendingWarnings.length} .docx reader warning(s)`);
   }
-  if (crossCheck?.status === 'mismatch') {
+
+  const authorIssues = crossCheck ? authorWarnings(crossCheck) : [];
+  const pendingAuthors = authorIssues.filter((w) => !accepted.has(w));
+  const hardMismatch =
+    (crossCheck?.comments.missing.length ?? 0) > 0 ||
+    (crossCheck?.status === 'mismatch' && authorIssues.length === 0);
+  if (
+    hardMismatch ||
+    (crossCheck?.authors.status === 'mismatch' && pendingAuthors.length > 0)
+  ) {
     reasons.push('.pages cross-check found differences');
   }
 
+  const crossMeasured =
+    crossCheck?.status === 'ok' ||
+    (authorIssues.length > 0 && pendingAuthors.length === 0);
   let status: CheckStatus = reasons.length > 0 ? 'mismatch' : 'ok';
-  if (status === 'ok' && crossCheck?.status !== 'ok') {
+  if (status === 'ok' && !crossMeasured) {
     status = 'cannot-measure';
     reasons.push(
       crossCheck
         ? '.pages has no comment-author table'
         : 'no .pages file to cross-check against',
+    );
+  }
+
+  const reviewCanFix =
+    reviewProblems.length > 0 ||
+    (reviewFlags.length > 0 && !reviewed) ||
+    pendingWarnings.length > 0 ||
+    pendingAuthors.length > 0;
+  if (reviewCanFix && options.binding) {
+    reasons.push(
+      reviewInstruction(options.binding, [...warnings, ...authorIssues]),
     );
   }
 
@@ -117,6 +184,8 @@ export function buildProfileReport(
       .map((p) => ({ commentId: p.commentId, reason: p.unplaced! })),
     ...(crossCheck ? { crossCheck } : {}),
     readerWarnings: docx.warnings,
+    warningsInLegal,
+    acceptableWarnings: [...new Set([...warnings, ...authorIssues])],
     proposalErrors: check.errors,
     unmappedPagesLinks: plan?.unmappedPagesLinks ?? [],
     unsafeLinks: plan?.unsafeLinks ?? [],

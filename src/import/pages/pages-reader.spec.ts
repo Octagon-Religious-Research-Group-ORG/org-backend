@@ -292,10 +292,29 @@ describe('crossCheck', () => {
     });
   });
 
-  it('calls no comments against a named author table a mismatch', () => {
+  it('notes no comments against a named author table without refusing', () => {
     const result = crossCheck(docx([]), pages('x', 'Someone'));
     expect(result.commentsLost).toBe(true);
-    expect(result.status).toBe('mismatch');
+    expect(result.status).toBe('ok');
+  });
+
+  it('removes a printable length byte from a name of 32 characters or more', () => {
+    const name = 'A Very Long Member Name Of Many Words';
+    const length = String.fromCharCode(name.length);
+    const result = crossCheck(
+      docx([comment('1', name, 'x')]),
+      pages('x', `\u0000\n${length}${name}\u0012`),
+    );
+    expect(result.authors.status).toBe('ok');
+    expect(result.authors.missing).toEqual([]);
+  });
+
+  it('keeps a name whose first letter only looks like a length byte', () => {
+    const result = crossCheck(
+      docx([comment('1', 'Sam', 'x')]),
+      pages('x', 'Sam'),
+    );
+    expect(result.authors.missing).toEqual([]);
   });
 
   it('accepts no comments against an empty author table', () => {

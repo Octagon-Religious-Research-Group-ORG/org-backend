@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from 'fflate';
 import { buildDocx, numbered, p } from './docx-fixture';
 import { formatNumber } from './docx-numbering';
-import { legacyDate, readDocx } from './docx-reader';
+import { legacyDate, readDocx, warningParagraph } from './docx-reader';
 
 const STYLES =
   '<w:style w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>' +
@@ -291,6 +291,32 @@ describe('readDocx', () => {
       ]);
     });
 
+    it('does not warn about the numbering of an empty paragraph', () => {
+      const doc = readDocx(
+        buildDocx({
+          styles:
+            '<w:style w:styleId="List"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>',
+          body:
+            '<w:p><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr></w:p>' +
+            '<w:p><w:pPr><w:pStyle w:val="List"/></w:pPr><w:r><w:t xml:space="preserve">  </w:t></w:r></w:p>',
+        }),
+      );
+      expect(doc.warnings).toEqual([]);
+    });
+
+    it('warns about a numbered paragraph that holds only a picture', () => {
+      const doc = readDocx(
+        buildDocx({
+          rels: '<Relationship Id="R" Target="media/a.png"/>',
+          media: { 'word/media/a.png': new Uint8Array([1]) },
+          body: '<w:p><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr><w:r><w:drawing><a:blip r:embed="R"/></w:drawing></w:r></w:p>',
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Paragraph 0: list 7 level 0 is not defined in numbering.xml.',
+      ]);
+    });
+
     it('warns instead of guessing when a list is undefined', () => {
       const doc = readDocx(
         buildDocx({ body: numbered('x', '7', 0) + p('y', '<w:numPr/>') }),
@@ -488,6 +514,15 @@ describe('readDocx', () => {
       expect(doc.warnings).toEqual([
         'A reply in commentsExtended.xml points at a comment that does not exist (X1).',
       ]);
+    });
+  });
+
+  describe('warningParagraph', () => {
+    it.each([
+      ['Paragraph 12: anything', 12],
+      ['Comment 1: its date is not a valid date.', undefined],
+    ])('reads %p', (warning, expected) => {
+      expect(warningParagraph(warning)).toBe(expected);
     });
   });
 

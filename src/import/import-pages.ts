@@ -57,7 +57,9 @@ import {
   checkProposal,
   isLegalDrop,
   type ProfileProposal,
+  proposalSha256,
   proposeStructure,
+  type ReviewBinding,
   reviewProblems,
 } from './pages/proposal';
 import {
@@ -266,7 +268,12 @@ export async function main(): Promise<number> {
     }
     const proposal = JSON.parse(readFileSync(path, 'utf8')) as ProfileProposal;
     const check = checkProposal(proposal, loaded.docx, loaded.pages);
-    const voidReview = reviewProblems(proposal, loaded.sources[0].sha256);
+    const binding: ReviewBinding = {
+      sourceSha256: loaded.sources[0].sha256,
+      pagesSha256: loaded.sources[1]?.sha256 ?? 'none',
+      proposalSha256: proposalSha256(proposal),
+    };
+    const voidReview = reviewProblems(proposal, binding);
     const plan =
       check.errors.length === 0
         ? buildImportPlan(
@@ -295,8 +302,12 @@ export async function main(): Promise<number> {
       plan,
       loaded.pages ? crossCheck(loaded.docx, loaded.pages) : undefined,
       proposal.reviewed !== undefined && voidReview.length === 0,
-      voidReview,
-      preflightErrors,
+      {
+        reviewProblems: voidReview,
+        preflightErrors,
+        binding,
+        acceptedWarnings: proposal.reviewed?.acceptedWarnings,
+      },
     );
     prepared.push({ loaded, proposal, plan, report, extracted });
   }
@@ -304,6 +315,11 @@ export async function main(): Promise<number> {
   const reports = prepared.map((item) => item.report);
   const status = writeReports(dir, reports, { mode: 'check' });
   console.warn(`Checks: ${status}. Report: ${join(dir, 'import-report.md')}`);
+  for (const report of reports) {
+    for (const reason of report.reasons) {
+      console.error(`${report.slug}: ${reason}`);
+    }
+  }
   if (args.includes('--dry-run') || status !== 'ok') {
     return EXIT[status];
   }

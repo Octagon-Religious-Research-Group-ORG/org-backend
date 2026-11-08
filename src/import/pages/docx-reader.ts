@@ -70,6 +70,12 @@ interface FieldState {
 
 const HYPERLINK_INSTR = /^\s*HYPERLINK\s+(?:\\l\s+)?"([^"]*)"/;
 
+/** The paragraph a warning is about, or undefined for a whole-document one. */
+export function warningParagraph(warning: string): number | undefined {
+  const match = /^Paragraph (\d+):/.exec(warning);
+  return match ? Number(match[1]) : undefined;
+}
+
 /** Block-level containers whose paragraphs are not part of the document. */
 const NOT_CONTENT = new Set(['w:sectPr', 'w:del', 'w:moveFrom']);
 
@@ -149,10 +155,12 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
 
     const numPr = firstChild(pPr, 'w:numPr');
     const numId = attr(firstChild(numPr, 'w:numId'), 'w:val');
+    // Held until the paragraph is read: an empty numbered line loses nothing.
+    const numberingWarnings: string[] = [];
     if (numId === undefined && numberedStyles.has(styleId)) {
       // The label cannot be worked out here, and a belief outline without its
       // labels splits wrongly: stop and look rather than import it label-less.
-      warnings.push(
+      numberingWarnings.push(
         `Paragraph ${index}: numbering comes from its style, which is not supported.`,
       );
     }
@@ -160,7 +168,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
       const level = Number(attr(firstChild(numPr, 'w:ilvl'), 'w:val') ?? 0);
       const label = numbering.next(numId, level);
       if (label === undefined) {
-        warnings.push(
+        numberingWarnings.push(
           `Paragraph ${index}: list ${numId} level ${level} is not defined in numbering.xml.`,
         );
       } else {
@@ -330,6 +338,9 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
       }
     };
     walk(p);
+    if (paragraph.text.trim() !== '' || paragraph.images.length > 0) {
+      warnings.push(...numberingWarnings);
+    }
     if (leadingImages > 0 && paragraph.text.trim() !== '') {
       paragraph.leadingImages = leadingImages;
     }

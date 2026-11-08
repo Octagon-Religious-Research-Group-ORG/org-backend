@@ -7,7 +7,9 @@ import {
   LEGAL_REVIEW_CHARACTERS,
   LEGAL_REVIEW_PARAGRAPHS,
   type ProfileProposal,
+  proposalSha256,
   proposeStructure,
+  reviewInstruction,
   reviewProblems,
   romanValue,
 } from './proposal';
@@ -641,37 +643,104 @@ describe('proposeStructure', () => {
   });
 });
 
+describe('proposalSha256', () => {
+  const content = {
+    version: 1,
+    slug: 'a',
+    tabs: [{ title: 'x', paragraphs: [1] }],
+    dropped: [],
+  } as unknown as ProfileProposal;
+
+  it('ignores the review and the order of keys', () => {
+    const reordered = {
+      dropped: [],
+      tabs: [{ paragraphs: [1], title: 'x' }],
+      slug: 'a',
+      version: 1,
+      reviewed: { by: 'Sam', at: 'x' },
+    } as unknown as ProfileProposal;
+    expect(proposalSha256(reordered)).toBe(proposalSha256(content));
+  });
+
+  it('changes when a belief is moved', () => {
+    expect(
+      proposalSha256({
+        ...content,
+        tabs: [],
+        dropped: [{ paragraphs: [1], reason: 'x' }],
+      } as unknown as ProfileProposal),
+    ).not.toBe(proposalSha256(content));
+  });
+});
+
+describe('reviewInstruction', () => {
+  it('prints the values to paste, listing each warning once', () => {
+    const text = reviewInstruction(
+      { sourceSha256: 's', pagesSha256: 'p', proposalSha256: 'r' },
+      ['w', 'w'],
+    );
+    expect(text).toContain(
+      '{"by":"<your name>","at":"<ISO date>","sourceSha256":"s","pagesSha256":"p","proposalSha256":"r","acceptedWarnings":["w"]}',
+    );
+  });
+});
+
 describe('reviewProblems', () => {
-  const SHA = 'a'.repeat(64);
+  const binding = {
+    sourceSha256: 'a'.repeat(64),
+    pagesSha256: 'b'.repeat(64),
+    proposalSha256: 'c'.repeat(64),
+  };
   const proposal = (reviewed: unknown): ProfileProposal =>
     ({ reviewed }) as ProfileProposal;
-  const good = { by: 'Sam', at: '2026-11-08T10:00:00Z', sourceSha256: SHA };
+  const good = { by: 'Sam', at: '2026-11-08T10:00:00Z', ...binding };
 
   it('has nothing to say about a proposal with no review, or a sound one', () => {
-    expect(reviewProblems(proposal(undefined), SHA)).toEqual([]);
-    expect(reviewProblems(proposal(good), SHA)).toEqual([]);
+    expect(reviewProblems(proposal(undefined), binding)).toEqual([]);
+    expect(reviewProblems(proposal(good), binding)).toEqual([]);
+    expect(
+      reviewProblems(
+        proposal({ ...good, acceptedWarnings: ['Paragraph 1: x'] }),
+        binding,
+      ),
+    ).toEqual([]);
   });
 
   it.each([
     [
       'null',
       null,
-      '"by" is empty; "at" is not a valid date; it has no "sourceSha256"',
+      '"by" is empty; "at" is not a valid date; it has no "sourceSha256"; it has no "pagesSha256"; it has no "proposalSha256"',
     ],
     ['empty by', { ...good, by: '  ' }, '"by" is empty'],
     ['non-text by', { ...good, by: 3 }, '"by" is empty'],
     ['bad at', { ...good, at: 'yesterday' }, '"at" is not a valid date'],
     ['non-text at', { ...good, at: 3 }, '"at" is not a valid date'],
-    ['no hash', { by: 'Sam', at: good.at }, 'it has no "sourceSha256"'],
     [
-      'stale',
-      { ...good, sourceSha256: 'b'.repeat(64) },
-      'the .docx has changed',
+      'no hashes',
+      { by: 'Sam', at: good.at },
+      'it has no "sourceSha256"; it has no "pagesSha256"; it has no "proposalSha256"',
     ],
-  ])('voids a review with %s, saying how to fix it', (_n, reviewed, reason) => {
-    const [problem] = reviewProblems(proposal(reviewed), SHA);
+    ['changed .docx', { ...good, sourceSha256: 'x' }, 'the .docx has changed'],
+    ['changed .pages', { ...good, pagesSha256: 'x' }, 'the .pages has changed'],
+    [
+      'changed proposal',
+      { ...good, proposalSha256: 'x' },
+      'the proposal has changed',
+    ],
+    [
+      'accepted warnings not a list',
+      { ...good, acceptedWarnings: 'w' },
+      '"acceptedWarnings" is not a list',
+    ],
+    [
+      'accepted warnings not text',
+      { ...good, acceptedWarnings: [3] },
+      '"acceptedWarnings" is not a list',
+    ],
+  ])('voids a review with %s', (_n, reviewed, reason) => {
+    const [problem] = reviewProblems(proposal(reviewed), binding);
     expect(problem).toContain(`Review is void: ${reason}`);
-    expect(problem).toContain(`"sourceSha256": "${SHA}"`);
   });
 });
 

@@ -102,10 +102,29 @@ const NO_AUTHOR = '(no author)';
 /** Control and undecodable bytes: what separates the strings in an .iwa table. */
 const NOT_TEXT = /[\p{Cc}\ufffd]+/u;
 
+/**
+ * A protobuf string is preceded by its byte length. Up to 31 bytes that length
+ * is a control character and falls away with the separators; from 32 it is a
+ * printable character stuck to the name, so it is removed where it is exactly
+ * the length of what follows (no real name begins with its own byte count).
+ */
+function withoutLengthByte(segment: string): string {
+  const rest = segment.slice(1);
+  return segment.charCodeAt(0) === new TextEncoder().encode(rest).length
+    ? rest
+    : segment;
+}
+
 /** Separates the author table into whole names, so "Ann" cannot match "Ann Lee". */
 function tableStrings(authorText: string): string[] {
   return [
-    ...new Set(authorText.split(NOT_TEXT).map(normalise).filter(Boolean)),
+    ...new Set(
+      authorText
+        .split(NOT_TEXT)
+        .map(withoutLengthByte)
+        .map(normalise)
+        .filter(Boolean),
+    ),
   ];
 }
 
@@ -122,11 +141,11 @@ function looksLikeName(text: string): boolean {
  *
  * This proves the .docx has nothing the .pages lacks. The reverse is only
  * partly checkable: the .iwa is an undocumented protobuf, so comments in the
- * .pages cannot be counted without guessing its format. What IS checked: a
- * .docx with no comments against a .pages with named authors (a mismatch), and
- * any author in the .pages with no comment in the .docx (`pagesOnly`, for a
- * person to look at, because deleted comments can leave an author behind). A
- * lost comment by an author who has another comment remains invisible here.
+ * .pages cannot be counted without guessing its format. What IS checked: any
+ * author in the .pages with no comment in the .docx (`pagesOnly`, and
+ * `commentsLost` when the .docx has none at all), for a person to look at,
+ * because deleted comments can leave an author behind. A lost comment by an
+ * author who has another comment remains invisible here.
  */
 export function crossCheck(
   docx: DocxDocument,
@@ -181,7 +200,6 @@ export function crossCheck(
       pagesOnly: names.filter((name) => !authors.includes(name)).sort(),
     },
     commentsLost,
-    status:
-      missingComments.length > 0 || commentsLost ? 'mismatch' : authorStatus,
+    status: missingComments.length > 0 ? 'mismatch' : authorStatus,
   };
 }

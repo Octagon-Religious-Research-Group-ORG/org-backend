@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { BlockSection } from '../../social/schemas/profile-block.schema';
 import type { ProfileVisibility } from '../../social/schemas/social-profile.schema';
 import { SLUG_PATTERN } from '../../social/schemas/social-profile.schema';
@@ -31,15 +32,26 @@ export interface ProfileProposal {
   /**
    * Set by the person who checked this proposal against the document. A
    * proposal with review flags (see `checkProposal`) is not imported without
-   * it. `sourceSha256` ties the review to the exact .docx that was read, so a
-   * changed document voids it; see `reviewProblems`.
+   * it. The hashes tie the review to exactly what was read (see
+   * `ReviewBinding`), so changing any of them voids it. `acceptedWarnings`
+   * names, word for word, each warning the reviewer has looked at and accepts.
    */
   reviewed?: {
     by: string;
     at: string;
     note?: string;
     sourceSha256?: string;
+    pagesSha256?: string;
+    proposalSha256?: string;
+    acceptedWarnings?: string[];
   };
+}
+
+/** What a review was done against. No .pages file is recorded as `none`. */
+export interface ReviewBinding {
+  sourceSha256: string;
+  pagesSha256: string;
+  proposalSha256: string;
 }
 
 /** A tab longer than this is probably several beliefs (one belief per tab, §2c). */
@@ -495,15 +507,52 @@ function analyseStructure(
   return { proposal, splitNotes };
 }
 
+/** The same value always serialises the same way, whatever the key order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Hash of a proposal's own content, leaving out `reviewed`, which records the
+ * hash. Moving a belief to `dropped` after a review changes it.
+ */
+export function proposalSha256(proposal: ProfileProposal): string {
+  const { reviewed: _reviewed, ...content } = proposal;
+  return createHash('sha256').update(canonicalJson(content)).digest('hex');
+}
+
+/** What to add to the proposal, ready to paste, with the current values. */
+export function reviewInstruction(
+  binding: ReviewBinding,
+  acceptedWarnings: string[],
+): string {
+  const entry = {
+    by: '<your name>',
+    at: '<ISO date>',
+    ...binding,
+    acceptedWarnings: [...new Set(acceptedWarnings)],
+  };
+  return `After checking this profile against its .docx and .pages, set "reviewed" in its proposal to: ${JSON.stringify(entry)}`;
+}
+
 /**
  * Why a proposal's `reviewed` entry cannot be trusted, or [] when it can (or
  * when there is none, which `buildProfileReport` handles separately). A
- * review must name who and when, and the exact .docx it was done against: a
- * review of a document that has since changed reviewed something else.
+ * review must name who and when, and exactly what it was done against: the
+ * .docx, the .pages and the proposal itself. Changing any of them means what
+ * was reviewed is no longer what would be imported.
  */
 export function reviewProblems(
   proposal: ProfileProposal,
-  docxSha256: string,
+  binding: ReviewBinding,
 ): string[] {
   if (proposal.reviewed === undefined) return [];
   const review = proposal.reviewed as Partial<
@@ -516,15 +565,28 @@ export function reviewProblems(
   if (typeof review?.at !== 'string' || !legacyDate(review.at)) {
     problems.push('"at" is not a valid date');
   }
-  if (review?.sourceSha256 === undefined) {
-    problems.push('it has no "sourceSha256"');
-  } else if (review.sourceSha256 !== docxSha256) {
-    problems.push('the .docx has changed since this review');
-  }
-  if (problems.length === 0) return [];
-  return [
-    `Review is void: ${problems.join('; ')}. Re-review the profile against its .docx, then set "reviewed" to {"by": "<your name>", "at": "<ISO date>", "sourceSha256": "${docxSha256}"}.`,
+  const bound: [keyof ReviewBinding, string][] = [
+    ['sourceSha256', 'the .docx'],
+    ['pagesSha256', 'the .pages'],
+    ['proposalSha256', 'the proposal'],
   ];
+  for (const [key, label] of bound) {
+    if (review?.[key] === undefined) {
+      problems.push(`it has no "${key}"`);
+    } else if (review[key] !== binding[key]) {
+      problems.push(`${label} has changed since this review`);
+    }
+  }
+  const accepted = review?.acceptedWarnings;
+  if (
+    accepted !== undefined &&
+    !(Array.isArray(accepted) && accepted.every((w) => typeof w === 'string'))
+  ) {
+    problems.push('"acceptedWarnings" is not a list of warnings');
+  }
+  return problems.length === 0
+    ? []
+    : [`Review is void: ${problems.join('; ')}.`];
 }
 
 export interface CommentPlacement {
@@ -552,6 +614,8 @@ export interface ProposalCheck {
   reviewFlags: string[];
   /** Size of what was left out as the Legal section, always reported. */
   legalDropped: { paragraphs: number; characters: number };
+  /** Paragraphs left out as Legal; a reader warning inside them loses nothing. */
+  legalParagraphs: number[];
 }
 
 /**
@@ -836,5 +900,11 @@ export function checkProposal(
     }
   }
 
-  return { errors, placements, reviewFlags, legalDropped };
+  return {
+    errors,
+    placements,
+    reviewFlags,
+    legalDropped,
+    legalParagraphs: [...legalParagraphs],
+  };
 }
