@@ -42,6 +42,36 @@ function isDuplicateKeyError(error: unknown) {
   );
 }
 
+type OrderSource = OrderDocument | (Order & { _id: unknown });
+
+/**
+ * A member's own order as the website reads it. An allowlist, so a field added
+ * to the schema stays private by default; `ownerSub` (the Clerk id), the
+ * idempotency key and the email delivery state never leave the server.
+ */
+export function toMemberOrder(order: OrderSource) {
+  const source =
+    'toObject' in order ? order.toObject<Order & { _id: unknown }>() : order;
+  return {
+    _id: source._id,
+    orderNumber: source.orderNumber,
+    donationMemo: source.donationMemo,
+    items: source.items,
+    contact: source.contact,
+    shippingAddress: source.shippingAddress,
+    suggestedItemsCents: source.suggestedItemsCents,
+    suggestedShippingCents: source.suggestedShippingCents,
+    suggestedTotalCents: source.suggestedTotalCents,
+    declaredDonationCents: source.declaredDonationCents,
+    status: source.status,
+    statusHistory: source.statusHistory,
+    donationReport: source.donationReport,
+    trackingNumber: source.trackingNumber,
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt,
+  };
+}
+
 @Injectable()
 export class OrdersService {
   constructor(
@@ -63,6 +93,14 @@ export class OrdersService {
     idempotencyKey: string,
     input: CreateOrderDto,
   ) {
+    return toMemberOrder(await this.place(ownerSub, idempotencyKey, input));
+  }
+
+  private async place(
+    ownerSub: string,
+    idempotencyKey: string,
+    input: CreateOrderDto,
+  ): Promise<OrderDocument> {
     if (!idempotencyKey?.trim()) {
       throw new BadRequestException('Idempotency-Key header is required.');
     }
@@ -157,12 +195,13 @@ export class OrdersService {
     return order;
   }
 
-  listForMember(ownerSub: string) {
-    return this.orderModel
+  async listForMember(ownerSub: string) {
+    const orders = await this.orderModel
       .find({ ownerSub })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
+    return orders.map(toMemberOrder);
   }
 
   async findForMember(ownerSub: string, id: string) {
@@ -171,7 +210,7 @@ export class OrdersService {
       .lean()
       .exec();
     if (!order) throw new NotFoundException('Order not found.');
-    return order;
+    return toMemberOrder(order);
   }
 
   async reportDonation(ownerSub: string, id: string, input: ReportDonationDto) {
@@ -196,7 +235,7 @@ export class OrdersService {
       });
     }
     await order.save();
-    return order;
+    return toMemberOrder(order);
   }
 
   listForAdmin(status?: OrderStatus) {

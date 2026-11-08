@@ -4,7 +4,11 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { OrdersService, isOrderTransitionAllowed } from './orders.service';
+import {
+  OrdersService,
+  isOrderTransitionAllowed,
+  toMemberOrder,
+} from './orders.service';
 
 function query<T>(value: T) {
   const chain = {
@@ -59,7 +63,7 @@ function cartSummary(items: unknown[] = [{ productSlug: 'mesh-tool' }]) {
 
 function order(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
-    id: 'order-1',
+    _id: 'order-1',
     orderNumber: 'ORG-20260723-ABC123',
     donationMemo: 'ORG ORDER ORG-20260723-ABC123',
     contact: {
@@ -159,7 +163,7 @@ describe('OrdersService.create', () => {
 
     await expect(
       serviceOf(deps).create('user_member', 'key-1', {}),
-    ).resolves.toBe(prior);
+    ).resolves.toEqual(toMemberOrder(prior as never));
     expect(deps.profiles.getDocument).not.toHaveBeenCalled();
   });
 
@@ -199,7 +203,7 @@ describe('OrdersService.create', () => {
       serviceOf(deps).create('user_member', 'key-1', {
         declaredDonationCents: 4000,
       }),
-    ).resolves.toBe(created);
+    ).resolves.toEqual(toMemberOrder(created as never));
 
     expect(deps.model.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -255,7 +259,7 @@ describe('OrdersService.create', () => {
 
     await expect(
       serviceOf(deps).create('user_member', 'key-1', {}),
-    ).resolves.toBe(winner);
+    ).resolves.toEqual(toMemberOrder(winner as never));
   });
 
   it.each([
@@ -281,7 +285,7 @@ describe('OrdersService.create', () => {
 describe('OrdersService queries and updates', () => {
   it('lists member and administrator orders with filters', async () => {
     const deps = dependencies();
-    const memberQuery = query([{ id: 'member-order' }]);
+    const memberQuery = query([{ _id: 'member-order' }]);
     const allAdminQuery = query([{ id: 'admin-order' }]);
     const filteredAdminQuery = query([{ id: 'filtered-order' }]);
     deps.model.find
@@ -291,7 +295,7 @@ describe('OrdersService queries and updates', () => {
     const service = serviceOf(deps);
 
     await expect(service.listForMember('user_member')).resolves.toEqual([
-      { id: 'member-order' },
+      expect.objectContaining({ _id: 'member-order' }),
     ]);
     await expect(service.listForAdmin()).resolves.toEqual([
       { id: 'admin-order' },
@@ -313,14 +317,14 @@ describe('OrdersService queries and updates', () => {
     ['administrator', 'findForAdmin', 'findById'],
   ])('finds an order for a %s', async (_name, method, modelMethod) => {
     const deps = dependencies();
-    deps.model[modelMethod].mockReturnValue(query({ id: 'order-1' }));
+    deps.model[modelMethod].mockReturnValue(query({ _id: 'order-1' }));
 
     const result =
       method === 'findForMember'
         ? await serviceOf(deps).findForMember('user_member', 'order-1')
         : await serviceOf(deps).findForAdmin('order-1');
 
-    expect(result).toEqual({ id: 'order-1' });
+    expect(result).toMatchObject({ _id: 'order-1' });
   });
 
   it.each([
@@ -442,4 +446,62 @@ describe('OrdersService queries and updates', () => {
       serviceOf(deps).updateStatus('order-1', input as never),
     ).rejects.toBeInstanceOf(type);
   });
+});
+
+describe('what a member receives for their own order', () => {
+  const stored = {
+    _id: 'order-1',
+    orderNumber: 'ORG-1',
+    donationMemo: 'ORG ORDER ORG-1',
+    items: [{ productSlug: 'mesh-tool' }],
+    contact: { preferredName: 'Member' },
+    shippingAddress: { city: 'Nashville' },
+    suggestedItemsCents: 1,
+    suggestedShippingCents: 2,
+    suggestedTotalCents: 3,
+    declaredDonationCents: 4,
+    status: 'shipped',
+    statusHistory: [{ status: 'shipped' }],
+    donationReport: { method: 'paypal' },
+    trackingNumber: 'T1',
+    createdAt: new Date(0),
+    updatedAt: new Date(1),
+  };
+  const secrets = {
+    ownerSub: 'user_secret',
+    idempotencyKey: 'key-secret',
+    emailState: 'failed',
+    emailError: 'smtp detail',
+    __v: 3,
+  };
+
+  it('keeps every field the website reads and drops the rest', () => {
+    expect(toMemberOrder({ ...stored, ...secrets } as never)).toEqual(stored);
+  });
+
+  it('does the same for a Mongoose document', () => {
+    const doc = { toObject: () => ({ ...stored, ...secrets }) };
+    expect(toMemberOrder(doc as never)).toEqual(stored);
+  });
+
+  it.each(['list', 'find', 'create', 'report'])(
+    'leaves the Clerk id out of %s',
+    async (route) => {
+      const row = order({ ...secrets });
+      const deps = dependencies({ prior: route === 'create' ? row : null });
+      deps.model.find.mockReturnValue(query([row]));
+      deps.model.findOne.mockImplementation(() => query(row));
+      const service = serviceOf(deps);
+      const result = await {
+        list: () => service.listForMember('user_member'),
+        find: () => service.findForMember('user_member', 'order-1'),
+        create: () => service.create('user_member', 'key-1', {}),
+        report: () =>
+          service.reportDonation('user_member', 'order-1', {
+            method: 'paypal',
+          } as never),
+      }[route]!();
+      expect(JSON.stringify(result)).not.toContain('user_secret');
+    },
+  );
 });
