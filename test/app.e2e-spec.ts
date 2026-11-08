@@ -170,6 +170,15 @@ describe('ORG API (e2e)', () => {
     await app.close();
   });
 
+  it('answers a malformed percent-encoded path with a clean 400', async () => {
+    const response = await request(app.getHttpServer()).get(
+      '/api/v1/products/%E0%A4%A',
+    );
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ statusCode: 400 });
+    expect(JSON.stringify(response.body)).not.toContain('URIError');
+  });
+
   it('serves health, catalog, donation, and published-content routes', async () => {
     await request(app.getHttpServer())
       .get('/api/v1/health')
