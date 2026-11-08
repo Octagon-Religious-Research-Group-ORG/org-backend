@@ -1,10 +1,17 @@
 import mongoose from 'mongoose';
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   BlockVersionsService,
   MAX_APPEND_ATTEMPTS,
 } from './block-versions.service';
-import { MAX_BLOCK_TEXT_LENGTH } from './schemas/block-version.schema';
+import {
+  EMPTY_BLOCK_TEXT_REFUSAL,
+  MAX_BLOCK_TEXT_LENGTH,
+} from './schemas/block-version.schema';
 import {
   computeVersionHash,
   GENESIS_HASH,
@@ -45,6 +52,7 @@ function setup(heads: Array<{ seq: number; hash: string } | null>) {
   const blockModel = {
     updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) })),
     findOne: jest.fn(),
+    exists: jest.fn(() => Promise.resolve({ _id: 'block' })),
   };
   const service = new BlockVersionsService(
     versionModel as never,
@@ -142,6 +150,39 @@ describe('BlockVersionsService.appendVersion', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(versionModel.findOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('BlockVersionsService.appendVersion refusals', () => {
+  it('refuses empty text with a 400 before touching the database', async () => {
+    const { service, versionModel, blockModel } = setup([]);
+
+    const refusal = service.appendVersion({ ...input, text: '' });
+
+    await expect(refusal).rejects.toBeInstanceOf(BadRequestException);
+    await expect(refusal).rejects.toThrow(EMPTY_BLOCK_TEXT_REFUSAL);
+    expect(blockModel.exists).not.toHaveBeenCalled();
+    expect(versionModel.create).not.toHaveBeenCalled();
+  });
+
+  it('writes no version for a block that does not exist', async () => {
+    const { service, versionModel, blockModel } = setup([null]);
+    blockModel.exists.mockImplementationOnce(() => Promise.resolve(null as never));
+
+    await expect(service.appendVersion(input)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(versionModel.create).not.toHaveBeenCalled();
+  });
+
+  it('still succeeds when a newer save already moved the pointer', async () => {
+    const { service, versionModel, blockModel } = setup([null]);
+    blockModel.updateOne.mockReturnValueOnce({
+      exec: jest.fn().mockResolvedValue({ matchedCount: 0 }),
+    });
+
+    await expect(service.appendVersion(input)).resolves.toBeDefined();
+    expect(versionModel.create).toHaveBeenCalledTimes(1);
   });
 });
 

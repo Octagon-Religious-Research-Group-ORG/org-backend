@@ -2,12 +2,14 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import {
   BlockVersion,
   type BlockVersionDocument,
+  EMPTY_BLOCK_TEXT_REFUSAL,
   MAX_BLOCK_TEXT_LENGTH,
 } from './schemas/block-version.schema';
 import {
@@ -61,7 +63,8 @@ export class BlockVersionsService {
    * (blockId, seq) index rejects this insert and it retries on top of the
    * winner, up to {@link MAX_APPEND_ATTEMPTS} times.
    *
-   * @throws BadRequestException when the text is too long
+   * @throws BadRequestException when the text is empty or too long
+   * @throws NotFoundException when the block does not exist
    * @throws ConflictException when the block keeps changing under this save
    */
   async appendVersion(rawInput: AppendVersionInput) {
@@ -70,6 +73,15 @@ export class BlockVersionsService {
       throw new BadRequestException(
         `A paragraph can hold at most ${MAX_BLOCK_TEXT_LENGTH} characters.`,
       );
+    }
+    if (input.text === '') {
+      throw new BadRequestException(EMPTY_BLOCK_TEXT_REFUSAL);
+    }
+    // Checked first because a version row can never be taken back, and the
+    // pointer update below cannot tell: matching nothing is also what a slow
+    // save does when a newer version already moved the pointer.
+    if ((await this.blockModel.exists({ blockId: input.blockId })) === null) {
+      throw new NotFoundException('That paragraph does not exist.');
     }
 
     for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {

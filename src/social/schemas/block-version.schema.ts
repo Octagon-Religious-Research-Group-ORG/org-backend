@@ -6,6 +6,17 @@ import { makeAppendOnly } from '../append-only';
 export const MAX_BLOCK_TEXT_LENGTH = 20_000;
 
 /**
+ * Policy default, for the owner to confirm: a version may not be empty.
+ *
+ * Refused because a member page must hold a bio and beliefs (plan §2b), a
+ * block already has `removedAt` for taking a paragraph away, and an empty row
+ * in an append-only history can never be taken back, whereas allowing it later
+ * is a one-line change.
+ */
+export const EMPTY_BLOCK_TEXT_REFUSAL =
+  'A paragraph cannot be empty. Remove it instead of clearing its text.';
+
+/**
  * One saved state of a block's text. **Append-only** (plan D8, D11): a version
  * is never changed or removed; an edit is a new version.
  *
