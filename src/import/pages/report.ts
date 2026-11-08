@@ -48,9 +48,15 @@ export function buildProfileReport(
   reviewed = false,
 ): ProfileReport {
   const reasons: string[] = [];
-  if (check.reviewFlags.length > 0 && !reviewed) {
+  const reviewFlags = [...check.reviewFlags];
+  if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
+    reviewFlags.push(
+      `The .pages names author(s) with no comment in the .docx, so comments may be lost: ${crossCheck.authors.pagesOnly.join(', ')}.`,
+    );
+  }
+  if (reviewFlags.length > 0 && !reviewed) {
     reasons.push(
-      `needs review: ${check.reviewFlags.length} flag(s), no reviewer recorded`,
+      `needs review: ${reviewFlags.length} flag(s), no reviewer recorded`,
     );
   }
   if (check.errors.length > 0) {
@@ -97,7 +103,7 @@ export function buildProfileReport(
     readerWarnings: docx.warnings,
     proposalErrors: check.errors,
     unmappedPagesLinks: plan?.unmappedPagesLinks ?? [],
-    reviewFlags: check.reviewFlags,
+    reviewFlags,
     reviewed,
   };
 }

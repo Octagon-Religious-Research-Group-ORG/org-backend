@@ -36,7 +36,8 @@ const docx = (warnings: string[] = []): DocxDocument => ({
 
 const cross = (status: CrossCheck['status']): CrossCheck => ({
   comments: { total: 2, found: 2, missing: [] },
-  authors: { status, total: 2, found: 2, missing: [] },
+  authors: { status, total: 2, found: 2, missing: [], pagesOnly: [] },
+  commentsLost: false,
   status,
 });
 
@@ -57,6 +58,21 @@ const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
 });
 
 describe('buildProfileReport', () => {
+  it('needs a review when the .pages names an author with no comment', () => {
+    const pagesOnly = {
+      ...cross('ok'),
+      authors: { ...cross('ok').authors, pagesOnly: ['Lost Author'] },
+    };
+    const report = buildProfileReport('a', docx(), check(), plan, pagesOnly);
+    expect(report.status).toBe('mismatch');
+    expect(report.reviewFlags).toEqual([
+      'The .pages names author(s) with no comment in the .docx, so comments may be lost: Lost Author.',
+    ]);
+    expect(report.reasons).toEqual([
+      'needs review: 1 flag(s), no reviewer recorded',
+    ]);
+  });
+
   it('is ok when every check ran and passed, listing unplaced comments', () => {
     expect(
       buildProfileReport('tripp', docx(), check(), plan, cross('ok')),

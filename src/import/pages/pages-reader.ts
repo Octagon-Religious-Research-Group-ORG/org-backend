@@ -82,7 +82,11 @@ export interface CrossCheck {
     total: number;
     found: number;
     missing: string[];
+    /** Names in the .pages author table with no comment in the .docx. */
+    pagesOnly: string[];
   };
+  /** The .docx has no comments at all, yet the .pages names comment authors. */
+  commentsLost: boolean;
   /** `ok` only when every comment text AND every author was found. */
   status: CheckStatus;
 }
@@ -92,11 +96,35 @@ function normalise(text: string): string {
   return text.normalize('NFKC').replace(/\s+/g, ' ').trim();
 }
 
+/** Stands in for a comment whose author is blank, so it can never match. */
+const NO_AUTHOR = '(no author)';
+
+/** Control and undecodable bytes: what separates the strings in an .iwa table. */
+const NOT_TEXT = /[\p{Cc}\ufffd]+/u;
+
+/** Separates the author table into whole names, so "Ann" cannot match "Ann Lee". */
+function tableStrings(authorText: string): string[] {
+  return [...new Set(authorText.split(NOT_TEXT).map(normalise).filter(Boolean))];
+}
+
+/** Table bytes that are not a name (ids, colours) rarely hold two letters. */
+function looksLikeName(text: string): boolean {
+  return (text.match(/\p{L}/gu) ?? []).length >= 2;
+}
+
 /**
  * Checks the .docx against the .pages: every comment's text must appear in
- * the Pages document, and every comment author in its author table. A comment
- * is looked for line by line, because the .iwa stores the text of a
- * multi-paragraph comment in pieces.
+ * the Pages document, and every comment author in its author table, as a whole
+ * name. A comment is looked for line by line, because the .iwa stores the text
+ * of a multi-paragraph comment in pieces.
+ *
+ * This proves the .docx has nothing the .pages lacks. The reverse is only
+ * partly checkable: the .iwa is an undocumented protobuf, so comments in the
+ * .pages cannot be counted without guessing its format. What IS checked: a
+ * .docx with no comments against a .pages with named authors (a mismatch), and
+ * any author in the .pages with no comment in the .docx (`pagesOnly`, for a
+ * person to look at, because deleted comments can leave an author behind). A
+ * lost comment by an author who has another comment remains invisible here.
  */
 export function crossCheck(
   docx: DocxDocument,
@@ -114,17 +142,23 @@ export function crossCheck(
     )
     .map((comment) => comment.id);
 
-  const authors = [...new Set(docx.comments.map((comment) => comment.author))]
-    .filter(Boolean)
-    .sort();
-  const authorText =
-    pages.authorText === undefined ? undefined : normalise(pages.authorText);
+  // A blank author stays in the list: it can never be found in the table, so
+  // it is reported instead of quietly skipped.
+  const authors = [
+    ...new Set(
+      docx.comments.map((comment) => normalise(comment.author) || NO_AUTHOR),
+    ),
+  ].sort();
+  const tableText = pages.authorText;
+  const table = tableText === undefined ? [] : tableStrings(tableText);
+  const names = table.filter(looksLikeName);
   const missingAuthors =
-    authorText === undefined
+    tableText === undefined
       ? []
-      : authors.filter((author) => !authorText.includes(normalise(author)));
+      : authors.filter((author) => !table.includes(author));
+  const commentsLost = docx.comments.length === 0 && names.length > 0;
   const authorStatus: CheckStatus =
-    authorText === undefined
+    tableText === undefined
       ? 'cannot-measure'
       : missingAuthors.length > 0
         ? 'mismatch'
@@ -140,9 +174,12 @@ export function crossCheck(
       status: authorStatus,
       total: authors.length,
       found:
-        authorText === undefined ? 0 : authors.length - missingAuthors.length,
+        tableText === undefined ? 0 : authors.length - missingAuthors.length,
       missing: missingAuthors,
+      pagesOnly: names.filter((name) => !authors.includes(name)).sort(),
     },
-    status: missingComments.length > 0 ? 'mismatch' : authorStatus,
+    commentsLost,
+    status:
+      missingComments.length > 0 || commentsLost ? 'mismatch' : authorStatus,
   };
 }

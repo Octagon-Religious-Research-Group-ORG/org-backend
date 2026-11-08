@@ -247,19 +247,70 @@ describe('crossCheck', () => {
       docx([
         comment('1', 'Tripp ORG', 'Double letter'),
         comment('2', 'Emily', 'First line\n\nsecond   line'),
-        comment('3', '', 'no author recorded'),
       ]),
       pages(
-        'xx Double letter yy First line zz second line no author recorded',
-        'Emily ... Tripp ORG',
+        'xx Double letter yy First line zz second line',
+        // As in the real table: names held apart by non-text protobuf bytes.
+        '\u0000\n\u0005Emily\u0012\u0002\n\tTripp   ORG\u0012',
       ),
     );
 
     expect(result).toEqual({
-      comments: { total: 3, found: 3, missing: [] },
-      authors: { status: 'ok', total: 2, found: 2, missing: [] },
+      comments: { total: 2, found: 2, missing: [] },
+      authors: {
+        status: 'ok',
+        total: 2,
+        found: 2,
+        missing: [],
+        pagesOnly: [],
+      },
+      commentsLost: false,
       status: 'ok',
     });
+  });
+
+  it('matches an author as a whole name, not a part of one', () => {
+    const result = crossCheck(
+      docx([comment('1', 'Tripp', 'x')]),
+      pages('x', 'Tripp ORG'),
+    );
+    expect(result.authors.missing).toEqual(['Tripp']);
+    expect(result.status).toBe('mismatch');
+  });
+
+  it('counts a blank author as missing instead of skipping it', () => {
+    const result = crossCheck(
+      docx([comment('1', '  ', 'x')]),
+      pages('x', 'Someone'),
+    );
+    expect(result.authors).toEqual({
+      status: 'mismatch',
+      total: 1,
+      found: 0,
+      missing: ['(no author)'],
+      pagesOnly: ['Someone'],
+    });
+  });
+
+  it('calls no comments against a named author table a mismatch', () => {
+    const result = crossCheck(docx([]), pages('x', 'Someone'));
+    expect(result.commentsLost).toBe(true);
+    expect(result.status).toBe('mismatch');
+  });
+
+  it('accepts no comments against an empty author table', () => {
+    const result = crossCheck(docx([]), pages('x', '\u0000\u0012'));
+    expect(result.commentsLost).toBe(false);
+    expect(result.status).toBe('ok');
+  });
+
+  it('lists a .pages author with no comment, and ignores table noise', () => {
+    const result = crossCheck(
+      docx([comment('1', 'Kept', 'x')]),
+      pages('x', 'Kept\u0000Gone Person\u0000x7\u0000'),
+    );
+    expect(result.authors.pagesOnly).toEqual(['Gone Person']);
+    expect(result.status).toBe('ok');
   });
 
   it('reports the comments and authors it cannot find', () => {
@@ -274,6 +325,7 @@ describe('crossCheck', () => {
       total: 2,
       found: 1,
       missing: ['B'],
+      pagesOnly: [],
     });
     expect(result.status).toBe('mismatch');
   });
@@ -286,6 +338,7 @@ describe('crossCheck', () => {
       total: 1,
       found: 0,
       missing: [],
+      pagesOnly: [],
     });
     expect(result.status).toBe('cannot-measure');
   });
