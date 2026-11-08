@@ -34,6 +34,8 @@ export interface ProfileReport {
   /** Valid-but-suspicious findings; they block the import until reviewed. */
   reviewFlags: string[];
   reviewed: boolean;
+  /** Rows or pictures the real write would reject (see `preflightImport`). */
+  preflightErrors: string[];
   /** Size of the Legal section left out (plan §2b), reported on every profile. */
   legalDropped: ProposalCheck['legalDropped'];
 }
@@ -51,8 +53,12 @@ export function buildProfileReport(
   crossCheck: CrossCheck | undefined,
   reviewed = false,
   reviewProblems: string[] = [],
+  preflightErrors: string[] = [],
 ): ProfileReport {
   const reasons: string[] = [...reviewProblems];
+  if (preflightErrors.length > 0) {
+    reasons.push(`${preflightErrors.length} row or picture check(s) failed`);
+  }
   const reviewFlags = [...check.reviewFlags];
   if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
     reviewFlags.push(
@@ -116,6 +122,7 @@ export function buildProfileReport(
     unsafeLinks: plan?.unsafeLinks ?? [],
     reviewFlags,
     reviewed,
+    preflightErrors,
     legalDropped: check.legalDropped,
   };
 }

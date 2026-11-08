@@ -15,8 +15,15 @@
  *
  * The import refuses unless EVERY profile checks ok (all or nothing), the
  * database is on the exact list in import-guard.ts (production import is a
- * separate, later decision), and the managed indexes exist. After writing, it reads every
- * profile back and re-verifies every block's hash chain.
+ * separate, later decision), and the managed indexes exist. The check phase
+ * validates every planned row against the real schemas and converts every
+ * picture, so a dry run fails for the same reasons a real run would. After
+ * writing, it reads every profile back and compares it with what was planned,
+ * and re-verifies every block's hash chain.
+ *
+ * There are no transactions: a write that fails part-way leaves earlier
+ * profiles imported. The report then says FAILED and names the profile, and
+ * re-running with --replace clears it (test databases only).
  *
  * Exit codes: 0 ok · 1 mismatch · 2 refused · 3 cannot measure.
  */
@@ -32,6 +39,8 @@ import { importDatabaseRefusal } from './import-guard';
 import { readDocx, type DocxDocument } from './pages/docx-reader';
 import { executeImport } from './pages/execute-import';
 import { processImage } from './pages/image';
+import { preflightImport } from './pages/preflight';
+import { compareReadBack } from './pages/read-back';
 import {
   buildImportPlan,
   pagesKey,
@@ -148,15 +157,29 @@ function extractedText(docx: DocxDocument, proposal: ProfileProposal) {
     .join('\n');
 }
 
-function writeReports(dir: string, reports: ProfileReport[], extra: object) {
+/**
+ * Writes both reports. `outcome` overrides the checks' status once writing has
+ * begun: every profile can check ok and the import can still fail afterwards.
+ */
+function writeReports(
+  dir: string,
+  reports: ProfileReport[],
+  extra: object,
+  outcome?: { status: string; detail: string[] },
+) {
   const status = overallStatus(reports);
   writeFileSync(
     join(dir, 'import-report.json'),
-    JSON.stringify({ status, ...extra, profiles: reports }, null, 2),
+    JSON.stringify(
+      { status: outcome?.status ?? status, ...extra, profiles: reports },
+      null,
+      2,
+    ),
   );
   const lines = [
-    `# Pages import report: ${status.toUpperCase()}`,
+    `# Pages import report: ${(outcome?.status ?? status).toUpperCase()}`,
     '',
+    ...(outcome ? [...outcome.detail, ''] : []),
     '| Profile | Status | Tabs | Blocks | Comments (replies) | On tabs | Unplaced | Images | Pages links left | Legal left out | Review flags | Reasons |',
     '|---|---|---|---|---|---|---|---|---|---|---|---|',
     ...reports.map(
@@ -230,6 +253,7 @@ export async function main(): Promise<number> {
     proposal: ProfileProposal;
     plan?: ImportPlan;
     report: ProfileReport;
+    extracted: string;
   }[] = [];
   for (const entry of manifest) {
     const loaded = load(dir, entry);
@@ -252,6 +276,18 @@ export async function main(): Promise<number> {
             slugByPagesKey,
           )
         : undefined;
+    const extracted = extractedText(loaded.docx, proposal);
+    const preflightErrors = plan
+      ? await preflightImport(
+          plan,
+          {
+            files: loaded.files,
+            sources: loaded.sources,
+            extractedText: extracted,
+          },
+          processImage,
+        )
+      : [];
     const report = buildProfileReport(
       entry.slug,
       loaded.docx,
@@ -260,8 +296,9 @@ export async function main(): Promise<number> {
       loaded.pages ? crossCheck(loaded.docx, loaded.pages) : undefined,
       proposal.reviewed !== undefined && voidReview.length === 0,
       voidReview,
+      preflightErrors,
     );
-    prepared.push({ loaded, proposal, plan, report });
+    prepared.push({ loaded, proposal, plan, report, extracted });
   }
 
   const reports = prepared.map((item) => item.report);
@@ -307,55 +344,102 @@ export async function main(): Promise<number> {
       console.warn(`Replaced: removed ${JSON.stringify(removed)}`);
     }
 
+    // All or nothing: find an address that is taken before writing anything.
+    for (const item of prepared) {
+      if (await store.profileExists(item.plan!.slug)) {
+        console.error(
+          `Refused: a profile with the address "${item.plan!.slug}" already exists; nothing was written. A failed earlier import is cleared with --replace.`,
+        );
+        return 2;
+      }
+    }
+
     const results: Record<string, unknown>[] = [];
     for (const item of prepared) {
-      const result = await executeImport(
-        item.plan!,
-        {
-          files: item.loaded.files,
-          sources: item.loaded.sources,
-          extractedText: extractedText(item.loaded.docx, item.proposal),
-          report: item.report as unknown as Record<string, unknown>,
-        },
-        store,
-        processImage,
-      );
+      try {
+        const { written, ...result } = await executeImport(
+          item.plan!,
+          {
+            files: item.loaded.files,
+            sources: item.loaded.sources,
+            extractedText: item.extracted,
+            report: item.report as unknown as Record<string, unknown>,
+          },
+          store,
+          processImage,
+        );
 
-      // Read back what was written (Rule 26.1) and re-verify every chain.
-      const profileId = new mongoose.Types.ObjectId(result.profileId);
-      const counts = {
-        tabs: await store.model('BeliefTab').countDocuments({ profileId }),
-        blocks: await store.model('ProfileBlock').countDocuments({ profileId }),
-        comments: await store.model('Comment').countDocuments({ profileId }),
-      };
-      const brokenChains: string[] = [];
-      for (const block of item.plan!.blocks) {
-        const verdict = await store.verifyBlock(block.blockId);
-        if (!verdict.valid || verdict.length !== 1) {
-          brokenChains.push(block.blockId);
+        // Read back what was written (Rule 26.1) and re-verify every chain.
+        const snapshot = await store.readBack(
+          new mongoose.Types.ObjectId(result.profileId),
+          item.plan!.blocks.map((block) => block.blockId),
+          written.images.map((image) => String(image.id)),
+        );
+        const differences = compareReadBack(written, snapshot);
+        const brokenChains: string[] = [];
+        for (const block of item.plan!.blocks) {
+          const verdict = await store.verifyBlock(block.blockId);
+          if (!verdict.valid || verdict.length !== 1) {
+            brokenChains.push(block.blockId);
+          }
         }
+        const counts = {
+          tabs: snapshot.tabs.length,
+          blocks: snapshot.blocks.length,
+          comments: snapshot.comments.length,
+          images: snapshot.images.length,
+        };
+        const matches = differences.length === 0 && brokenChains.length === 0;
+        results.push({
+          slug: item.plan!.slug,
+          ...result,
+          readBack: counts,
+          differences,
+          brokenChains,
+          matches,
+        });
+        console.warn(
+          `${item.plan!.slug}: ${matches ? 'imported and verified' : 'READ-BACK MISMATCH'} ` +
+            `(${counts.tabs} tabs, ${counts.blocks} blocks, ${counts.comments} comments, ${counts.images} images)`,
+        );
+        for (const difference of differences) console.error(difference);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const clear =
+          'Re-run with --replace to clear what was written (test databases only), then import again.';
+        writeReports(
+          dir,
+          reports,
+          { mode: 'import', database, results },
+          {
+            status: 'failed',
+            detail: [
+              `The write of profile ${item.plan!.slug} failed: ${reason}`,
+              clear,
+            ],
+          },
+        );
+        console.error(`FAILED while writing ${item.plan!.slug}: ${reason}`);
+        console.error(clear);
+        return EXIT.mismatch;
       }
-      const matches =
-        counts.tabs === result.tabs &&
-        counts.blocks === result.blocks &&
-        counts.comments === result.comments &&
-        brokenChains.length === 0;
-      results.push({
-        slug: item.plan!.slug,
-        ...result,
-        readBack: counts,
-        brokenChains,
-        matches,
-      });
-      console.warn(
-        `${item.plan!.slug}: ${matches ? 'imported and verified' : 'READ-BACK MISMATCH'} ` +
-          `(${counts.tabs} tabs, ${counts.blocks} blocks, ${counts.comments} comments, ${result.imageIds.length} images)`,
-      );
     }
 
     const allMatch = results.every((result) => result.matches === true);
-    writeReports(dir, reports, { mode: 'import', database, results });
-    return allMatch ? 0 : 1;
+    writeReports(
+      dir,
+      reports,
+      { mode: 'import', database, results },
+      allMatch
+        ? undefined
+        : {
+            status: 'read-back mismatch',
+            detail: [
+              'What was read back differs from what was written; see import-report.json.',
+            ],
+          },
+    );
+    return allMatch ? 0 : EXIT.mismatch;
   } finally {
     await connection.close();
   }

@@ -36,6 +36,23 @@ export interface ImportInputs {
   now?: Date;
 }
 
+export type Row = Record<string, unknown>;
+
+/** The exact rows an import writes, for validating and for reading back. */
+export interface PlannedRows {
+  tabs: Row[];
+  blocks: Row[];
+  /** One per block, in `blocks` order. */
+  versions: { blockId: string; text: string; authorUserId: string }[];
+  comments: Row[];
+  importRecord: Row;
+  profile: Row;
+}
+
+export interface WrittenRows extends PlannedRows {
+  images: Row[];
+}
+
 export interface ImportResult {
   profileId: string;
   tabs: number;
@@ -43,16 +60,116 @@ export interface ImportResult {
   comments: number;
   imageIds: string[];
   truncatedAnchors: number;
+  /** Exactly what was sent to the store, so it can be compared on read-back. */
+  written: WrittenRows;
+}
+
+/**
+ * The rows for one plan. One function for both the check phase and the write,
+ * so a dry run validates precisely what the import will send.
+ */
+export function buildRows(
+  plan: ImportPlan,
+  inputs: ImportInputs,
+  profileId: Types.ObjectId,
+  now: Date,
+  images: { inline: ReadonlyMap<string, string>; imageIds: string[] },
+): { rows: PlannedRows; truncatedAnchors: number } {
+  const tabs = plan.tabs.map((tab) => ({
+    profileId,
+    tabId: tab.tabId,
+    title: tab.title,
+    ...(tab.group ? { group: tab.group } : {}),
+    order: tab.order,
+    reviewStatus: 'imported-review',
+  }));
+
+  const blocks = plan.blocks.map((block) => ({
+    profileId,
+    blockId: block.blockId,
+    section: block.section,
+    kind: block.kind,
+    label: block.label,
+    order: block.order,
+    ...(block.tabId ? { tabId: block.tabId } : {}),
+  }));
+  const versions = plan.blocks.map((block) => ({
+    blockId: block.blockId,
+    text:
+      block.kind === 'image'
+        ? `image:${images.inline.get(block.text)}`
+        : block.text,
+    authorUserId: IMPORT_AUTHOR,
+  }));
+
+  let truncatedAnchors = 0;
+  const comments = plan.comments.map((comment) => {
+    let anchorText = comment.anchorText;
+    if (anchorText && anchorText.length > MAX_ANCHOR_TEXT_LENGTH) {
+      anchorText = `${anchorText.slice(0, MAX_ANCHOR_TEXT_LENGTH - 1)}…`;
+      truncatedAnchors += 1;
+    }
+    return {
+      commentId: comment.commentId,
+      profileId,
+      ...(comment.parentCommentId
+        ? { parentCommentId: comment.parentCommentId }
+        : {}),
+      ...(comment.tabId ? { tabId: comment.tabId } : {}),
+      ...(comment.anchorBlockId
+        ? { anchorBlockId: comment.anchorBlockId }
+        : {}),
+      ...(anchorText ? { anchorText } : {}),
+      legacyAuthorName: comment.legacyAuthorName,
+      ...(comment.legacyCreatedAt
+        ? { legacyCreatedAt: comment.legacyCreatedAt }
+        : {}),
+      body: comment.body,
+      source: 'migrated',
+    };
+  });
+
+  return {
+    rows: {
+      tabs,
+      blocks,
+      versions,
+      comments,
+      importRecord: {
+        profileId,
+        slug: plan.slug,
+        pagesUrl: plan.pagesUrl,
+        sources: inputs.sources,
+        extractedText: inputs.extractedText,
+        report: { ...inputs.report, truncatedAnchors },
+        importerVersion: IMPORTER_VERSION,
+        importedAt: now,
+      },
+      profile: {
+        _id: profileId,
+        slug: plan.slug,
+        displayName: plan.displayName,
+        imageIds: images.imageIds,
+        visibility: plan.visibility,
+        anonymous: plan.anonymous,
+        source: 'migrated',
+        legacy: { pagesUrl: plan.pagesUrl, importedAt: now },
+      },
+    },
+    truncatedAnchors,
+  };
 }
 
 /**
  * Writes one planned profile.
  *
- * Order matters: tabs, blocks (each with its first hash-chained version),
- * comments, images and the import record are written first, and the profile
- * row LAST. Until that row exists nothing references the new rows, so an
- * import that fails half-way leaves no visible half-profile; re-running for
- * the same slug is then allowed, because the slug is still free.
+ * Order matters. The pictures and the import record go first: the record ties
+ * the new profile id to its slug, so a later failure can be cleared by
+ * `--replace` for exactly this profile. Tabs, blocks (each with its first
+ * hash-chained version) and comments follow, and the profile row comes LAST.
+ * Until that row exists nothing references the new rows, so an import that
+ * fails half-way leaves no visible half-profile; re-running for the same slug
+ * is then allowed, because the slug is still free.
  *
  * @throws Error when the slug is taken, a file is missing, or any write fails
  */
@@ -101,108 +218,38 @@ export async function executeImport(
   const profileId = new Types.ObjectId();
   const now = inputs.now ?? new Date();
 
-  for (const tab of plan.tabs) {
-    await store.createTab({
-      profileId,
-      tabId: tab.tabId,
-      title: tab.title,
-      ...(tab.group ? { group: tab.group } : {}),
-      order: tab.order,
-      reviewStatus: 'imported-review',
-    });
-  }
-
-  const inlineImageIds = new Map<string, string>();
+  const storedImages: Row[] = [];
+  const storeOne = async (path: string, role: string) => {
+    const image = processed.get(path)!;
+    const metadata = { profileSlug: plan.slug, source: path, role };
+    const id = await store.storeImage(image, metadata);
+    storedImages.push({ id, ...metadata, bytes: image.data.length });
+    return id;
+  };
+  const inline = new Map<string, string>();
   for (const block of plan.blocks) {
-    let text = block.text;
-    if (block.kind === 'image') {
-      if (!inlineImageIds.has(block.text)) {
-        inlineImageIds.set(
-          block.text,
-          await store.storeImage(processed.get(block.text)!, {
-            profileSlug: plan.slug,
-            source: block.text,
-            role: 'inline',
-          }),
-        );
-      }
-      text = `image:${inlineImageIds.get(block.text)}`;
+    if (block.kind === 'image' && !inline.has(block.text)) {
+      inline.set(block.text, await storeOne(block.text, 'inline'));
     }
-    await store.createBlock({
-      profileId,
-      blockId: block.blockId,
-      section: block.section,
-      kind: block.kind,
-      label: block.label,
-      order: block.order,
-      ...(block.tabId ? { tabId: block.tabId } : {}),
-    });
-    await store.appendVersion({
-      blockId: block.blockId,
-      text,
-      authorUserId: IMPORT_AUTHOR,
-    });
   }
-
-  let truncatedAnchors = 0;
-  for (const comment of plan.comments) {
-    let anchorText = comment.anchorText;
-    if (anchorText && anchorText.length > MAX_ANCHOR_TEXT_LENGTH) {
-      anchorText = `${anchorText.slice(0, MAX_ANCHOR_TEXT_LENGTH - 1)}…`;
-      truncatedAnchors += 1;
-    }
-    await store.createComment({
-      commentId: comment.commentId,
-      profileId,
-      ...(comment.parentCommentId
-        ? { parentCommentId: comment.parentCommentId }
-        : {}),
-      ...(comment.tabId ? { tabId: comment.tabId } : {}),
-      ...(comment.anchorBlockId
-        ? { anchorBlockId: comment.anchorBlockId }
-        : {}),
-      ...(anchorText ? { anchorText } : {}),
-      legacyAuthorName: comment.legacyAuthorName,
-      ...(comment.legacyCreatedAt
-        ? { legacyCreatedAt: comment.legacyCreatedAt }
-        : {}),
-      body: comment.body,
-      source: 'migrated',
-    });
-  }
-
   const imageIds: string[] = [];
   for (const image of plan.images) {
-    imageIds.push(
-      await store.storeImage(processed.get(image.path)!, {
-        profileSlug: plan.slug,
-        source: image.path,
-        role: image.role,
-      }),
-    );
+    imageIds.push(await storeOne(image.path, image.role));
   }
 
-  await store.createImportRecord({
-    profileId,
-    slug: plan.slug,
-    pagesUrl: plan.pagesUrl,
-    sources: inputs.sources,
-    extractedText: inputs.extractedText,
-    report: { ...inputs.report, truncatedAnchors },
-    importerVersion: IMPORTER_VERSION,
-    importedAt: now,
+  const { rows, truncatedAnchors } = buildRows(plan, inputs, profileId, now, {
+    inline,
+    imageIds,
   });
 
-  await store.createProfile({
-    _id: profileId,
-    slug: plan.slug,
-    displayName: plan.displayName,
-    imageIds,
-    visibility: plan.visibility,
-    anonymous: plan.anonymous,
-    source: 'migrated',
-    legacy: { pagesUrl: plan.pagesUrl, importedAt: now },
-  });
+  await store.createImportRecord(rows.importRecord);
+  for (const tab of rows.tabs) await store.createTab(tab);
+  for (const [at, block] of rows.blocks.entries()) {
+    await store.createBlock(block);
+    await store.appendVersion(rows.versions[at]);
+  }
+  for (const comment of rows.comments) await store.createComment(comment);
+  await store.createProfile(rows.profile);
 
   return {
     profileId: profileId.toHexString(),
@@ -211,5 +258,6 @@ export async function executeImport(
     comments: plan.comments.length,
     imageIds,
     truncatedAnchors,
+    written: { ...rows, images: storedImages },
   };
 }

@@ -146,22 +146,22 @@ describe('executeImport', () => {
     const result = await executeImport(plan, inputs, store, processImage);
 
     expect(calls.map(([name]) => name)).toEqual([
-      'tab',
-      'tab',
-      'block',
-      'version',
       'image',
-      'block',
-      'version',
-      'block',
-      'version',
-      'block',
-      'version',
-      'comment',
-      'comment',
       'image',
       'image',
       'record',
+      'tab',
+      'tab',
+      'block',
+      'version',
+      'block',
+      'version',
+      'block',
+      'version',
+      'block',
+      'version',
+      'comment',
+      'comment',
       'profile',
     ]);
     const rows = Object.fromEntries(
@@ -169,7 +169,7 @@ describe('executeImport', () => {
     ) as Record<string, Record<string, unknown>>;
     const profileId = rows.profile16._id as Types.ObjectId;
 
-    expect(rows.tab0).toEqual({
+    expect(rows.tab4).toEqual({
       profileId,
       tabId: 'tab_1',
       title: 'I. God',
@@ -177,8 +177,8 @@ describe('executeImport', () => {
       order: 0,
       reviewStatus: 'imported-review',
     });
-    expect(rows.tab1).not.toHaveProperty('group');
-    expect(rows.block2).toEqual({
+    expect(rows.tab5).not.toHaveProperty('group');
+    expect(rows.block6).toEqual({
       profileId,
       blockId: 'blk_1',
       section: 'bio',
@@ -186,20 +186,20 @@ describe('executeImport', () => {
       label: '',
       order: 0,
     });
-    expect(rows.version3).toEqual({
+    expect(rows.version7).toEqual({
       blockId: 'blk_1',
       text: 'Bio',
       authorUserId: 'system:import',
     });
     // The same inline picture used twice is stored once.
-    expect(rows.version6).toEqual(
+    expect(rows.version9).toEqual(
       expect.objectContaining({ blockId: 'blk_2', text: 'image:img1' }),
     );
-    expect(rows.version8).toEqual(
+    expect(rows.version11).toEqual(
       expect.objectContaining({ blockId: 'blk_3', text: 'image:img1' }),
     );
-    expect(rows.block9).toEqual(expect.objectContaining({ tabId: 'tab_1' }));
-    expect(rows.comment11).toEqual({
+    expect(rows.block12).toEqual(expect.objectContaining({ tabId: 'tab_1' }));
+    expect(rows.comment14).toEqual({
       commentId: 'cmt_1',
       profileId,
       tabId: 'tab_1',
@@ -210,7 +210,7 @@ describe('executeImport', () => {
       body: 'Double letter',
       source: 'migrated',
     });
-    expect(rows.comment12).toEqual({
+    expect(rows.comment15).toEqual({
       commentId: 'cmt_2',
       profileId,
       parentCommentId: 'cmt_1',
@@ -218,13 +218,13 @@ describe('executeImport', () => {
       body: 'I agree',
       source: 'migrated',
     });
-    expect(rows.image13).toEqual({
+    expect(rows.image1).toEqual({
       profileSlug: 'tripp',
       source: 'Data/p.jpeg',
       role: 'picture',
       bytes: 4,
     });
-    expect(rows.record15).toEqual({
+    expect(rows.record3).toEqual({
       profileId,
       slug: 'tripp',
       pagesUrl: 'https://www.icloud.com/pages/T',
@@ -254,6 +254,33 @@ describe('executeImport', () => {
       comments: 2,
       imageIds: ['img2', 'img3'],
       truncatedAnchors: 1,
+      written: expect.objectContaining({
+        profile: rows.profile16,
+        importRecord: rows.record3,
+        images: [
+          {
+            id: 'img1',
+            profileSlug: 'tripp',
+            source: 'word/media/a.png',
+            role: 'inline',
+            bytes: 4,
+          },
+          {
+            id: 'img2',
+            profileSlug: 'tripp',
+            source: 'Data/p.jpeg',
+            role: 'picture',
+            bytes: 4,
+          },
+          {
+            id: 'img3',
+            profileSlug: 'tripp',
+            source: 'Data/g.jpeg',
+            role: 'gallery',
+            bytes: 4,
+          },
+        ],
+      }),
     });
     expect(processImage).toHaveBeenCalledTimes(3);
   });
@@ -324,6 +351,17 @@ describe('executeImport', () => {
       'Image Data/g.jpeg could not be converted: heif: unsupported',
     );
     expect(calls).toEqual([]);
+  });
+
+  it('writes the import record before any profile row, so a failure can be traced', async () => {
+    const { store, calls } = memoryStore();
+    store.createTab = () => Promise.reject(new Error('write failed'));
+
+    await expect(
+      executeImport(plan, inputs, store, processImage),
+    ).rejects.toThrow('write failed');
+    expect(calls.map(([name]) => name)).toContain('record');
+    expect(calls.some(([name]) => name === 'tab')).toBe(false);
   });
 
   it('never writes the profile when an earlier write fails', async () => {

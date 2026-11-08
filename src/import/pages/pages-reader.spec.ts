@@ -307,7 +307,7 @@ describe('crossCheck', () => {
   it('lists a .pages author with no comment, and ignores table noise', () => {
     const result = crossCheck(
       docx([comment('1', 'Kept', 'x')]),
-      pages('x', 'Kept\u0000Gone Person\u0000x7\u0000'),
+      pages('x', 'Kept\u0000Gone Person\u0000x7\u000012\u0000'),
     );
     expect(result.authors.pagesOnly).toEqual(['Gone Person']);
     expect(result.status).toBe('ok');

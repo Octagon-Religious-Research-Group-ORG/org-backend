@@ -104,7 +104,9 @@ const NOT_TEXT = /[\p{Cc}\ufffd]+/u;
 
 /** Separates the author table into whole names, so "Ann" cannot match "Ann Lee". */
 function tableStrings(authorText: string): string[] {
-  return [...new Set(authorText.split(NOT_TEXT).map(normalise).filter(Boolean))];
+  return [
+    ...new Set(authorText.split(NOT_TEXT).map(normalise).filter(Boolean)),
+  ];
 }
 
 /** Table bytes that are not a name (ids, colours) rarely hold two letters. */

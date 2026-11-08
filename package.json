@@ -123,6 +123,8 @@
       "import/pages/execute-import.ts",
       "import/pages/image.ts",
       "import/pages/report.ts",
+      "import/pages/preflight.ts",
+      "import/pages/read-back.ts",
       "import/pages/snappy.ts",
       "import/pages/xml.ts",
       "import/pages/zip-safe.ts",

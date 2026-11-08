@@ -56,6 +56,44 @@ export function buildDocx(parts: DocxParts): Uint8Array {
   return zipSync(files);
 }
 
+/** One literal-only Snappy block holding all of `text`, as an .iwa file. */
+function iwaOf(text: string): Uint8Array {
+  const data = strToU8(text);
+  const block: number[] = [];
+  let length = data.length;
+  do {
+    block.push((length & 0x7f) | (length > 0x7f ? 0x80 : 0));
+    length >>= 7;
+  } while (length > 0);
+  if (data.length > 0) {
+    block.push(61 << 2, (data.length - 1) & 0xff, (data.length - 1) >> 8);
+    block.push(...data);
+  }
+  return new Uint8Array([
+    0,
+    block.length & 0xff,
+    (block.length >> 8) & 0xff,
+    block.length >> 16,
+    ...block,
+  ]);
+}
+
+/** Builds a small synthetic .pages package in memory for tests. */
+export function buildPages(
+  document: string,
+  authors?: string,
+  data: Record<string, Uint8Array> = {},
+): Uint8Array {
+  const files: Record<string, Uint8Array> = {
+    'Index/Document.iwa': iwaOf(document),
+    ...data,
+  };
+  if (authors !== undefined) {
+    files['Index/AnnotationAuthorStorage-1.iwa'] = iwaOf(authors);
+  }
+  return zipSync(files);
+}
+
 /** A paragraph with optional style and plain runs. */
 export function p(text: string, props = ''): string {
   return `<w:p>${props ? `<w:pPr>${props}</w:pPr>` : ''}<w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;

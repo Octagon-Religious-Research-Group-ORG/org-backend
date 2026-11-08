@@ -60,6 +60,24 @@ const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
 });
 
 describe('buildProfileReport', () => {
+  it('fails a profile whose rows or pictures would be rejected', () => {
+    const report = buildProfileReport(
+      'a',
+      docx(),
+      check(),
+      plan,
+      cross('ok'),
+      false,
+      [],
+      ['Image x could not be converted: bad'],
+    );
+    expect(report.status).toBe('mismatch');
+    expect(report.reasons).toEqual(['1 row or picture check(s) failed']);
+    expect(report.preflightErrors).toEqual([
+      'Image x could not be converted: bad',
+    ]);
+  });
+
   it('reports removed link addresses and needs a review for them', () => {
     const report = buildProfileReport(
       'a',
@@ -133,6 +151,7 @@ describe('buildProfileReport', () => {
       reviewed: false,
       legalDropped: { paragraphs: 2, characters: 40 },
       unsafeLinks: [],
+      preflightErrors: [],
     });
   });
 

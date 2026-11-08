@@ -7,6 +7,7 @@ import type { ProfileBlockDocument } from '../../social/schemas/profile-block.sc
 import { MANAGED_SCHEMAS } from '../../db/managed-schemas';
 import type { ImportStore } from './execute-import';
 import type { ProcessedImage } from './image';
+import type { ReadBackSnapshot } from './read-back';
 
 /** GridFS bucket holding profile pictures, gallery photos and inline images. */
 export const PROFILE_IMAGE_BUCKET = 'profileimages';
@@ -85,11 +86,50 @@ export class MongoImportStore implements ImportStore {
     await this.models.ImportRecord.create(row);
   }
 
+  /** Reads back everything `executeImport` wrote for one profile. */
+  async readBack(
+    profileId: mongoose.Types.ObjectId,
+    blockIds: string[],
+    imageIds: string[],
+  ): Promise<ReadBackSnapshot> {
+    const rows = (name: string, filter: object) =>
+      this.models[name].find(filter).lean().exec() as Promise<
+        Record<string, unknown>[]
+      >;
+    const [profile] = await rows('SocialProfile', { _id: profileId });
+    const files = await new mongoose.mongo.GridFSBucket(this.connection.db!, {
+      bucketName: PROFILE_IMAGE_BUCKET,
+    })
+      .find({
+        _id: { $in: imageIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      })
+      .toArray();
+    return {
+      profile: profile ?? null,
+      tabs: await rows('BeliefTab', { profileId }),
+      blocks: await rows('ProfileBlock', { profileId }),
+      versions: await rows('BlockVersion', { blockId: { $in: blockIds } }),
+      comments: await rows('Comment', { profileId }),
+      importRecords: await rows('ImportRecord', { profileId }),
+      images: files.map((file) => ({
+        id: file._id.toString(),
+        profileSlug: file.metadata?.profileSlug as unknown,
+        source: file.metadata?.source as unknown,
+        role: file.metadata?.role as unknown,
+        bytes: file.length,
+      })),
+    };
+  }
+
   /**
    * TEST DATABASES ONLY (the CLI refuses any other): deletes migrated profiles
    * with these addresses, every row of theirs (append-only versions and import
-   * records included, through the raw driver on purpose), rows a failed
-   * import left without a profile, and their pictures.
+   * records included, through the raw driver on purpose), what a failed import
+   * of these addresses left behind, and their pictures.
+   *
+   * A failed import is recognised by its import record, written first and
+   * holding the slug, with no profile row. Rows of any other import, finished
+   * or failed, are never touched, because they have no such record here.
    */
   async removeImported(slugs: string[]) {
     const db = this.connection.db!;
@@ -98,26 +138,30 @@ export class MongoImportStore implements ImportStore {
       .find({ slug: { $in: slugs }, source: 'migrated' })
       .project({ _id: 1 })
       .toArray();
-    const existing = new Set(
+    const profileIds: unknown[] = profiles.map((row) => row._id as unknown);
+    const recorded = await db
+      .collection('importrecords')
+      .find({ slug: { $in: slugs } })
+      .project({ profileId: 1 })
+      .toArray();
+    const stillThere = new Set(
       (
         await db
           .collection('socialprofiles')
-          .find()
+          .find({
+            _id: {
+              $in: recorded.map(
+                (row) => row.profileId as mongoose.Types.ObjectId,
+              ),
+            },
+          })
           .project({ _id: 1 })
           .toArray()
       ).map((row) => String(row._id)),
     );
-    const profileIds: unknown[] = profiles.map((row) => row._id as unknown);
     const targets: unknown[] = [...profileIds];
-    for (const name of [
-      'belieftabs',
-      'profileblocks',
-      'comments',
-      'importrecords',
-    ]) {
-      for (const id of await db.collection(name).distinct('profileId')) {
-        if (!existing.has(String(id))) targets.push(id);
-      }
+    for (const row of recorded) {
+      if (!stillThere.has(String(row.profileId))) targets.push(row.profileId);
     }
     const blockIds = (
       await db

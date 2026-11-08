@@ -234,7 +234,8 @@ describe('readDocx', () => {
             '<w:num w:numId="3"><w:abstractNumId w:val="0"/>' +
             '<w:lvlOverride><w:startOverride w:val="7"/></w:lvlOverride>' +
             '<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2)"/></w:lvl></w:lvlOverride>' +
-            '<w:lvlOverride w:ilvl="4"/></w:num>',
+            '<w:lvlOverride w:ilvl="4"/></w:num>' +
+            '<w:num w:numId="4"><w:abstractNumId w:val="42"/></w:num>',
           body:
             numbered('a', '1', 0) +
             numbered('b', '1', 0) +
@@ -243,7 +244,8 @@ describe('readDocx', () => {
             numbered('jump', '3', 0) +
             numbered('redefined', '3', 1) +
             numbered('redefined next', '3', 1) +
-            numbered('nothing overridden', '3', 4),
+            numbered('nothing overridden', '3', 4) +
+            numbered('no such list', '4', 0),
         }),
       );
       expect(doc.paragraphs.map((x) => x.numbering?.label)).toEqual([
@@ -254,6 +256,7 @@ describe('readDocx', () => {
         'VII.',
         '4)',
         '5)',
+        undefined,
         undefined,
       ]);
     });
