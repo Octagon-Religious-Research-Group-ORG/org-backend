@@ -33,6 +33,7 @@ describe('throttle limits', () => {
     ['POST /orders/:id/donation-report', OrdersController, 'reportDonation'],
     ['PATCH /me', ProfilesController, 'updateMe'],
     ['PATCH /me/shipping', ProfilesController, 'updateShipping'],
+    ['DELETE /me/shipping', ProfilesController, 'deleteShipping'],
   ] as const)('applies the write limit to %s', (_route, controller, method) => {
     expect(limitOf(controller, method)).toBe(WRITE_THROTTLE.limit);
   });

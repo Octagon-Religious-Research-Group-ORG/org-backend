@@ -70,6 +70,7 @@ export class ProfilesController {
   }
 
   @Delete('shipping')
+  @WriteThrottle()
   async deleteShipping(@Req() request: AuthenticatedRequest) {
     return toPublicProfile(
       await this.profiles.deleteShipping(getUserSub(request)),
