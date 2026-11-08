@@ -32,6 +32,8 @@ export interface ProfileReport {
   /** Valid-but-suspicious findings; they block the import until reviewed. */
   reviewFlags: string[];
   reviewed: boolean;
+  /** Size of the Legal section left out (plan §2b), reported on every profile. */
+  legalDropped: ProposalCheck['legalDropped'];
 }
 
 /**
@@ -46,8 +48,9 @@ export function buildProfileReport(
   plan: ImportPlan | undefined,
   crossCheck: CrossCheck | undefined,
   reviewed = false,
+  reviewProblems: string[] = [],
 ): ProfileReport {
-  const reasons: string[] = [];
+  const reasons: string[] = [...reviewProblems];
   const reviewFlags = [...check.reviewFlags];
   if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
     reviewFlags.push(
@@ -105,6 +108,7 @@ export function buildProfileReport(
     unmappedPagesLinks: plan?.unmappedPagesLinks ?? [],
     reviewFlags,
     reviewed,
+    legalDropped: check.legalDropped,
   };
 }
 

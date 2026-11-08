@@ -3,8 +3,12 @@ import type { PagesDataFile, PagesPackage } from './pages-reader';
 import {
   checkProposal,
   contentParagraphs,
+  DROP_REVIEW_CHARACTERS,
+  LEGAL_REVIEW_CHARACTERS,
+  LEGAL_REVIEW_PARAGRAPHS,
   type ProfileProposal,
   proposeStructure,
+  reviewProblems,
   romanValue,
 } from './proposal';
 
@@ -167,8 +171,9 @@ describe('proposeStructure', () => {
         },
         { text: 'VI. Skipped five, so not a new belief.' },
         { text: 'IIII. Not a numeral.' },
-        { text: 'I. A restart is allowed.' },
-        { text: 'Belief 2: also typed.' },
+        { text: 'I. A later "I." does not restart the count.' },
+        { text: 'V. Five, the next number after IV.' },
+        { text: 'Belief 6: also typed.' },
       ]),
     );
 
@@ -176,13 +181,253 @@ describe('proposeStructure', () => {
       ['I. No god offered by any religion is the true God.', [1]],
       ['I. And yet I do believe.', [2]],
       ['III. The evidence.', [3, 4, 5]],
-      [expect.stringMatching(/^IV. My conclusion.*…$/), [6, 7, 8]],
-      ['I. A restart is allowed.', [9]],
-      ['Belief 2: also typed.', [10]],
+      [expect.stringMatching(/^IV. My conclusion.*…$/), [6, 7, 8, 9]],
+      ['V. Five, the next number after IV.', [10]],
+      ['Belief 6: also typed.', [11]],
     ]);
     expect(proposal.tabs[3].title.length).toBeLessThanOrEqual(80);
     expect(proposal.tabs[3].title.length).toBeGreaterThan(75);
     expect(proposal.images).toEqual({ gallery: [] });
+  });
+
+  describe('typed numbering', () => {
+    const titles = (texts: string[]) => {
+      const doc = docx([h('Beliefs'), ...texts.map((text) => ({ text }))]);
+      const proposal = proposeStructure(INPUT, doc);
+      return {
+        tabs: proposal.tabs.map((tab) => [tab.title, tab.paragraphs.length]),
+        flags: checkProposal(proposal, doc).reviewFlags,
+      };
+    };
+
+    it('reads "I." after "H." as the letter, keeping every belief', () => {
+      const letters = 'ABCDEFGH'.split('').map((l) => `${l}. point`);
+      const { tabs, flags } = titles([
+        'I. One',
+        ...letters,
+        'I. the ninth letter',
+        'J. point',
+        'II. Two',
+        'III. Three',
+      ]);
+      expect(tabs).toEqual([
+        ['I. One', 11],
+        ['II. Two', 1],
+        ['III. Three', 1],
+      ]);
+      expect(flags).toEqual([]);
+    });
+
+    it('keeps "I." under "III." in the belief, does not restart, and flags it', () => {
+      const { tabs, flags } = titles([
+        'I. One',
+        'II. Two',
+        'III. Three',
+        'A. a',
+        'I. which letter is this',
+        'IV. Four',
+        'V. Five',
+      ]);
+      expect(tabs).toEqual([
+        ['I. One', 1],
+        ['II. Two', 1],
+        ['III. Three', 3],
+        ['IV. Four', 1],
+        ['V. Five', 1],
+      ]);
+      expect(flags).toEqual([
+        'Paragraph 5: its typed label does not follow the numbering; check whether it starts a belief.',
+      ]);
+    });
+
+    it('never makes typed lower-case sub-points into tabs', () => {
+      const { tabs, flags } = titles([
+        'I. One',
+        'A. a',
+        'i. sub one',
+        'ii. sub two',
+        'II. Two',
+      ]);
+      expect(tabs).toEqual([
+        ['I. One', 4],
+        ['II. Two', 1],
+      ]);
+      expect(flags).toEqual([]);
+    });
+
+    it('flags lower-case numerals with no belief above them', () => {
+      const { flags } = titles(['i. first', 'ii. second', 'vx. no numeral']);
+      expect(flags).toEqual([
+        'Paragraph 1: a lower-case numeral with no belief above it; check how this list was split.',
+        'Paragraph 2: a lower-case numeral with no belief above it; check how this list was split.',
+      ]);
+    });
+
+    it.each([
+      ['after a full stop', 'I. The first statement.A. A second one follows.'],
+      ['after a quote', 'I. It says "so."B. And more.'],
+      ['with a Roman label', 'I. The first.II. The second runs on.'],
+      ['after a line break', 'I. The first\nB. The second.'],
+    ])('flags items run together %s', (_name, text) => {
+      expect(titles([text]).flags).toEqual([
+        'Paragraph 1: may hold several items run together; split it by hand if so.',
+      ]);
+    });
+
+    it('does not flag an ordinary sentence', () => {
+      expect(titles(['I. Dr. Who said a thing. Then left.']).flags).toEqual([]);
+    });
+  });
+
+  describe('the Legal section', () => {
+    it('keeps a Legal-prefixed category inside Beliefs, and flags it', () => {
+      const doc = docx([
+        h('Beliefs'),
+        h('Basic', 3),
+        { text: 'I. one' },
+        h('Legal Rights and Liberty', 3),
+        { text: 'I. a belief about liberty' },
+        h('Theology', 3),
+        { text: 'I. kept' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+
+      expect(proposal.dropped).toEqual([]);
+      expect(proposal.tabs.map((tab) => tab.group)).toEqual([
+        'Basic',
+        'Legal Rights and Liberty',
+        'Theology',
+      ]);
+      expect(checkProposal(proposal, doc).reviewFlags).toEqual([
+        'Heading at paragraph 3 starts with "Legal" but what follows is kept; confirm it is the member\'s own text and not the Legal section.',
+      ]);
+    });
+
+    it.each(['Legal', ' LEGAL ', 'legal:', 'Legal :', 'Legal\u00a0'])(
+      'treats a section heading written %p as the Legal section',
+      (heading) => {
+        const doc = docx([
+          h('Beliefs'),
+          { text: 'a' },
+          h(heading),
+          { text: 'l' },
+        ]);
+        const proposal = proposeStructure(INPUT, doc);
+        expect(proposal.dropped.map((drop) => drop.paragraphs)).toEqual([[3]]);
+        expect(checkProposal(proposal, doc).reviewFlags).toEqual([]);
+      },
+    );
+
+    it('keeps a same-level "Legal Rights" section as the member wrote it', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'a' },
+        h('Legal Rights'),
+        { text: 'mine' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+      expect(proposal.sections).toEqual([
+        { section: 'other', heading: 'Legal Rights', paragraphs: [3] },
+      ]);
+    });
+
+    it('does not treat "Legal" deeper than the section level as the section', () => {
+      const doc = docx([
+        h('Beliefs', 2),
+        { text: 'a' },
+        h('Legal', 3),
+        { text: 'still mine' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+      expect(proposal.dropped).toEqual([]);
+      expect(proposal.tabs[1]).toEqual(
+        expect.objectContaining({ group: 'Legal' }),
+      );
+      expect(checkProposal(proposal, doc).reviewFlags).toEqual([
+        expect.stringContaining('starts with "Legal"'),
+      ]);
+    });
+
+    it('reports its size and flags one over either limit', () => {
+      const legal = (count: number, length: number) =>
+        docx([
+          h('Beliefs'),
+          { text: 'I. a' },
+          h('Legal'),
+          ...Array.from({ length: count }, () => ({
+            text: 'x'.repeat(length),
+          })),
+        ]);
+      const run = (doc: DocxDocument) =>
+        checkProposal(proposeStructure(INPUT, doc), doc);
+
+      expect(run(legal(LEGAL_REVIEW_PARAGRAPHS, 1))).toEqual(
+        expect.objectContaining({
+          reviewFlags: [],
+          legalDropped: { paragraphs: 30, characters: 30 },
+        }),
+      );
+      expect(run(legal(LEGAL_REVIEW_PARAGRAPHS + 1, 1)).reviewFlags).toEqual([
+        'Legal section dropped: 31 paragraphs (31 characters), more than expected; check that it holds nothing else.',
+      ]);
+      expect(run(legal(1, LEGAL_REVIEW_CHARACTERS)).reviewFlags).toEqual([]);
+      expect(run(legal(1, LEGAL_REVIEW_CHARACTERS + 1)).reviewFlags).toEqual([
+        'Legal section dropped: 1 paragraphs (5001 characters), more than expected; check that it holds nothing else.',
+      ]);
+    });
+
+    it('flags paragraphs dropped as Legal that are not under a Legal heading', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'a' },
+        h('Theology', 3),
+        { text: 'hand-dropped' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+      proposal.tabs.pop();
+      proposal.dropped.push({ paragraphs: [3], reason: 'Legal, by hand' });
+      expect(checkProposal(proposal, doc).reviewFlags).toEqual(
+        expect.arrayContaining([
+          'Paragraphs dropped as Legal do not sit under a "Legal" heading; check they belong there (paragraph 3).',
+        ]),
+      );
+      proposal.dropped[0].paragraphs = [1];
+      proposal.structure = [];
+      proposal.tabs = [];
+      const unheaded = docx([{ text: 'first' }, { text: 'b' }]);
+      expect(
+        checkProposal(
+          {
+            ...proposal,
+            sections: [],
+            dropped: [{ paragraphs: [0, 1], reason: 'Legal, by hand' }],
+          },
+          unheaded,
+        ).reviewFlags,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('do not sit under a "Legal" heading'),
+        ]),
+      );
+    });
+  });
+
+  it('flags drops outside Legal over the character limit, across groups', () => {
+    const doc = (size: number) =>
+      docx([
+        { text: 'x'.repeat(size) },
+        h('Bio'),
+        { text: '---' },
+        h('Beliefs'),
+        { text: 'I. a' },
+      ]);
+    const run = (d: DocxDocument) =>
+      checkProposal(proposeStructure(INPUT, d), d).reviewFlags;
+
+    expect(run(doc(DROP_REVIEW_CHARACTERS - 3))).toEqual([]);
+    expect(run(doc(DROP_REVIEW_CHARACTERS - 2))).toEqual([
+      '501 characters dropped outside the Legal section.',
+    ]);
   });
 
   it('treats a same-level unknown heading as a new section, a deeper one as content', () => {
@@ -331,6 +576,40 @@ describe('proposeStructure', () => {
   });
 });
 
+describe('reviewProblems', () => {
+  const SHA = 'a'.repeat(64);
+  const proposal = (reviewed: unknown): ProfileProposal =>
+    ({ reviewed }) as ProfileProposal;
+  const good = { by: 'Sam', at: '2026-11-08T10:00:00Z', sourceSha256: SHA };
+
+  it('has nothing to say about a proposal with no review, or a sound one', () => {
+    expect(reviewProblems(proposal(undefined), SHA)).toEqual([]);
+    expect(reviewProblems(proposal(good), SHA)).toEqual([]);
+  });
+
+  it.each([
+    [
+      'null',
+      null,
+      '"by" is empty; "at" is not a valid date; it has no "sourceSha256"',
+    ],
+    ['empty by', { ...good, by: '  ' }, '"by" is empty'],
+    ['non-text by', { ...good, by: 3 }, '"by" is empty'],
+    ['bad at', { ...good, at: 'yesterday' }, '"at" is not a valid date'],
+    ['non-text at', { ...good, at: 3 }, '"at" is not a valid date'],
+    ['no hash', { by: 'Sam', at: good.at }, 'it has no "sourceSha256"'],
+    [
+      'stale',
+      { ...good, sourceSha256: 'b'.repeat(64) },
+      'the .docx has changed',
+    ],
+  ])('voids a review with %s, saying how to fix it', (_n, reviewed, reason) => {
+    const [problem] = reviewProblems(proposal(reviewed), SHA);
+    expect(problem).toContain(`Review is void: ${reason}`);
+    expect(problem).toContain(`"sourceSha256": "${SHA}"`);
+  });
+});
+
 describe('checkProposal', () => {
   const comment = (
     id: string,
@@ -414,6 +693,85 @@ describe('checkProposal', () => {
         flaggedDoc,
       ).reviewFlags[0],
     ).toBe('No belief tabs.');
+  });
+
+  it('refuses a belief moved into structure, allowing headings and categories', () => {
+    const bad = valid();
+    bad.structure.push(...bad.tabs.pop()!.paragraphs);
+    expect(checkProposal(bad, doc).errors).toEqual([
+      'Paragraph 4 is in structure but is not a heading.',
+    ]);
+
+    const heading = docx([
+      h('Beliefs'),
+      { text: 'a' },
+      h('A heading I added', 3),
+      h('', 3),
+    ]);
+    const proposal = proposeStructure(INPUT, heading);
+    proposal.structure.push(3);
+    expect(checkProposal(proposal, heading).errors).toEqual([
+      'Paragraph 3 is in structure but is not a heading.',
+    ]);
+    proposal.structure.pop();
+    proposal.structure.push(99);
+    expect(checkProposal(proposal, heading).errors).toEqual([
+      'a heading: paragraph 99 does not exist.',
+    ]);
+  });
+
+  it('flags a heading whose text or picture ends up nowhere', () => {
+    const headed = docx([
+      h('Beliefs'),
+      { text: 'a' },
+      { ...h('I believe this but styled it as a heading', 3) },
+      { ...h('Photo', 3), images: ['word/media/image1.png'] },
+      { text: 'b' },
+    ]);
+    expect(
+      checkProposal(proposeStructure(INPUT, headed), headed).reviewFlags,
+    ).toEqual([
+      'Heading at paragraph 2 is not kept anywhere; check it is not a belief.',
+      'Heading at paragraph 3 holds an image that will not be imported.',
+    ]);
+  });
+
+  it('keeps a reply with its parent, wherever the reply itself points', () => {
+    const replies = docx(
+      [h('Beliefs'), num('one', 0), num('two', 0)],
+      [
+        comment('p', [1]),
+        { ...comment('no-range', [], false), parentId: 'p' },
+        { ...comment('elsewhere', [2]), parentId: 'p' },
+        { ...comment('grandchild', [], false), parentId: 'elsewhere' },
+        { ...comment('orphan', [2]), parentId: 'missing' },
+      ],
+    );
+    expect(
+      checkProposal(proposeStructure(INPUT, replies), replies).placements,
+    ).toEqual([
+      { commentId: 'p', tab: 0, paragraph: 1 },
+      { commentId: 'no-range', tab: 0, paragraph: 1 },
+      { commentId: 'elsewhere', tab: 0, paragraph: 1 },
+      { commentId: 'grandchild', tab: 0, paragraph: 1 },
+      { commentId: 'orphan', tab: 1, paragraph: 2 },
+    ]);
+  });
+
+  it('refuses replies that form a loop', () => {
+    const looped = docx(
+      [h('Beliefs'), num('one', 0)],
+      [
+        { ...comment('a', [1]), parentId: 'b' },
+        { ...comment('b', [1]), parentId: 'a' },
+      ],
+    );
+    expect(
+      checkProposal(proposeStructure(INPUT, looped), looped).errors,
+    ).toEqual([
+      'Comment a: its replies form a loop.',
+      'Comment b: its replies form a loop.',
+    ]);
   });
 
   it('ignores a dropped index that does not exist when sizing a drop', () => {

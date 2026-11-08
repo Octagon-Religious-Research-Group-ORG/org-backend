@@ -51,6 +51,7 @@ const plan = {
 const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
   errors,
   reviewFlags,
+  legalDropped: { paragraphs: 2, characters: 40 },
   placements: [
     { commentId: '1', tab: 0, paragraph: 0, spansTabs: true },
     { commentId: '2', unplaced: 'not-anchored' as const },
@@ -58,6 +59,22 @@ const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
 });
 
 describe('buildProfileReport', () => {
+  it('blocks a profile whose recorded review is void, flags or no flags', () => {
+    const report = buildProfileReport(
+      'a',
+      docx(),
+      check(),
+      plan,
+      cross('ok'),
+      false,
+      ['Review is void: the .docx has changed since this review.'],
+    );
+    expect(report.status).toBe('mismatch');
+    expect(report.reasons).toEqual([
+      'Review is void: the .docx has changed since this review.',
+    ]);
+  });
+
   it('needs a review when the .pages names an author with no comment', () => {
     const pagesOnly = {
       ...cross('ok'),
@@ -98,6 +115,7 @@ describe('buildProfileReport', () => {
       unmappedPagesLinks: ['https://www.icloud.com/pages/X'],
       reviewFlags: [],
       reviewed: false,
+      legalDropped: { paragraphs: 2, characters: 40 },
     });
   });
 

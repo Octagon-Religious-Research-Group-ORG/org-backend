@@ -1,7 +1,8 @@
 import type { BlockSection } from '../../social/schemas/profile-block.schema';
 import type { ProfileVisibility } from '../../social/schemas/social-profile.schema';
 import { SLUG_PATTERN } from '../../social/schemas/social-profile.schema';
-import type { DocxDocument, DocxParagraph } from './docx-reader';
+import { legacyDate } from './docx-reader';
+import type { DocxComment, DocxDocument, DocxParagraph } from './docx-reader';
 import type { PagesPackage } from './pages-reader';
 
 export const PROPOSAL_VERSION = 1;
@@ -29,9 +30,16 @@ export interface ProfileProposal {
   images: { picture?: string; gallery: string[] };
   /**
    * Set by the person who checked this proposal against the document. A
-   * proposal with review flags (see `checkProposal`) is not imported without it.
+   * proposal with review flags (see `checkProposal`) is not imported without
+   * it. `sourceSha256` ties the review to the exact .docx that was read, so a
+   * changed document voids it; see `reviewProblems`.
    */
-  reviewed?: { by: string; at: string; note?: string };
+  reviewed?: {
+    by: string;
+    at: string;
+    note?: string;
+    sourceSha256?: string;
+  };
 }
 
 /** A tab longer than this is probably several beliefs (one belief per tab, §2c). */
@@ -39,6 +47,17 @@ export const LONG_TAB_PARAGRAPHS = 15;
 
 /** Dropping more than this outside the Legal section needs a person's look. */
 export const DROP_REVIEW_PARAGRAPHS = 3;
+
+/** Dropping more than this much text outside the Legal section needs a look. */
+export const DROP_REVIEW_CHARACTERS = 500;
+
+/**
+ * A Legal section bigger than this is suspicious: the real ones are e-signed
+ * checklists, long-ish, but this much may mean the section swallowed beliefs.
+ * The real sections cannot be measured from here, so these are estimates.
+ */
+export const LEGAL_REVIEW_PARAGRAPHS = 30;
+export const LEGAL_REVIEW_CHARACTERS = 5_000;
 
 export interface ProposalSection {
   section: Exclude<BlockSection, 'beliefs' | 'legal'>;
@@ -73,12 +92,25 @@ function sectionKind(heading: string): Kind {
     return 'bio-beliefs';
   }
   if (/^contact( info(rmation)?)?$/.test(text)) return 'contact';
-  if (/^legal\b/.test(text)) return 'legal';
+  // Exactly "Legal": "Legal Rights and Liberty" is a member's own heading.
+  if (/^legal ?:?$/.test(text)) return 'legal';
   return 'other';
 }
 
-/** A typed top-level label: a Roman numeral ("III.") or "Belief 3". */
-const LITERAL_TOP_LABEL = /^\s*(?:([IVXLC]+)[.)]|belief\s+(\d+)[.:)]?)\s+/i;
+/** A typed top-level label: an upper-case Roman numeral ("III."). */
+const ROMAN_TOP_LABEL = /^\s*([IVXLC]+)[.)]\s+/;
+
+/** A typed top-level label: "Belief 3". */
+const BELIEF_TOP_LABEL = /^\s*belief\s+(\d+)[.:)]?\s+/i;
+
+/** A lower-case Roman label ("ii."), which is a sub-point, never a belief. */
+const LOWER_ROMAN_LABEL = /^\s*([ivxlc]+)[.)]\s+/;
+
+/** A typed single capital ("H."), which is a lettered sub-point or a numeral. */
+const LETTER_LABEL = /^\s*([A-Z])[.)]\s+/;
+
+/** Another label inside a paragraph: "…the true God.A. Some…", or after a line break. */
+const RUN_TOGETHER = /(?:[.!?]["”’)]*|\n\s*)(?:[A-Z]|[IVXLC]{2,})[.)]\s+\S/;
 
 /** A bullet character starting a paragraph ("•I believe…"). Not "-": members use "---" as separators. */
 const BULLET = /^\s*[•●▪◦‣]\s*/;
@@ -103,6 +135,12 @@ export const PLACEHOLDER_REASON =
   'Unfilled template placeholder (instructions in parentheses)';
 export const ONBOARDING_REASON =
   "Onboarding template copied into the page (Tripp's membership instructions), not the member's own text";
+export const LEGAL_REASON = 'Legal section: not migrated (Tripp, plan §2b)';
+
+/** Whether a drop is the Legal section (kept out of the import record too). */
+export function isLegalDrop(drop: { reason: string }): boolean {
+  return /^Legal/.test(drop.reason);
+}
 
 const ROMAN: [number, string][] = [
   [100, 'C'],
@@ -148,9 +186,10 @@ export function romanValue(numeral: string): number {
  * sub-point "C." from starting a new belief.
  */
 function literalTopNumber(text: string): number | undefined {
-  const match = LITERAL_TOP_LABEL.exec(text);
-  if (!match) return undefined;
-  const value = match[1] ? romanValue(match[1]) : Number(match[2]);
+  const roman = ROMAN_TOP_LABEL.exec(text)?.[1];
+  const value = roman
+    ? romanValue(roman)
+    : Number(BELIEF_TOP_LABEL.exec(text)?.[1]);
   return Number.isNaN(value) ? undefined : value;
 }
 
@@ -188,10 +227,16 @@ interface BeliefEntry {
  *   a bullet;
  * - with no labels or bullets at all, each paragraph is its own tab.
  * Text before the first belief becomes its own "(introduction)" tab.
+ *
+ * Numbering by hand is ambiguous, so what cannot be settled is written to
+ * `notes` for a person. "I." after "H." is the letter, but "I." after "III."
+ * may be a letter or a restart: it stays inside the belief and is noted, so
+ * the numbers after it still split correctly.
  */
 function splitBeliefs(
   entries: BeliefEntry[],
   structure: number[],
+  notes: string[],
 ): ProposalTab[] {
   const group = entries[0].group;
   const numbered = entries.filter((entry) => entry.paragraph.numbering);
@@ -218,6 +263,7 @@ function splitBeliefs(
   );
 
   let lastTop = 0;
+  let previousLetter: string | undefined;
   const tabs: ProposalTab[] = [];
   let tab: ProposalTab | undefined;
   for (const { paragraph } of entries) {
@@ -227,8 +273,35 @@ function splitBeliefs(
     }
     const text = paragraph.text.trim();
     const typed = paragraph.numbering ? undefined : literalTopNumber(text);
+    const letter = paragraph.numbering
+      ? undefined
+      : LETTER_LABEL.exec(text)?.[1];
+    const continuesLetters =
+      letter !== undefined &&
+      previousLetter !== undefined &&
+      letter.charCodeAt(0) === previousLetter.charCodeAt(0) + 1;
     const sequential =
-      typed !== undefined && (typed === lastTop + 1 || typed === 1);
+      typed !== undefined && typed === lastTop + 1 && !continuesLetters;
+    if (typed !== undefined && !sequential && !continuesLetters) {
+      notes.push(
+        `Paragraph ${paragraph.index}: its typed label does not follow the numbering; check whether it starts a belief.`,
+      );
+    }
+    if (
+      !paragraph.numbering &&
+      lastTop === 0 &&
+      LOWER_ROMAN_LABEL.test(text) &&
+      !Number.isNaN(romanValue(LOWER_ROMAN_LABEL.exec(text)![1]))
+    ) {
+      notes.push(
+        `Paragraph ${paragraph.index}: a lower-case numeral with no belief above it; check how this list was split.`,
+      );
+    }
+    if (RUN_TOGETHER.test(text)) {
+      notes.push(
+        `Paragraph ${paragraph.index}: may hold several items run together; split it by hand if so.`,
+      );
+    }
     const startsBelief =
       !labelled ||
       paragraph.numbering?.level === splitLevel ||
@@ -236,6 +309,8 @@ function splitBeliefs(
       sequential;
     if (paragraph.numbering?.level === 0) lastTop += 1;
     else if (sequential) lastTop = typed;
+    if (startsBelief) previousLetter = undefined;
+    else if (letter !== undefined) previousLetter = letter;
     if (startsBelief || !tab) {
       tab = {
         title: startsBelief
@@ -275,6 +350,17 @@ export function proposeStructure(
   pages?: PagesPackage,
   options: { templateSha256?: ReadonlySet<string> } = {},
 ): ProfileProposal {
+  return analyseStructure(input, docx, pages, options).proposal;
+}
+
+/** `proposeStructure`, plus what the split could not settle by itself. */
+function analyseStructure(
+  input: ProposalInput,
+  docx: DocxDocument,
+  pages: PagesPackage | undefined,
+  options: { templateSha256?: ReadonlySet<string> },
+): { proposal: ProfileProposal; splitNotes: string[] } {
+  const splitNotes: string[] = [];
   const proposal: ProfileProposal = {
     version: PROPOSAL_VERSION,
     ...input,
@@ -314,7 +400,8 @@ export function proposeStructure(
       text !== '' &&
       (kind === undefined
         ? sectionKind(text) !== 'other'
-        : level <= sectionLevel || sectionKind(text) !== 'other');
+        : level <= sectionLevel ||
+          (sectionKind(text) !== 'other' && sectionKind(text) !== 'legal'));
 
     if (isSectionHeading) {
       kind = sectionKind(text);
@@ -366,7 +453,9 @@ export function proposeStructure(
   }
 
   for (const entries of beliefRuns) {
-    proposal.tabs.push(...splitBeliefs(entries, proposal.structure));
+    proposal.tabs.push(
+      ...splitBeliefs(entries, proposal.structure, splitNotes),
+    );
   }
   proposal.structure.sort((a, b) => a - b);
 
@@ -382,7 +471,7 @@ export function proposeStructure(
       ? ONBOARDING_REASON
       : 'Before the first section: title and navigation',
   );
-  drop(legal, 'Legal section: not migrated (Tripp, plan §2b)');
+  drop(legal, LEGAL_REASON);
   drop(placeholders, PLACEHOLDER_REASON);
   drop(separators, 'Separator lines');
 
@@ -402,7 +491,39 @@ export function proposeStructure(
       gallery: photos.slice(1).map((file) => file.path),
     };
   }
-  return proposal;
+  return { proposal, splitNotes };
+}
+
+/**
+ * Why a proposal's `reviewed` entry cannot be trusted, or [] when it can (or
+ * when there is none, which `buildProfileReport` handles separately). A
+ * review must name who and when, and the exact .docx it was done against: a
+ * review of a document that has since changed reviewed something else.
+ */
+export function reviewProblems(
+  proposal: ProfileProposal,
+  docxSha256: string,
+): string[] {
+  if (proposal.reviewed === undefined) return [];
+  const review = proposal.reviewed as Partial<
+    NonNullable<ProfileProposal['reviewed']>
+  > | null;
+  const problems: string[] = [];
+  if (typeof review?.by !== 'string' || review.by.trim() === '') {
+    problems.push('"by" is empty');
+  }
+  if (typeof review?.at !== 'string' || !legacyDate(review.at)) {
+    problems.push('"at" is not a valid date');
+  }
+  if (review?.sourceSha256 === undefined) {
+    problems.push('it has no "sourceSha256"');
+  } else if (review.sourceSha256 !== docxSha256) {
+    problems.push('the .docx has changed since this review');
+  }
+  if (problems.length === 0) return [];
+  return [
+    `Review is void: ${problems.join('; ')}. Re-review the profile against its .docx, then set "reviewed" to {"by": "<your name>", "at": "<ISO date>", "sourceSha256": "${docxSha256}"}.`,
+  ];
 }
 
 export interface CommentPlacement {
@@ -423,10 +544,13 @@ export interface ProposalCheck {
   /**
    * Things that are valid but need a person's look before import: no belief
    * tabs, content dropped outside Legal, very long tabs, comments that could
-   * not be placed or span tabs. A plausible split is not a correct one, so
-   * these block the import until `reviewed` is set.
+   * not be placed or span tabs, numbering that could not be settled. A
+   * plausible split is not a correct one, so these block the import until
+   * `reviewed` is set.
    */
   reviewFlags: string[];
+  /** Size of what was left out as the Legal section, always reported. */
+  legalDropped: { paragraphs: number; characters: number };
 }
 
 /**
@@ -471,7 +595,21 @@ export function checkProposal(
     if (tab.paragraphs.length === 0) errors.push(`Tab ${at + 1} is empty.`);
     tab.paragraphs.forEach((index) => claim(index, `tab ${at + 1}`));
   });
-  proposal.structure.forEach((index) => claim(index, 'a heading'));
+  const analysis = analyseStructure(proposal, docx, undefined, {});
+  const generatedStructure = new Set(analysis.proposal.structure);
+  proposal.structure.forEach((index) => {
+    claim(index, 'a heading');
+    const paragraph = docx.paragraphs[index];
+    // Structure produces no block: anything that is not a real heading or a
+    // generated category would simply vanish from the import.
+    if (
+      paragraph &&
+      !generatedStructure.has(index) &&
+      (paragraph.headingLevel === undefined || paragraph.text.trim() === '')
+    ) {
+      errors.push(`Paragraph ${index} is in structure but is not a heading.`);
+    }
+  });
   proposal.dropped.forEach((drop, at) => {
     if (!drop.reason.trim())
       errors.push(`Dropped group ${at + 1} has no reason.`);
@@ -511,7 +649,7 @@ export function checkProposal(
   );
   const structure = new Set(proposal.structure);
 
-  const placements = docx.comments.map((comment): CommentPlacement => {
+  const placeOf = (comment: DocxComment): CommentPlacement => {
     if (!comment.anchored) {
       return { commentId: comment.id, unplaced: 'not-anchored' };
     }
@@ -545,17 +683,46 @@ export function checkProposal(
         ? 'anchor-in-heading'
         : 'anchor-dropped',
     };
+  };
+
+  // A reply belongs wherever the comment it answers belongs, even if it has no
+  // highlight of its own or one somewhere else; a thread is never split.
+  const byId = new Map(docx.comments.map((comment) => [comment.id, comment]));
+  const placements = docx.comments.map((comment): CommentPlacement => {
+    const seen = new Set([comment.id]);
+    let root = comment;
+    while (root.parentId !== undefined && byId.has(root.parentId)) {
+      const parent = byId.get(root.parentId)!;
+      if (seen.has(parent.id)) {
+        errors.push(`Comment ${comment.id}: its replies form a loop.`);
+        break;
+      }
+      seen.add(parent.id);
+      root = parent;
+    }
+    return { ...placeOf(root), commentId: comment.id };
   });
 
   const reviewFlags: string[] = [];
   if (proposal.tabs.length === 0) reviewFlags.push('No belief tabs.');
-  for (const drop of proposal.dropped) {
-    if (/^Legal/.test(drop.reason)) continue;
+  const sizeOf = (drop: { paragraphs: number[] }) => {
     const kept = drop.paragraphs.filter((index) => docx.paragraphs[index]);
     const characters = kept.reduce(
       (sum, index) => sum + docx.paragraphs[index].text.trim().length,
       0,
     );
+    return { kept, characters };
+  };
+  let characterTotal = 0;
+  const legalDropped = { paragraphs: 0, characters: 0 };
+  for (const drop of proposal.dropped) {
+    const { kept, characters } = sizeOf(drop);
+    if (isLegalDrop(drop)) {
+      legalDropped.paragraphs += kept.length;
+      legalDropped.characters += characters;
+      continue;
+    }
+    characterTotal += characters;
     // A hint in parentheses could be the member's own aside: always look.
     if (
       kept.length > DROP_REVIEW_PARAGRAPHS ||
@@ -565,6 +732,19 @@ export function checkProposal(
         `${kept.length} paragraphs (${characters} characters) dropped: ${drop.reason}.`,
       );
     }
+  }
+  if (characterTotal > DROP_REVIEW_CHARACTERS) {
+    reviewFlags.push(
+      `${characterTotal} characters dropped outside the Legal section.`,
+    );
+  }
+  if (
+    legalDropped.paragraphs > LEGAL_REVIEW_PARAGRAPHS ||
+    legalDropped.characters > LEGAL_REVIEW_CHARACTERS
+  ) {
+    reviewFlags.push(
+      `Legal section dropped: ${legalDropped.paragraphs} paragraphs (${legalDropped.characters} characters), more than expected; check that it holds nothing else.`,
+    );
   }
   proposal.tabs.forEach((tab, at) => {
     if (tab.paragraphs.length > LONG_TAB_PARAGRAPHS) {
@@ -583,6 +763,58 @@ export function checkProposal(
   if (spanning > 0) {
     reviewFlags.push(`${spanning} comment(s) highlight text across tabs.`);
   }
+  reviewFlags.push(...analysis.splitNotes);
 
-  return { errors, placements, reviewFlags };
+  const content = contentParagraphs(docx);
+  const legalParagraphs = new Set(
+    proposal.dropped.filter(isLegalDrop).flatMap((drop) => drop.paragraphs),
+  );
+  content.forEach((paragraph, at) => {
+    const next = content[at + 1];
+    if (
+      paragraph.headingLevel !== undefined &&
+      /^legal\b/i.test(paragraph.text.trim()) &&
+      next &&
+      !legalParagraphs.has(next.index)
+    ) {
+      reviewFlags.push(
+        `Heading at paragraph ${paragraph.index} starts with "Legal" but what follows is kept; confirm it is the member's own text and not the Legal section.`,
+      );
+    }
+  });
+  for (const drop of proposal.dropped.filter(isLegalDrop)) {
+    const first = Math.min(...drop.paragraphs);
+    const heading = content
+      .filter((p) => p.headingLevel !== undefined && p.index < first)
+      .at(-1);
+    if (!heading || sectionKind(heading.text) !== 'legal') {
+      reviewFlags.push(
+        `Paragraphs dropped as Legal do not sit under a "Legal" heading; check they belong there (paragraph ${first}).`,
+      );
+    }
+  }
+
+  const keptHeadings = new Set(
+    [
+      ...proposal.sections.map((section) => section.heading),
+      ...proposal.tabs.map((tab) => tab.group),
+    ].map((text) => text?.trim()),
+  );
+  for (const index of proposal.structure) {
+    const paragraph = docx.paragraphs[index];
+    if (!paragraph) continue;
+    if (paragraph.images.length > 0) {
+      reviewFlags.push(
+        `Heading at paragraph ${index} holds an image that will not be imported.`,
+      );
+    }
+    const text = paragraph.text.trim();
+    if (sectionKind(text) === 'other' && !keptHeadings.has(text)) {
+      reviewFlags.push(
+        `Heading at paragraph ${index} is not kept anywhere; check it is not a belief.`,
+      );
+    }
+  }
+
+  return { errors, placements, reviewFlags, legalDropped };
 }

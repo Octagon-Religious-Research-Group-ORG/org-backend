@@ -46,8 +46,10 @@ import {
 } from './pages/pages-reader';
 import {
   checkProposal,
+  isLegalDrop,
   type ProfileProposal,
   proposeStructure,
+  reviewProblems,
 } from './pages/proposal';
 import {
   buildProfileReport,
@@ -138,9 +140,7 @@ function proposalPath(dir: string, slug: string) {
 /** Text kept in the import record: everything except the dropped Legal section. */
 function extractedText(docx: DocxDocument, proposal: ProfileProposal) {
   const legal = new Set(
-    proposal.dropped
-      .filter((drop) => /^Legal/.test(drop.reason))
-      .flatMap((drop) => drop.paragraphs),
+    proposal.dropped.filter(isLegalDrop).flatMap((drop) => drop.paragraphs),
   );
   return docx.paragraphs
     .filter((paragraph) => !legal.has(paragraph.index))
@@ -157,11 +157,11 @@ function writeReports(dir: string, reports: ProfileReport[], extra: object) {
   const lines = [
     `# Pages import report: ${status.toUpperCase()}`,
     '',
-    '| Profile | Status | Tabs | Blocks | Comments (replies) | On tabs | Unplaced | Images | Pages links left | Review flags | Reasons |',
-    '|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Profile | Status | Tabs | Blocks | Comments (replies) | On tabs | Unplaced | Images | Pages links left | Legal left out | Review flags | Reasons |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
     ...reports.map(
       (r) =>
-        `| ${r.slug} | ${r.status} | ${r.counts.tabs} | ${r.counts.blocks} | ${r.counts.comments} (${r.counts.replies}) | ${r.counts.commentsOnTabs} | ${r.unplacedComments.length} | ${r.counts.profileImages} | ${r.unmappedPagesLinks.length} | ${r.reviewFlags.length}${r.reviewed ? ' (reviewed)' : ''} | ${r.reasons.join('; ') || '—'} |`,
+        `| ${r.slug} | ${r.status} | ${r.counts.tabs} | ${r.counts.blocks} | ${r.counts.comments} (${r.counts.replies}) | ${r.counts.commentsOnTabs} | ${r.unplacedComments.length} | ${r.counts.profileImages} | ${r.unmappedPagesLinks.length} | ${r.legalDropped.paragraphs} ¶, ${r.legalDropped.characters} chars | ${r.reviewFlags.length}${r.reviewed ? ' (reviewed)' : ''} | ${r.reasons.join('; ') || '—'} |`,
     ),
   ];
   writeFileSync(join(dir, 'import-report.md'), `${lines.join('\n')}\n`);
@@ -242,6 +242,7 @@ export async function main(): Promise<number> {
     }
     const proposal = JSON.parse(readFileSync(path, 'utf8')) as ProfileProposal;
     const check = checkProposal(proposal, loaded.docx, loaded.pages);
+    const voidReview = reviewProblems(proposal, loaded.sources[0].sha256);
     const plan =
       check.errors.length === 0
         ? buildImportPlan(
@@ -257,7 +258,8 @@ export async function main(): Promise<number> {
       check,
       plan,
       loaded.pages ? crossCheck(loaded.docx, loaded.pages) : undefined,
-      proposal.reviewed !== undefined,
+      proposal.reviewed !== undefined && voidReview.length === 0,
+      voidReview,
     );
     prepared.push({ loaded, proposal, plan, report });
   }
