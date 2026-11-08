@@ -1,6 +1,6 @@
 import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { json } from 'express';
+import { json, type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
 import { MAX_JOIN_BODY_BYTES } from '../membership/membership.dto';
 import { createCorsOptions } from './cors';
@@ -34,8 +34,10 @@ export function configureHttpApp(
   // Nest skips its own parser when it finds a middleware named "jsonParser",
   // which would leave every other route with no JSON parsing at all.
   const parseLongJoin = json({ limit: MAX_JOIN_BODY_BYTES });
-  app.use('/api/v1/me/membership', (request, response, next) =>
-    parseLongJoin(request, response, next),
+  app.use(
+    '/api/v1/me/membership',
+    (request: Request, response: Response, next: NextFunction) =>
+      parseLongJoin(request, response, next),
   );
   app.useGlobalPipes(
     new ValidationPipe({
