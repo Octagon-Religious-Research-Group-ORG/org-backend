@@ -3,7 +3,11 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
-import type { JoinMembershipDto } from './membership.dto';
+import {
+  type JoinMembershipDto,
+  MAX_JOIN_PARAGRAPHS,
+  MAX_JOIN_TEXT_CHARS,
+} from './membership.dto';
 import { MembershipService, splitParagraphs } from './membership.service';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
 
@@ -356,6 +360,56 @@ describe('MembershipService', () => {
       await expect(
         ctx.service.join('u', input(overrides), origin),
       ).rejects.toThrow('need some text');
+      expect(ctx.writes).toEqual([]);
+    });
+
+    it('refuses too many paragraphs across bio and beliefs before writing', async () => {
+      const ctx = setup();
+      const half = 'x\n\n'.repeat(MAX_JOIN_PARAGRAPHS / 2);
+      await expect(
+        ctx.service.join(
+          'u',
+          input({
+            bio: half,
+            beliefs: [{ title: 'God', text: `${half}one more` }],
+          }),
+          origin,
+        ),
+      ).rejects.toThrow(`at most ${MAX_JOIN_PARAGRAPHS} paragraphs`);
+      expect(ctx.writes).toEqual([]);
+    });
+
+    it('accepts exactly the paragraph limit', async () => {
+      const ctx = setup();
+      await ctx.service.join(
+        'u',
+        input({
+          bio: 'x\n\n'.repeat(MAX_JOIN_PARAGRAPHS - 1),
+          beliefs: [{ title: 'God', text: 'One.' }],
+        }),
+        origin,
+      );
+      expect(ctx.writes.filter((w) => w === 'version')).toHaveLength(
+        MAX_JOIN_PARAGRAPHS,
+      );
+    });
+
+    it('refuses more text in total than the join can hold, before writing', async () => {
+      const ctx = setup();
+      const box = 'x'.repeat(20_000);
+      const count = Math.ceil(MAX_JOIN_TEXT_CHARS / 20_000);
+      await expect(
+        ctx.service.join(
+          'u',
+          input({
+            beliefs: Array.from({ length: count }, (_, i) => ({
+              title: `T${i}`,
+              text: box,
+            })),
+          }),
+          origin,
+        ),
+      ).rejects.toThrow('characters');
       expect(ctx.writes).toEqual([]);
     });
 

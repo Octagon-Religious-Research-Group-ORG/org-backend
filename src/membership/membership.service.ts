@@ -23,7 +23,12 @@ import {
   SocialProfile,
   type SocialProfileDocument,
 } from '../social/schemas/social-profile.schema';
-import type { ContactEntryDto, JoinMembershipDto } from './membership.dto';
+import {
+  type ContactEntryDto,
+  type JoinMembershipDto,
+  MAX_JOIN_PARAGRAPHS,
+  MAX_JOIN_TEXT_CHARS,
+} from './membership.dto';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
 import { type SlugProblem, slugProblem } from './reserved-slugs';
 import {
@@ -214,6 +219,22 @@ export class MembershipService {
     ) {
       throw new BadRequestException(
         'Your name, your bio and every belief need some text.',
+      );
+    }
+    const textLength =
+      input.bio.length +
+      input.beliefs.reduce((sum, belief) => sum + belief.text.length, 0);
+    if (textLength > MAX_JOIN_TEXT_CHARS) {
+      throw new BadRequestException(
+        `Your bio and beliefs together can hold at most ${MAX_JOIN_TEXT_CHARS.toLocaleString('en-US')} characters. You can add more on your page later.`,
+      );
+    }
+    const paragraphCount =
+      bio.length +
+      beliefs.reduce((sum, belief) => sum + belief.paragraphs.length, 0);
+    if (paragraphCount > MAX_JOIN_PARAGRAPHS) {
+      throw new BadRequestException(
+        `Your bio and beliefs together can have at most ${MAX_JOIN_PARAGRAPHS} paragraphs. You can add more on your page later.`,
       );
     }
     const backup = cleanContacts(input.backupContacts);

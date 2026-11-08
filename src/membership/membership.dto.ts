@@ -21,19 +21,59 @@ import {
 /** Most beliefs a new member can enter at once; more are added on the page. */
 export const MAX_JOIN_BELIEFS = 20;
 
+/**
+ * Most paragraphs one join may create, bio and beliefs together. Each paragraph
+ * becomes permanent append-only rows, so the count is bounded separately from
+ * the text: one short bio of blank-line-separated letters created thousands.
+ */
+export const MAX_JOIN_PARAGRAPHS = 200;
+
+/**
+ * Most characters of bio and belief text one join may hold in total. Each box
+ * has its own limit (MAX_BLOCK_TEXT_LENGTH); this caps them added up, so that
+ * everything the form allows also fits the request body limit below.
+ */
+export const MAX_JOIN_TEXT_CHARS = 200_000;
+
+const MAX_DISPLAY_NAME = 120;
+const MAX_SLUG = 80;
+const MAX_BELIEF_TITLE = 120;
+const MAX_CONTACT_VALUE = 200;
+const MAX_CONTACT_ROWS = 5;
+const MAX_TERMS_VERSION = 40;
+
+/** Generous allowance for JSON keys, quotes and brackets of a full request. */
+const JSON_STRUCTURE_BYTES = 4096;
+
+/**
+ * Request body limit of the join route, derived from the limits above so they
+ * cannot drift apart. Three bytes per character is the UTF-8 worst case for
+ * typed text (an emoji is two characters and four bytes; a line break is
+ * written as two bytes in JSON).
+ */
+export const MAX_JOIN_BODY_BYTES =
+  3 *
+    (MAX_JOIN_TEXT_CHARS +
+      MAX_DISPLAY_NAME +
+      MAX_SLUG +
+      MAX_JOIN_BELIEFS * MAX_BELIEF_TITLE +
+      2 * MAX_CONTACT_ROWS * MAX_CONTACT_VALUE +
+      MAX_TERMS_VERSION) +
+  JSON_STRUCTURE_BYTES;
+
 export class ContactEntryDto {
   @IsIn(CONTACT_METHODS)
   method: ContactMethod;
 
   @IsString()
-  @Length(1, 200)
+  @Length(1, MAX_CONTACT_VALUE)
   value: string;
 }
 
 export class JoinBeliefDto {
   /** The tab label, e.g. "God" or "I. Basic Beliefs". */
   @IsString()
-  @Length(1, 120)
+  @Length(1, MAX_BELIEF_TITLE)
   title: string;
 
   /** Paragraphs separated by a blank line. */
@@ -50,12 +90,12 @@ export class JoinBeliefDto {
  */
 export class JoinMembershipDto {
   @IsString()
-  @Length(1, 120)
+  @Length(1, MAX_DISPLAY_NAME)
   displayName: string;
 
   /** Page address, `orgspirituality.org/<slug>`. Lower-cased by the server. */
   @IsString()
-  @Length(2, 80)
+  @Length(2, MAX_SLUG)
   slug: string;
 
   /** True when the display name is a nickname (anonymous membership). */
@@ -78,7 +118,7 @@ export class JoinMembershipDto {
 
   /** Shown on the page, only if the member adds them. */
   @IsArray()
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(MAX_CONTACT_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ContactEntryDto)
   contacts: ContactEntryDto[];
@@ -86,13 +126,13 @@ export class JoinMembershipDto {
   /** Admins only. At least one besides the account email. */
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(MAX_CONTACT_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ContactEntryDto)
   backupContacts: ContactEntryDto[];
 
   /** The terms version the member read and agreed to. */
   @IsString()
-  @MaxLength(40)
+  @MaxLength(MAX_TERMS_VERSION)
   termsVersion: string;
 }

@@ -25,6 +25,10 @@ import {
   MembershipController,
   MyMembershipController,
 } from '../src/membership/membership.controller';
+import {
+  MAX_JOIN_BODY_BYTES,
+  MAX_JOIN_TEXT_CHARS,
+} from '../src/membership/membership.dto';
 import { MembershipService } from '../src/membership/membership.service';
 
 const service = {
@@ -113,6 +117,67 @@ describe('Membership guards over HTTP (e2e)', () => {
         await slugCheck().expect(200);
       }
       await slugCheck().expect(429);
+    });
+
+    describe('request size', () => {
+      // Three bytes per character in UTF-8: the worst case for typed text.
+      const wide = (length: number) => '€'.repeat(length);
+      const biggestAllowed = () => ({
+        displayName: wide(120),
+        slug: wide(80),
+        anonymous: true,
+        visibility: 'members',
+        bio: wide(20_000),
+        beliefs: Array.from({ length: 20 }, (_, i) => ({
+          title: wide(120),
+          // 180,000 characters shared across the beliefs: bio + beliefs = cap.
+          text: wide((MAX_JOIN_TEXT_CHARS - 20_000) / 20 - (i % 2)),
+        })),
+        contacts: Array.from({ length: 5 }, () => ({
+          method: 'telegram',
+          value: wide(200),
+        })),
+        backupContacts: Array.from({ length: 5 }, () => ({
+          method: 'telegram',
+          value: wide(200),
+        })),
+        termsVersion: wide(40),
+      });
+
+      it('accepts the longest page the limits allow', async () => {
+        service.join.mockClear();
+        const body = biggestAllowed();
+        expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThanOrEqual(
+          MAX_JOIN_BODY_BYTES,
+        );
+        await request(app.getHttpServer())
+          .post('/api/v1/me/membership')
+          .send(body)
+          .expect(201);
+        expect(service.join).toHaveBeenCalledTimes(1);
+      });
+
+      it('still refuses a body over the join limit', async () => {
+        await request(app.getHttpServer())
+          .post('/api/v1/me/membership')
+          .send({ padding: 'x'.repeat(MAX_JOIN_BODY_BYTES + 1) })
+          .expect(413);
+      });
+
+      it('leaves other routes parsing JSON', async () => {
+        await request(app.getHttpServer())
+          .post('/api/v1/other')
+          .send({ small: 'body' })
+          .expect(201)
+          .expect({ received: 'object' });
+      });
+
+      it('does not widen the body limit of any other route', async () => {
+        await request(app.getHttpServer())
+          .post('/api/v1/other')
+          .send({ padding: 'x'.repeat(150 * 1024) })
+          .expect(413);
+      });
     });
 
     it('applies the write limit to joining', async () => {

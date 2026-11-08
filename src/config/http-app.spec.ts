@@ -19,7 +19,11 @@ describe('configureHttpApp', () => {
 
     expect(app.set).toHaveBeenCalledWith('trust proxy', 1);
     expect(app.setGlobalPrefix).toHaveBeenCalledWith('api/v1');
-    expect(app.use).toHaveBeenCalledTimes(1);
+    expect(app.use).toHaveBeenCalledTimes(2);
+    expect(app.use).toHaveBeenCalledWith(
+      '/api/v1/me/membership',
+      expect.any(Function),
+    );
     expect(app.enableCors).toHaveBeenCalledWith(
       expect.objectContaining({ origin: ['https://example.test'] }),
     );
