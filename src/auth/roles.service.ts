@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { ModerationLogService } from '../moderation/moderation-log.service';
 import { ClerkUserInfoService } from './clerk-user-info.service';
 import type { MemberRole } from './roles';
@@ -13,6 +18,10 @@ export interface RoleChange {
 
 export const MAX_REASON_LENGTH = 500;
 
+/** Told to the admin when Clerk changed the role but the log entry failed. */
+export const ROLE_AUDIT_INCOMPLETE_MESSAGE =
+  'The role was changed, but the audit record is incomplete: it shows the change as requested, not applied.';
+
 /**
  * Changes member roles, leaving a permanent trail in the moderation log.
  *
@@ -23,6 +32,8 @@ export const MAX_REASON_LENGTH = 500;
  */
 @Injectable()
 export class RolesService {
+  private readonly logger = new Logger(RolesService.name);
+
   constructor(
     private readonly clerk: ClerkUserInfoService,
     private readonly log: ModerationLogService,
@@ -66,6 +77,20 @@ export class RolesService {
       });
       throw error;
     }
-    await this.log.record({ ...entry, action: 'role.change.applied', details });
+    try {
+      await this.log.record({
+        ...entry,
+        action: 'role.change.applied',
+        details,
+      });
+    } catch (error) {
+      // Clerk has already changed the role, so a plain failure would be false.
+      this.logger.error(
+        `Role of ${change.targetUserId} changed to ${String(change.role)}, but the "applied" audit entry failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      throw new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE);
+    }
   }
 }

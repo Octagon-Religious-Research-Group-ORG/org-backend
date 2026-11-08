@@ -13,6 +13,13 @@ import type { AuthenticatedRequest } from './auth.types';
 import type { MemberRole } from './roles';
 
 /**
+ * Policy default, for the owner to confirm: how long a role cached on the
+ * profile may be trusted before it is read from Clerk again. Without a limit a
+ * role removed in Clerk keeps working for as long as the token hash matches.
+ */
+export const ROLE_CACHE_MAX_AGE_MS = 60_000;
+
+/**
  * Decides who has website-admin access.
  *
  * The source of truth is the Clerk role `publicMetadata.role = "admin"`. The
@@ -73,6 +80,7 @@ export class AdminAccessService {
             authEmailVerified,
             ...(authRole ? { authRole } : {}),
             ...(accessTokenHash ? { authEmailTokenHash: accessTokenHash } : {}),
+            authRoleCheckedAt: new Date(),
             isAdmin,
           },
           ...(Object.keys(unset).length ? { $unset: unset } : {}),
@@ -97,7 +105,7 @@ export class AdminAccessService {
         .lean()
         .exec();
 
-      if (profile) {
+      if (profile && this.roleIsFresh(profile.authRoleCheckedAt)) {
         const isAdmin = this.decideAdmin(
           authProviderId,
           profile.authRole,
@@ -115,6 +123,13 @@ export class AdminAccessService {
 
     const profile = await this.synchronizeProfile(request);
     return profile?.isAdmin === true;
+  }
+
+  private roleIsFresh(checkedAt: Date | undefined): boolean {
+    return (
+      checkedAt !== undefined &&
+      Date.now() - new Date(checkedAt).getTime() < ROLE_CACHE_MAX_AGE_MS
+    );
   }
 
   private decideAdmin(

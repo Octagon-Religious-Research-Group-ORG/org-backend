@@ -56,6 +56,10 @@ export class MemberProfile {
   @Prop({ type: String, enum: MEMBER_ROLES })
   authRole?: MemberRole;
 
+  /** When `authRole` was last read from Clerk; bounds how long it is trusted. */
+  @Prop({ type: Date })
+  authRoleCheckedAt?: Date;
+
   @Prop({ type: String, default: '' })
   preferredName: string;
 

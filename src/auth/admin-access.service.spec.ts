@@ -1,5 +1,8 @@
 import { Logger } from '@nestjs/common';
-import { AdminAccessService } from './admin-access.service';
+import {
+  AdminAccessService,
+  ROLE_CACHE_MAX_AGE_MS,
+} from './admin-access.service';
 import type { AuthenticatedRequest } from './auth.types';
 import { createHash } from 'node:crypto';
 
@@ -72,6 +75,7 @@ describe('AdminAccessService', () => {
           authEmail: 'admin@example.test',
           authEmailVerified: true,
           authEmailTokenHash: ACCESS_TOKEN_HASH,
+          authRoleCheckedAt: expect.any(Date),
           isAdmin: true,
         },
         $unset: { authRole: 1 },
@@ -112,6 +116,7 @@ describe('AdminAccessService', () => {
       $set: {
         authEmail: 'admin@example.test',
         authEmailVerified: false,
+        authRoleCheckedAt: expect.any(Date),
         isAdmin: false,
       },
       $unset: { authRole: 1, authEmailTokenHash: 1 },
@@ -138,6 +143,7 @@ describe('AdminAccessService', () => {
       $setOnInsert: { authProviderId: 'user_member' },
       $set: {
         authEmailVerified: false,
+        authRoleCheckedAt: expect.any(Date),
         isAdmin: false,
       },
       $unset: {
@@ -152,6 +158,8 @@ describe('AdminAccessService', () => {
     const findQuery = query({
       authEmail: 'ADMIN@example.test',
       authEmailVerified: true,
+      authRoleCheckedAt: new Date(),
+      authRoleCheckedAt: expect.any(Date),
       isAdmin: true,
     });
     const model = {
@@ -178,6 +186,7 @@ describe('AdminAccessService', () => {
     const findQuery = query({
       authEmail: 'member@example.test',
       authEmailVerified: true,
+      authRoleCheckedAt: new Date(),
       isAdmin: true,
     });
     const updateQuery = {
@@ -338,7 +347,12 @@ describe('AdminAccessService', () => {
     it('trusts a cached admin role for the current token', async () => {
       const model = {
         findOne: jest.fn(() =>
-          query({ authRole: 'admin', authEmailVerified: false, isAdmin: true }),
+          query({
+            authRole: 'admin',
+            authEmailVerified: false,
+            authRoleCheckedAt: new Date(),
+            isAdmin: true,
+          }),
         ),
         updateOne: jest.fn(),
       };
@@ -358,6 +372,7 @@ describe('AdminAccessService', () => {
           query({
             authEmail: 'admin@example.test',
             authEmailVerified: true,
+            authRoleCheckedAt: new Date(),
             isAdmin: true,
           }),
         ),
@@ -375,5 +390,55 @@ describe('AdminAccessService', () => {
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('user_member'));
     });
+  });
+});
+
+describe('how long a cached role is trusted', () => {
+  const NOW = new Date('2026-11-08T12:00:00.000Z').getTime();
+  const config = { get: jest.fn(() => '') };
+
+  function setup(checkedAt: Date | undefined) {
+    const cached = {
+      authProviderId: 'user_member',
+      authRole: 'admin',
+      authEmailVerified: true,
+      isAdmin: true,
+      authRoleCheckedAt: checkedAt,
+    };
+    // Clerk no longer lists the role, which is what a removal looks like.
+    const identity = {
+      getIdentity: jest.fn().mockResolvedValue({ emailVerified: true }),
+    };
+    const model = {
+      findOne: jest.fn(() => query(cached)),
+      updateOne: jest.fn(() => query({})),
+      findOneAndUpdate: jest.fn(() => query({ isAdmin: false })),
+    };
+    const service = new AdminAccessService(
+      config as never,
+      identity as never,
+      model as never,
+    );
+    return { service, identity };
+  }
+
+  beforeEach(() => jest.useFakeTimers({ now: NOW }));
+  afterEach(() => jest.useRealTimers());
+
+  it('uses the cache inside the limit, without asking Clerk', async () => {
+    const { service, identity } = setup(
+      new Date(NOW - ROLE_CACHE_MAX_AGE_MS + 1),
+    );
+    await expect(service.hasAdminAccess(request())).resolves.toBe(true);
+    expect(identity.getIdentity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['at the limit', new Date(NOW - ROLE_CACHE_MAX_AGE_MS)],
+    ['never checked', undefined],
+  ])('re-reads Clerk when %s, so a removed role ends', async (_case, at) => {
+    const { service, identity } = setup(at);
+    await expect(service.hasAdminAccess(request())).resolves.toBe(false);
+    expect(identity.getIdentity).toHaveBeenCalledWith('user_member');
   });
 });
