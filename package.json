@@ -23,7 +23,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:indexes": "node dist/db/setup-indexes.js",
-    "import:pages": "node dist/import/import-pages.js",
+    "import:pages": "nest build && node dist/import/import-pages.js",
     "test:all": "npm run typecheck && npm run test:cov && npm run test:e2e"
   },
   "dependencies": {

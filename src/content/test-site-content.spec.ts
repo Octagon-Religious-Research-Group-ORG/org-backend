@@ -77,6 +77,73 @@ describe('withoutRealPayments', () => {
     );
   });
 
+  it.each(['$60/g', 'requested $2,149,496.30', 'a $5 gift'])(
+    'leaves the price in %s alone',
+    (text) => {
+      expect(textOf(withoutRealPayments(page('donations', text)))).toBe(text);
+    },
+  );
+
+  it('changes only the three handle lines of the seeded donations page', () => {
+    const strings = (value: unknown): string[] =>
+      typeof value === 'string'
+        ? [value]
+        : value !== null && typeof value === 'object'
+          ? Object.values(value).flatMap(strings)
+          : [];
+    const before = strings(seededPage('donations').content);
+    const after = strings(withoutRealPayments(seededPage('donations')).content);
+
+    const changed = before.filter((text, index) => text !== after[index]);
+
+    expect(changed.sort()).toEqual([...REAL_HANDLES].sort());
+  });
+
+  it.each([
+    '(@someone)',
+    'Paypal:@someone',
+    'Venmo/@someone',
+    '"@someone"',
+    '**@someone**',
+    '[@someone](https://example.com)',
+    '＠someone',
+    'a\u200B@someone',
+  ])('removes the handle in %s on the donations page', (text) => {
+    const shown = textOf(withoutRealPayments(page('donations', text)));
+    expect(shown).not.toContain('someone');
+    expect(shown).toContain(TEST_SITE_PAYMENT_PLACEHOLDER);
+  });
+
+  it('keeps the full stop after a handle', () => {
+    expect(textOf(withoutRealPayments(page('donations', 'To @someone.')))).toBe(
+      `To ${TEST_SITE_PAYMENT_PLACEHOLDER}.`,
+    );
+  });
+
+  it.each(['Tip @trippaardema', 'Cashapp $TrippAardema', 'Venmo (@the_org)'])(
+    'removes the real account in %s on any page',
+    (text) => {
+      const shown = textOf(withoutRealPayments(page('community', text)));
+      expect(shown).toContain(TEST_SITE_PAYMENT_PLACEHOLDER);
+      expect(shown.toLowerCase()).not.toMatch(/trippaardema|the_org/);
+    },
+  );
+
+  it.each([
+    'cash.me/$someone',
+    'venmo.me/someone',
+    'paypal.com.br/someone',
+    'https://donate.paypal.com/x',
+  ])('removes the whole payment link %s', (link) => {
+    expect(textOf(withoutRealPayments(page('community', link)))).toBe(
+      TEST_SITE_PAYMENT_PLACEHOLDER,
+    );
+  });
+
+  it.each(['paypal.message', 'me@paypal.com'])('leaves %s alone', (text) => {
+    expect(textOf(withoutRealPayments(page('community', text)))).toBe(text);
+  });
+
   it('does not change the stored page', () => {
     const stored = page('donations', '@someone');
     withoutRealPayments(stored);
