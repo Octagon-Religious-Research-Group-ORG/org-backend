@@ -14,8 +14,8 @@
  * committed: keep the folder outside every repository.
  *
  * The import refuses unless EVERY profile checks ok (all or nothing), the
- * database name contains "test" (production import is a separate, later
- * decision), and the managed indexes exist. After writing, it reads every
+ * database is on the exact list in import-guard.ts (production import is a
+ * separate, later decision), and the managed indexes exist. After writing, it reads every
  * profile back and re-verifies every block's hash chain.
  *
  * Exit codes: 0 ok · 1 mismatch · 2 refused · 3 cannot measure.
@@ -28,6 +28,7 @@ import { reconcileIndexes } from '../db/index-setup';
 import { MANAGED_SCHEMAS } from '../db/managed-schemas';
 import { PROFILE_VISIBILITIES } from '../social/schemas/social-profile.schema';
 import type { ImportSourceFile } from '../social/schemas/import-record.schema';
+import { importDatabaseRefusal } from './import-guard';
 import { readDocx, type DocxDocument } from './pages/docx-reader';
 import { executeImport } from './pages/execute-import';
 import { processImage } from './pages/image';
@@ -167,7 +168,7 @@ function writeReports(dir: string, reports: ProfileReport[], extra: object) {
   return status;
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
   const args = process.argv.slice(2);
   const value = (flag: string) => {
     const at = args.indexOf(flag);
@@ -278,10 +279,9 @@ async function main(): Promise<number> {
   try {
     const database = connection.db?.databaseName ?? '(unknown)';
     console.warn(`Database: ${database} on ${connection.host}`);
-    if (confirmed !== database || !/test/i.test(database)) {
-      console.error(
-        `Refused: pass --confirm ${database}; only a test database is allowed.`,
-      );
+    const refusal = importDatabaseRefusal(database, confirmed);
+    if (refusal) {
+      console.error(refusal);
       return 2;
     }
     const store = new MongoImportStore(connection);
@@ -359,10 +359,12 @@ async function main(): Promise<number> {
   }
 }
 
-main().then(
-  (code) => process.exit(code),
-  (error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exit(EXIT['cannot-measure']);
-  },
-);
+if (require.main === module) {
+  void main().then(
+    (code) => process.exit(code),
+    (error: unknown) => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(EXIT['cannot-measure']);
+    },
+  );
+}
