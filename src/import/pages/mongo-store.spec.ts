@@ -44,15 +44,18 @@ function storeOver(data: Record<string, Row[]>) {
 
 describe('MongoImportStore.removeImported', () => {
   const deleted: unknown[] = [];
+  const pictureFilters: unknown[] = [];
 
   beforeEach(() => {
     deleted.length = 0;
+    pictureFilters.length = 0;
     jest.spyOn(mongoose.mongo, 'GridFSBucket').mockImplementation(
       () =>
         ({
-          find: () => ({
-            toArray: () => Promise.resolve([{ _id: 'file1' }]),
-          }),
+          find: (filter: unknown) => {
+            pictureFilters.push(filter);
+            return { toArray: () => Promise.resolve([{ _id: 'file1' }]) };
+          },
           delete: (id: unknown) => {
             deleted.push(id);
             return Promise.resolve();
@@ -156,6 +159,24 @@ describe('MongoImportStore.removeImported', () => {
     await storeOver(data).removeImported(['alpha']);
 
     expect(data.belieftabs).toContainEqual(rowsFor(renamed));
+  });
+
+  it('looks for pictures of the requested addresses only', async () => {
+    await storeOver(dataset()).removeImported(['alpha']);
+
+    expect(pictureFilters).toEqual([
+      { 'metadata.profileSlug': { $in: ['alpha'] } },
+    ]);
+  });
+
+  it('never removes a profile that was not imported, even at that address', async () => {
+    const data = dataset();
+    data.belieftabs.push(rowsFor(ids.native));
+
+    await storeOver(data).removeImported(['beta']);
+
+    expect(data.socialprofiles.map((row) => row._id)).toContain(ids.native);
+    expect(data.belieftabs).toContainEqual(rowsFor(ids.native));
   });
 
   it('leaves rows with no import record of the requested address alone', async () => {

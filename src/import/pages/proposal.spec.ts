@@ -668,7 +668,7 @@ describe('proposalSha256', () => {
         ...content,
         tabs: [],
         dropped: [{ paragraphs: [1], reason: 'x' }],
-      } as unknown as ProfileProposal),
+      }),
     ).not.toBe(proposalSha256(content));
   });
 });
@@ -828,6 +828,18 @@ describe('checkProposal', () => {
         flaggedDoc,
       ).reviewFlags[0],
     ).toBe('No belief tabs.');
+  });
+
+  it('accepts a generated category item in structure though it is no heading', () => {
+    const categories = docx([
+      h('Beliefs'),
+      num('Sample category', 0),
+      { text: 'A', numbering: { numId: '1', level: 1, label: 'A.' } },
+      { text: 'B', numbering: { numId: '1', level: 1, label: 'B.' } },
+    ]);
+    const proposal = proposeStructure(INPUT, categories);
+    expect(proposal.structure).toEqual([0, 1]);
+    expect(checkProposal(proposal, categories).errors).toEqual([]);
   });
 
   it('refuses a belief moved into structure, allowing headings and categories', () => {

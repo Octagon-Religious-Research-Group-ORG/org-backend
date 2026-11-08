@@ -435,6 +435,29 @@ describe('import:pages database guard (the CLI itself)', () => {
     expect(record.extractedText).not.toContain('LEGAL_SECTION_MARKER');
   });
 
+  it('never connects when a profile does not check ok', async () => {
+    writeMembers([member('alpha'), member('beta', p('(Fill this in)'))]);
+    const connect = jest.spyOn(mongoose, 'createConnection');
+
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a broken chain', { valid: false, length: 1 }],
+    ['more than one version', { valid: true, length: 2 }],
+  ])('reports a read-back mismatch for %s', async (_name, verdict) => {
+    writeMembers([member('alpha')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.verifyBlock = () => Promise.resolve(verdict);
+
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
+
+    expect(reportHead()).toBe('# Pages import report: READ-BACK MISMATCH');
+  });
+
   it('says so when a profile write was swallowed', async () => {
     writeMembers([member('alpha')]);
     connectTo('org-testing');
