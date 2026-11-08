@@ -8,6 +8,20 @@ interface ListLevel {
   text: string;
 }
 
+/** A list's change to one level: `w:lvlOverride` under `w:num`. */
+interface LevelOverride {
+  start?: number;
+  definition?: ListLevel;
+}
+
+function readLevel(lvl: Element): ListLevel {
+  return {
+    start: Number(attr(firstChild(lvl, 'w:start'), 'w:val') ?? 1),
+    format: attr(firstChild(lvl, 'w:numFmt'), 'w:val') ?? 'decimal',
+    text: attr(firstChild(lvl, 'w:lvlText'), 'w:val') ?? '',
+  };
+}
+
 /**
  * Word list numbering (`word/numbering.xml`): turns a paragraph's
  * (numId, level) into the label Word would display, e.g. "II." or "A.".
@@ -20,6 +34,9 @@ export class DocxNumbering {
   private readonly abstractOf = new Map<string, string>();
   private readonly levels = new Map<string, Map<number, ListLevel>>();
   private readonly counters = new Map<string, number[]>();
+  private readonly overrides = new Map<string, Map<number, LevelOverride>>();
+  /** "numId:level" pairs whose restart has already happened (once only). */
+  private readonly restarted = new Set<string>();
 
   constructor(numberingXml?: Element) {
     if (!numberingXml) return;
@@ -40,11 +57,7 @@ export class DocxNumbering {
       const id = attr(abstract, 'w:abstractNumId');
       const byLevel = new Map<number, ListLevel>();
       for (const lvl of children(abstract, 'w:lvl')) {
-        byLevel.set(Number(attr(lvl, 'w:ilvl') ?? 0), {
-          start: Number(attr(firstChild(lvl, 'w:start'), 'w:val') ?? 1),
-          format: attr(firstChild(lvl, 'w:numFmt'), 'w:val') ?? 'decimal',
-          text: attr(firstChild(lvl, 'w:lvlText'), 'w:val') ?? '',
-        });
+        byLevel.set(Number(attr(lvl, 'w:ilvl') ?? 0), readLevel(lvl));
       }
       if (id !== undefined) this.levels.set(id, byLevel);
     }
@@ -55,7 +68,22 @@ export class DocxNumbering {
       const style = linkedTo.get(declared);
       const resolved = style ? definedByStyle.get(style) : undefined;
       this.abstractOf.set(numId, resolved ?? declared);
+      this.readOverrides(numId, num);
     }
+  }
+
+  private readOverrides(numId: string, num: Element) {
+    const byLevel = new Map<number, LevelOverride>();
+    for (const override of children(num, 'w:lvlOverride')) {
+      const lvl = firstChild(override, 'w:lvl');
+      const definition = lvl ? readLevel(lvl) : undefined;
+      const restart = attr(firstChild(override, 'w:startOverride'), 'w:val');
+      byLevel.set(Number(attr(override, 'w:ilvl') ?? 0), {
+        start: restart !== undefined ? Number(restart) : definition?.start,
+        definition,
+      });
+    }
+    this.overrides.set(numId, byLevel);
   }
 
   /**
@@ -67,14 +95,25 @@ export class DocxNumbering {
     // Abstract list ids start at "0", so test for absence, not falsiness.
     if (abstractId === undefined) return undefined;
     const levels = this.levels.get(abstractId);
-    if (!levels?.has(level)) return undefined;
+    if (!levels) return undefined;
+    const levelOf = (at: number) =>
+      this.overrides.get(numId)?.get(at)?.definition ?? levels.get(at);
+    const definition = levelOf(level);
+    if (!definition) return undefined;
 
-    const definition = levels.get(level)!;
     const counts = this.counters.get(abstractId) ?? [];
     for (let deeper = level + 1; deeper < counts.length; deeper++) {
       counts[deeper] = 0;
     }
-    counts[level] = counts[level] ? counts[level] + 1 : definition.start;
+    // Word restarts a level overridden on this list the first time it is used.
+    const restart = this.overrides.get(numId)?.get(level)?.start;
+    const key = `${numId}:${level}`;
+    if (restart !== undefined && !this.restarted.has(key)) {
+      this.restarted.add(key);
+      counts[level] = restart;
+    } else {
+      counts[level] = counts[level] ? counts[level] + 1 : definition.start;
+    }
     this.counters.set(abstractId, counts);
 
     if (definition.format === 'bullet' || definition.format === 'none') {
@@ -82,8 +121,8 @@ export class DocxNumbering {
     }
     return definition.text.replace(/%(\d)/g, (_match, digit: string) => {
       const at = Number(digit) - 1;
-      const format = levels.get(at)?.format ?? 'decimal';
-      const value = counts[at] || (levels.get(at)?.start ?? 1);
+      const format = levelOf(at)?.format ?? 'decimal';
+      const value = counts[at] || (levelOf(at)?.start ?? 1);
       return formatNumber(value, format);
     });
   }

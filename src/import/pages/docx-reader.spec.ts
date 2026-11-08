@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from 'fflate';
 import { buildDocx, numbered, p } from './docx-fixture';
 import { formatNumber } from './docx-numbering';
-import { readDocx } from './docx-reader';
+import { legacyDate, readDocx } from './docx-reader';
 
 const STYLES =
   '<w:style w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>' +
@@ -56,6 +56,38 @@ describe('readDocx', () => {
       );
       expect(doc.paragraphs[0].text).toBe('keep new end');
     });
+
+    it('excludes whole paragraphs that are tracked as deleted or moved away', () => {
+      const doc = readDocx(
+        buildDocx({
+          body:
+            p('kept') +
+            '<w:del><w:p><w:r><w:t>deleted paragraph</w:t></w:r></w:p></w:del>' +
+            '<w:moveFrom><w:p><w:r><w:t>moved paragraph</w:t></w:r></w:p></w:moveFrom>' +
+            '<w:ins><w:p><w:r><w:t>inserted paragraph</w:t></w:r></w:p></w:ins>',
+        }),
+      );
+      expect(doc.paragraphs.map((x) => x.text)).toEqual([
+        'kept',
+        'inserted paragraph',
+      ]);
+    });
+
+    it('warns about what it cannot carry over: footnotes, endnotes, symbols', () => {
+      const doc = readDocx(
+        buildDocx({
+          body:
+            '<w:p><w:r><w:t>a</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>' +
+            '<w:p><w:r><w:t>b</w:t></w:r><w:r><w:endnoteReference w:id="3"/></w:r></w:p>' +
+            '<w:p><w:r><w:sym w:font="Wingdings" w:char="F0E0"/></w:r></w:p>',
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Paragraph 0: a footnote or endnote cannot be imported.',
+        'Paragraph 1: a footnote or endnote cannot be imported.',
+        'Paragraph 2: a symbol-font character cannot be imported.',
+      ]);
+    });
   });
 
   describe('links', () => {
@@ -81,8 +113,8 @@ describe('readDocx', () => {
 
       expect(doc.paragraphs[0].text).toBe('See the page4 up today!');
       expect(doc.paragraphs[0].links).toEqual([
-        { text: 'the page', url: 'https://example.test/a#X' },
-        { text: 'up', url: 'top' },
+        { text: 'the page', url: 'https://example.test/a#X', start: 4 },
+        { text: 'up', url: 'top', start: 14 },
       ]);
     });
 
@@ -99,8 +131,8 @@ describe('readDocx', () => {
         }),
       );
       expect(doc.paragraphs[0].links).toEqual([
-        { text: 'web', url: 'https://example.test/b' },
-        { text: 'local', url: '#mark' },
+        { text: 'web', url: 'https://example.test/b', start: 0 },
+        { text: 'local', url: '#mark', start: 3 },
       ]);
       expect(doc.paragraphs[0].text).toBe('weblocaldead');
     });
@@ -185,6 +217,74 @@ describe('readDocx', () => {
       ]);
       expect(doc.warnings).toEqual([
         'Paragraph 2: list 6 level 0 is not defined in numbering.xml.',
+      ]);
+    });
+
+    it('restarts a list where its w:num overrides the start, once only', () => {
+      const doc = readDocx(
+        buildDocx({
+          numbering:
+            '<w:abstractNum w:abstractNumId="0">' +
+            lvl(0, 'upperRoman', '%1.') +
+            lvl(1, 'upperLetter', '%2.') +
+            '</w:abstractNum>' +
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>' +
+            '<w:num w:numId="2"><w:abstractNumId w:val="0"/>' +
+            '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>' +
+            '<w:num w:numId="3"><w:abstractNumId w:val="0"/>' +
+            '<w:lvlOverride><w:startOverride w:val="7"/></w:lvlOverride>' +
+            '<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2)"/></w:lvl></w:lvlOverride>' +
+            '<w:lvlOverride w:ilvl="4"/></w:num>',
+          body:
+            numbered('a', '1', 0) +
+            numbered('b', '1', 0) +
+            numbered('restart', '2', 0) +
+            numbered('next', '2', 0) +
+            numbered('jump', '3', 0) +
+            numbered('redefined', '3', 1) +
+            numbered('redefined next', '3', 1) +
+            numbered('nothing overridden', '3', 4),
+        }),
+      );
+      expect(doc.paragraphs.map((x) => x.numbering?.label)).toEqual([
+        'I.',
+        'II.',
+        'I.',
+        'II.',
+        'VII.',
+        '4)',
+        '5)',
+        undefined,
+      ]);
+    });
+
+    it('warns when numbering comes from the paragraph style', () => {
+      const doc = readDocx(
+        buildDocx({
+          styles:
+            '<w:style w:styleId="List"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>' +
+            '<w:style w:styleId="Child"><w:basedOn w:val="List"/></w:style>' +
+            '<w:style w:styleId="Off"><w:basedOn w:val="List"/><w:pPr><w:numPr><w:numId w:val="0"/></w:numPr></w:pPr></w:style>' +
+            '<w:style w:styleId="LoopA"><w:basedOn w:val="LoopB"/></w:style>' +
+            '<w:style w:styleId="LoopB"><w:basedOn w:val="LoopA"/></w:style>' +
+            '<w:style w:styleId="Dangling"><w:basedOn w:val="Gone"/></w:style>' +
+            '<w:style><w:name w:val="NoId"/></w:style>',
+          body:
+            p('direct', '<w:pStyle w:val="List"/>') +
+            p('inherited', '<w:pStyle w:val="Child"/>') +
+            p('switched off', '<w:pStyle w:val="Off"/>') +
+            p('loop', '<w:pStyle w:val="LoopA"/>') +
+            p('dangling', '<w:pStyle w:val="Dangling"/>') +
+            p(
+              'own numbering off',
+              '<w:pStyle w:val="List"/><w:numPr><w:numId w:val="0"/></w:numPr>',
+            ) +
+            p('no style'),
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Paragraph 0: numbering comes from its style, which is not supported.',
+        'Paragraph 1: numbering comes from its style, which is not supported.',
       ]);
     });
 
@@ -275,6 +375,50 @@ describe('readDocx', () => {
       expect(doc.warnings).toEqual([]);
     });
 
+    const body = (id: string, text: string) =>
+      `<w:p><w:commentRangeStart w:id="${id}"/><w:r><w:t>${text}</w:t></w:r><w:commentRangeEnd w:id="${id}"/></w:p>`;
+
+    it('warns about a comment date it cannot read, keeping others silent', () => {
+      const doc = readDocx(
+        buildDocx({
+          comments:
+            '<w:comment w:id="1" w:author="A" w:date="not-a-date"><w:p/></w:comment>' +
+            '<w:comment w:id="2" w:author="A" w:date="2026-07-26T13:19:54Z"><w:p/></w:comment>' +
+            '<w:comment w:id="3" w:author="A"><w:p/></w:comment>',
+          body: body('1', 'a') + body('2', 'b') + body('3', 'c'),
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Comment 1: its date is not a valid date.',
+      ]);
+    });
+
+    it('warns about two comments with the same id', () => {
+      const doc = readDocx(
+        buildDocx({
+          comments:
+            comment('1', 'A', 'first', 'AAA') +
+            comment('1', 'B', 'second', 'BBB'),
+          body: body('1', 'a'),
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Comment 1 appears more than once in comments.xml.',
+      ]);
+    });
+
+    it('places a highlight on the paragraphs whose text it covers', () => {
+      const doc = readDocx(
+        buildDocx({
+          comments: comment('1', 'A', 'on the second', 'AAA'),
+          body:
+            '<w:p><w:r><w:t xml:space="preserve">first </w:t></w:r><w:commentRangeStart w:id="1"/><w:r><w:t xml:space="preserve">  </w:t></w:r></w:p>' +
+            '<w:p><w:r><w:t>second highlighted</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
+        }),
+      );
+      expect(doc.comments[0].paragraphIndices).toEqual([1]);
+    });
+
     it('warns about broken highlights and replies', () => {
       const doc = readDocx(
         buildDocx({
@@ -333,7 +477,7 @@ describe('readDocx', () => {
       expect(doc.comments[0]).toEqual(
         expect.objectContaining({
           anchorText: 'shown',
-          paragraphIndices: [0, 1],
+          paragraphIndices: [1],
         }),
       );
       expect(doc.comments[0].parentId).toBeUndefined();
@@ -344,7 +488,53 @@ describe('readDocx', () => {
     });
   });
 
+  describe('legacyDate', () => {
+    it('reads a date with no timezone as UTC on every machine', () => {
+      expect(legacyDate('2026-07-26T13:19:54')?.toISOString()).toBe(
+        '2026-07-26T13:19:54.000Z',
+      );
+    });
+
+    it.each([
+      ['2026-07-26T13:19:54Z', '2026-07-26T13:19:54.000Z'],
+      ['2026-07-26T13:19:54.5+02:00', '2026-07-26T11:19:54.500Z'],
+      ['2026-07-26T13:19', '2026-07-26T13:19:00.000Z'],
+      ['2026-07-26', '2026-07-26T00:00:00.000Z'],
+    ])('reads %s', (value, expected) => {
+      expect(legacyDate(value)?.toISOString()).toBe(expected);
+    });
+
+    it.each([
+      '',
+      'not-a-date',
+      '2026-13-01',
+      '2026-02-30T10:00:00Z',
+      '7/26/2026',
+    ])('refuses %p', (value) => {
+      expect(legacyDate(value)).toBeUndefined();
+    });
+  });
+
   describe('images', () => {
+    it('records images that come before the first text of a paragraph', () => {
+      const doc = readDocx(
+        buildDocx({
+          rels: '<Relationship Id="rImg" Target="media/a.png"/>',
+          media: { 'word/media/a.png': new Uint8Array([1]) },
+          body:
+            '<w:p><w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r><w:r><w:t>text</w:t></w:r>' +
+            '<w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r></w:p>' +
+            '<w:p><w:r><w:t>text first</w:t></w:r><w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r></w:p>' +
+            '<w:p><w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r></w:p>',
+        }),
+      );
+      expect(doc.paragraphs.map((x) => x.leadingImages)).toEqual([
+        1,
+        undefined,
+        undefined,
+      ]);
+    });
+
     it('lists embedded images once and keeps every media file', () => {
       const png = new Uint8Array([1, 2, 3]);
       const doc = readDocx(

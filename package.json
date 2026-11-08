@@ -125,6 +125,7 @@
       "import/pages/report.ts",
       "import/pages/snappy.ts",
       "import/pages/xml.ts",
+      "import/pages/zip-safe.ts",
       "social/block-versions.service.ts",
       "social/version-chain.ts",
       "moderation/moderation-log.service.ts",

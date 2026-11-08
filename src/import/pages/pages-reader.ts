@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { unzipSync } from 'fflate';
 import type { DocxDocument } from './docx-reader';
 import { decompressIwa } from './snappy';
+import { safeUnzip } from './zip-safe';
 
 export interface PagesDataFile {
   /** Path inside the package, e.g. "Data/IMG_4970-55.jpeg". */
@@ -41,12 +41,7 @@ const IMAGE_EXTENSIONS = /\.(jpe?g|png|tiff?|heic|gif|webp)$/i;
  * @throws Error when the file is not a .pages package
  */
 export function readPages(bytes: Uint8Array): PagesPackage {
-  let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(bytes);
-  } catch (error) {
-    throw new Error(`Not a .pages (zip) file: ${(error as Error).message}`);
-  }
+  const files = safeUnzip(bytes, '.pages');
   const document = files['Index/Document.iwa'];
   if (!document) throw new Error('The .pages file has no Index/Document.iwa.');
 

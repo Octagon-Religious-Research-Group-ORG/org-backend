@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from 'fflate';
 import type { DocxComment, DocxDocument } from './docx-reader';
 import { crossCheck, readPages } from './pages-reader';
-import { decompressIwa, snappyDecompress } from './snappy';
+import { decompressIwa, MAX_SNAPPY_LENGTH, snappyDecompress } from './snappy';
 
 /** Literal-only Snappy block (valid, if uncompressed) for test fixtures. */
 function literalBlock(data: Uint8Array): Uint8Array {
@@ -121,6 +121,59 @@ describe('decompressIwa', () => {
 function pagesFile(files: Record<string, Uint8Array>): Uint8Array {
   return zipSync(files);
 }
+
+describe('snappy limits', () => {
+  /** A varint declaring `length`, with no data after it. */
+  const declaring = (length: number) => {
+    const out: number[] = [];
+    let rest = length;
+    while (rest >= 0x80) {
+      out.push((rest % 0x80) | 0x80);
+      rest = Math.floor(rest / 0x80);
+    }
+    out.push(rest);
+    return new Uint8Array(out);
+  };
+
+  it('refuses a declared length over the limit before allocating', () => {
+    expect(() => snappyDecompress(declaring(MAX_SNAPPY_LENGTH + 1))).toThrow(
+      /declares too large a size/,
+    );
+    expect(() => snappyDecompress(declaring(2 ** 34))).toThrow(
+      /declares too large a size/,
+    );
+  });
+
+  it('refuses an .iwa whose chunks together exceed the limit', () => {
+    // A block that repeats one byte by copying, at the limit, twice over.
+    const one = (() => {
+      const header = [...declaring(MAX_SNAPPY_LENGTH), 0, 7];
+      const copies = Math.ceil((MAX_SNAPPY_LENGTH - 1) / 64);
+      const tail = (MAX_SNAPPY_LENGTH - 1) % 64 || 64;
+      const out = new Uint8Array(header.length + copies * 3);
+      out.set(header);
+      for (let i = 0; i < copies; i++) {
+        const length = i === copies - 1 ? tail : 64;
+        out.set([((length - 1) << 2) | 2, 1, 0], header.length + i * 3);
+      }
+      return out;
+    })();
+    const chunk = new Uint8Array(4 + one.length);
+    chunk.set([
+      0,
+      one.length & 0xff,
+      (one.length >> 8) & 0xff,
+      (one.length >> 16) & 0xff,
+    ]);
+    chunk.set(one, 4);
+    const twice = new Uint8Array(chunk.length * 2);
+    twice.set(chunk);
+    twice.set(chunk, chunk.length);
+    expect(() => decompressIwa(twice, 'Index/X.iwa')).toThrow(
+      /Index\/X.iwa: expands to more than/,
+    );
+  });
+});
 
 describe('readPages', () => {
   it('reads the document, the author table and every embedded file', () => {

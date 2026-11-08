@@ -1,4 +1,11 @@
 /**
+ * Most one .iwa part (or one block in it) may declare or expand to. Real parts
+ * are a few megabytes; the limit exists so that a forged length field cannot
+ * make us allocate gigabytes.
+ */
+export const MAX_SNAPPY_LENGTH = 256 * 1024 * 1024;
+
+/**
  * Decompresses one raw Snappy block (no framing), as used inside Apple iWork
  * `.iwa` files. Format: a varint with the uncompressed length, then literal
  * and back-reference elements.
@@ -21,6 +28,9 @@ export function snappyDecompress(input: Uint8Array): Uint8Array {
     const next = byte();
     length += (next & 0x7f) * 2 ** shift;
     if (next < 0x80) break;
+  }
+  if (length > MAX_SNAPPY_LENGTH) {
+    throw new Error(`Snappy block declares too large a size (${length}).`);
   }
 
   const output = new Uint8Array(length);
@@ -82,6 +92,7 @@ export function snappyDecompress(input: Uint8Array): Uint8Array {
 export function decompressIwa(input: Uint8Array, part: string): Uint8Array {
   const chunks: Uint8Array[] = [];
   let position = 0;
+  let total = 0;
   while (position < input.length) {
     if (input[position] !== 0 || position + 4 > input.length) {
       throw new Error(`${part}: not an IWA chunk at byte ${position}.`);
@@ -95,14 +106,18 @@ export function decompressIwa(input: Uint8Array, part: string): Uint8Array {
       throw new Error(`${part}: chunk at byte ${position} is truncated.`);
     }
     try {
-      chunks.push(snappyDecompress(input.subarray(position + 4, end)));
+      const chunk = snappyDecompress(input.subarray(position + 4, end));
+      total += chunk.length;
+      if (total > MAX_SNAPPY_LENGTH) {
+        throw new Error(`expands to more than ${MAX_SNAPPY_LENGTH} bytes.`);
+      }
+      chunks.push(chunk);
     } catch (error) {
       throw new Error(`${part}: ${(error as Error).message}`);
     }
     position = end;
   }
 
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const out = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {

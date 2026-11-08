@@ -48,11 +48,16 @@ describe('paragraphMarkdown', () => {
         links: [
           {
             text: 'Renan',
+            start: 4,
             url: 'https://www.icloud.com/pages/0080pSrnZRMtMf8XV8DAZ-7Lg#Renan',
           },
-          { text: 'Elsewhere', url: 'https://www.icloud.com/pages/OTHER' },
-          { text: 'Not in text', url: 'https://example.test/a_(b)' },
-          { text: '', url: 'https://example.test/empty' },
+          {
+            text: 'Elsewhere',
+            start: 33,
+            url: 'https://www.icloud.com/pages/OTHER',
+          },
+          { text: 'Not in text', start: 0, url: 'https://example.test/a_(b)' },
+          { text: '', start: 0, url: 'https://example.test/empty' },
         ],
       }),
       SLUGS,

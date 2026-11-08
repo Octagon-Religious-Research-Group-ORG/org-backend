@@ -1,11 +1,14 @@
 import type { Element } from '@xmldom/xmldom';
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8 } from 'fflate';
 import { DocxNumbering } from './docx-numbering';
 import { attr, children, firstChild, parseXml, textOf } from './xml';
+import { safeUnzip } from './zip-safe';
 
 export interface DocxLink {
   text: string;
   url: string;
+  /** Where `text` starts in the paragraph's untrimmed text. */
+  start: number;
 }
 
 export interface DocxParagraph {
@@ -21,6 +24,8 @@ export interface DocxParagraph {
   links: DocxLink[];
   /** Package paths of embedded images, e.g. "word/media/image1.png". */
   images: string[];
+  /** How many of `images` come before the first text; absent means none. */
+  leadingImages?: number;
   inTable: boolean;
 }
 
@@ -59,9 +64,34 @@ interface FieldState {
   instr: string;
   result: string;
   phase: 'instr' | 'result';
+  /** Length of the paragraph's text when the field began. */
+  start: number;
 }
 
 const HYPERLINK_INSTR = /^\s*HYPERLINK\s+(?:\\l\s+)?"([^"]*)"/;
+
+/** Block-level containers whose paragraphs are not part of the document. */
+const NOT_CONTENT = new Set(['w:sectPr', 'w:del', 'w:moveFrom']);
+
+const LEGACY_DATE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
+/**
+ * Reads a date as recorded by the exporting app, or undefined if it is not a
+ * real date. A date with no timezone is taken as UTC, never as this machine's
+ * local time: the same file must give the same record on every machine.
+ */
+export function legacyDate(value: string): Date | undefined {
+  const match = LEGACY_DATE.exec(value);
+  if (!match) return undefined;
+  const hasTime = value.includes('T');
+  const date = new Date(hasTime && !match[4] ? `${value}Z` : value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  // Date rolls "02-30" over to March instead of rejecting it.
+  const [year, month, day] = [match[1], match[2], match[3]].map(Number);
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  return calendar.getUTCMonth() === month - 1 ? date : undefined;
+}
 
 /**
  * Reads a .docx exported by Apple Pages (or Word) into plain, ordered data:
@@ -75,12 +105,7 @@ const HYPERLINK_INSTR = /^\s*HYPERLINK\s+(?:\\l\s+)?"([^"]*)"/;
  * @throws Error when the file is not a zip or has no word/document.xml
  */
 export function readDocx(bytes: Uint8Array): DocxDocument {
-  let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(bytes);
-  } catch (error) {
-    throw new Error(`Not a .docx (zip) file: ${(error as Error).message}`);
-  }
+  const files = safeUnzip(bytes, '.docx');
   const part = (path: string) =>
     files[path] ? parseXml(strFromU8(files[path]), path) : undefined;
 
@@ -90,6 +115,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
   const warnings: string[] = [];
   const relationships = readRelationships(part('word/_rels/document.xml.rels'));
   const styleNames = readStyleNames(part('word/styles.xml'));
+  const numberedStyles = readNumberedStyles(part('word/styles.xml'));
   const numbering = new DocxNumbering(part('word/numbering.xml'));
   const comments = readComments(
     part('word/comments.xml'),
@@ -97,7 +123,12 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
     warnings,
   );
 
-  const anchors = new Map<string, { text: string; paragraphs: Set<number> }>();
+  // `start` is only a fallback: a highlight that covers no text still belongs
+  // to the paragraph it was placed in.
+  const anchors = new Map<
+    string,
+    { text: string; paragraphs: Set<number>; start: number }
+  >();
   const open = new Set<string>();
   const paragraphs: DocxParagraph[] = [];
 
@@ -118,6 +149,13 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
 
     const numPr = firstChild(pPr, 'w:numPr');
     const numId = attr(firstChild(numPr, 'w:numId'), 'w:val');
+    if (numId === undefined && numberedStyles.has(styleId)) {
+      // The label cannot be worked out here, and a belief outline without its
+      // labels splits wrongly: stop and look rather than import it label-less.
+      warnings.push(
+        `Paragraph ${index}: numbering comes from its style, which is not supported.`,
+      );
+    }
     if (numId && numId !== '0') {
       const level = Number(attr(firstChild(numPr, 'w:ilvl'), 'w:val') ?? 0);
       const label = numbering.next(numId, level);
@@ -134,9 +172,9 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
     for (const id of open) {
       const anchor = anchors.get(id)!;
       if (anchor.text) anchor.text += '\n';
-      anchor.paragraphs.add(index);
     }
 
+    let leadingImages = 0;
     const fields: FieldState[] = [];
     const emit = (text: string) => {
       if (fields.some((field) => field.phase === 'instr')) return;
@@ -145,14 +183,22 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
       for (const id of open) {
         const anchor = anchors.get(id)!;
         anchor.text += text;
-        anchor.paragraphs.add(index);
+        // Only text counts: a highlight that starts at the very end of one
+        // paragraph and covers the next one is a comment on the next one.
+        if (text.trim()) anchor.paragraphs.add(index);
       }
+    };
+    const addLink = (field: FieldState, url: string) => {
+      const leading = field.result.length - field.result.trimStart().length;
+      paragraph.links.push({
+        text: field.result.trim(),
+        url,
+        start: field.start + leading,
+      });
     };
     const endField = (field: FieldState) => {
       const url = HYPERLINK_INSTR.exec(field.instr)?.[1];
-      if (url !== undefined) {
-        paragraph.links.push({ text: field.result.trim(), url });
-      }
+      if (url !== undefined) addLink(field, url);
     };
     const image = (relationshipId: string | undefined) => {
       const relationship = relationshipId
@@ -165,6 +211,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
         return;
       }
       paragraph.images.push(relationship.target);
+      if (paragraph.text.trim() === '') leadingImages += 1;
     };
 
     const walk = (node: Element) => {
@@ -193,7 +240,11 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
             const id = attr(child, 'w:id') ?? '';
             open.add(id);
             if (!anchors.has(id)) {
-              anchors.set(id, { text: '', paragraphs: new Set([index]) });
+              anchors.set(id, {
+                text: '',
+                paragraphs: new Set(),
+                start: index,
+              });
             }
             break;
           }
@@ -203,7 +254,12 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
           case 'w:fldChar': {
             const type = attr(child, 'w:fldCharType');
             if (type === 'begin') {
-              fields.push({ instr: '', result: '', phase: 'instr' });
+              fields.push({
+                instr: '',
+                result: '',
+                phase: 'instr',
+                start: paragraph.text.length,
+              });
             } else if (type === 'separate' && fields.length > 0) {
               fields[fields.length - 1].phase = 'result';
             } else if (type === 'end' && fields.length > 0) {
@@ -221,6 +277,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
               instr: attr(child, 'w:instr') ?? '',
               result: '',
               phase: 'result',
+              start: paragraph.text.length,
             };
             fields.push(field);
             walk(child);
@@ -235,14 +292,26 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
               instr: '',
               result: '',
               phase: 'result',
+              start: paragraph.text.length,
             };
             fields.push(field);
             walk(child);
             fields.pop();
             const url = relationship?.target ?? (anchor ? `#${anchor}` : '');
-            if (url) paragraph.links.push({ text: field.result.trim(), url });
+            if (url) addLink(field, url);
             break;
           }
+          case 'w:footnoteReference':
+          case 'w:endnoteReference':
+            warnings.push(
+              `Paragraph ${index}: a footnote or endnote cannot be imported.`,
+            );
+            break;
+          case 'w:sym':
+            warnings.push(
+              `Paragraph ${index}: a symbol-font character cannot be imported.`,
+            );
+            break;
           case 'a:blip':
             image(attr(child, 'r:embed'));
             break;
@@ -261,6 +330,9 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
       }
     };
     walk(p);
+    if (leadingImages > 0 && paragraph.text.trim() !== '') {
+      paragraph.leadingImages = leadingImages;
+    }
     paragraphs.push(paragraph);
   };
 
@@ -268,7 +340,8 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
     for (const child of children(node)) {
       if (child.nodeName === 'w:p') visitParagraph(child, inTable);
       else if (child.nodeName === 'w:tbl') visitBlock(child, true);
-      else if (child.nodeName !== 'w:sectPr') visitBlock(child, inTable);
+      // Whole paragraphs inside w:del / w:moveFrom were deleted or moved away.
+      else if (!NOT_CONTENT.has(child.nodeName)) visitBlock(child, inTable);
     }
   };
   visitBlock(body, false);
@@ -281,7 +354,10 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
     if (anchor) {
       comment.anchored = true;
       comment.anchorText = anchor.text;
-      comment.paragraphIndices = [...anchor.paragraphs].sort((a, b) => a - b);
+      comment.paragraphIndices =
+        anchor.paragraphs.size > 0
+          ? [...anchor.paragraphs].sort((a, b) => a - b)
+          : [anchor.start];
     }
   }
   for (const id of anchors.keys()) {
@@ -318,6 +394,40 @@ function headingLevelOf(style: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+/** Styles that number their paragraphs, directly or through `w:basedOn`. */
+function readNumberedStyles(root?: Element): Set<string> {
+  const styles = new Map(
+    (root ? children(root, 'w:style') : []).map((style) => [
+      attr(style, 'w:styleId') ?? '',
+      {
+        numId: attr(
+          firstChild(
+            firstChild(firstChild(style, 'w:pPr'), 'w:numPr'),
+            'w:numId',
+          ),
+          'w:val',
+        ),
+        basedOn: attr(firstChild(style, 'w:basedOn'), 'w:val'),
+      },
+    ]),
+  );
+  const numbered = new Set<string>();
+  for (const id of styles.keys()) {
+    const seen = new Set<string>();
+    let at: string | undefined = id;
+    while (at !== undefined && !seen.has(at)) {
+      seen.add(at);
+      const style = styles.get(at);
+      if (style?.numId !== undefined) {
+        if (style.numId !== '0') numbered.add(id);
+        break;
+      }
+      at = style?.basedOn;
+    }
+  }
+  return numbered;
+}
+
 function readRelationships(root?: Element): Map<string, Relationship> {
   const out = new Map<string, Relationship>();
   for (const rel of root ? children(root, 'Relationship') : []) {
@@ -351,11 +461,20 @@ function readComments(
   const comments: DocxComment[] = [];
   const idByParaId = new Map<string, string>();
   const lastParaIdOf = new Map<string, string>();
+  const seenIds = new Set<string>();
 
   for (const element of commentsRoot
     ? children(commentsRoot, 'w:comment')
     : []) {
     const id = attr(element, 'w:id') ?? '';
+    if (seenIds.has(id)) {
+      warnings.push(`Comment ${id} appears more than once in comments.xml.`);
+    }
+    seenIds.add(id);
+    const date = attr(element, 'w:date');
+    if (date !== undefined && legacyDate(date) === undefined) {
+      warnings.push(`Comment ${id}: its date is not a valid date.`);
+    }
     const text = children(element, 'w:p').map(plainText).join('\n').trim();
     for (const p of children(element, 'w:p')) {
       const paraId = attr(p, 'w14:paraId');
@@ -367,7 +486,7 @@ function readComments(
     comments.push({
       id,
       author: attr(element, 'w:author') ?? '',
-      date: attr(element, 'w:date'),
+      date,
       text,
       anchorText: '',
       paragraphIndices: [],
