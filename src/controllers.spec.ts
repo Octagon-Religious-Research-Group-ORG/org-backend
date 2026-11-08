@@ -228,6 +228,24 @@ describe('thin HTTP controllers', () => {
     expect(adminAccess.hasAdminAccess).not.toHaveBeenCalled();
   });
 
+  it('sends DELETE /me/shipping through the public allowlist', async () => {
+    const profiles = {
+      deleteShipping: jest.fn().mockResolvedValue({
+        authEmailTokenHash: 'a'.repeat(64),
+        isAdmin: true,
+        preferredName: 'Member',
+        email: 'member@example.test',
+      }),
+    };
+    const controller = new ProfilesController(profiles as never, {} as never);
+    const shown = await controller.deleteShipping({
+      auth: { payload: { sub: 'user_a' } },
+    } as never);
+    expect(shown).toMatchObject({ preferredName: 'Member' });
+    expect(shown).not.toHaveProperty('authEmailTokenHash');
+    expect(shown).not.toHaveProperty('isAdmin');
+  });
+
   it('returns a profile shipping address when one exists', async () => {
     const profiles = {
       getOrCreate: jest

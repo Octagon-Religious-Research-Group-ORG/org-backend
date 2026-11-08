@@ -3,9 +3,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import * as Joi from 'joi';
+import { envValidationSchema } from './config/env.schema';
 import { DEFAULT_THROTTLE } from './config/throttle';
-import { SITE_ENVS } from './config/site-env';
 import { SocialModule } from './social/social.module';
 import { DbModule } from './db/db.module';
 import { AppController } from './app.controller';
@@ -23,28 +22,7 @@ import { MembershipModule } from './membership/membership.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      validationSchema: Joi.object({
-        NODE_ENV: Joi.string()
-          .valid('development', 'test', 'production')
-          .default('development'),
-        PORT: Joi.number().port().default(3001),
-        MONGODB_URI: Joi.string().required(),
-        DNS_SERVERS: Joi.string().allow('').optional(),
-        CLERK_SECRET_KEY: Joi.string().required(),
-        WHITE_LISTED_EMAILS: Joi.string().allow('').default(''),
-        CLIENT_ORIGIN_URL: Joi.string().required(),
-        PUBLIC_APP_URL: Joi.string().uri().required(),
-        TRUST_PROXY_HOPS: Joi.number().integer().min(0).max(5).default(1),
-        MANAGE_INDEXES: Joi.string().valid('check', 'create').default('check'),
-        SITE_ENV: Joi.string()
-          .valid(...SITE_ENVS)
-          .default('production'),
-        PAYPAL_DONATION_URL: Joi.string().uri().required(),
-        VENMO_DONATION_URL: Joi.string().uri().required(),
-        RESEND_API_KEY: Joi.string().allow('').optional(),
-        ORDER_FROM_EMAIL: Joi.string().email().allow('').optional(),
-        ORDER_NOTIFICATION_EMAIL: Joi.string().email().allow('').optional(),
-      }),
+      validationSchema: envValidationSchema,
     }),
     MongooseModule.forRootAsync({
       inject: [ConfigService],

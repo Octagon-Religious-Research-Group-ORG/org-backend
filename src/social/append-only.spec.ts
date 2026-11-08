@@ -48,6 +48,36 @@ describe('blockversions append-only guard', () => {
     ).rejects.toBeInstanceOf(AppendOnlyViolationError);
   });
 
+  // Spelled out on purpose: the test above reads the same list the guard uses,
+  // so it cannot notice an operation being removed from that list.
+  it.each([
+    'updateOne',
+    'updateMany',
+    'replaceOne',
+    'findOneAndUpdate',
+    'findOneAndReplace',
+    'findOneAndDelete',
+    'deleteOne',
+    'deleteMany',
+  ])('blocks %s at the schema, independent of the guard list', async (op) => {
+    const model = Versions as unknown as Record<
+      string,
+      (filter: object, update?: object) => { exec(): Promise<unknown> }
+    >;
+    const update = /delete/i.test(op) ? undefined : { text: 'changed' };
+    await expect(
+      model[op]({ blockId: 'blk-1' }, update).exec(),
+    ).rejects.toBeInstanceOf(AppendOnlyViolationError);
+  });
+
+  it('declares (blockId, seq) unique, so concurrent saves cannot fork a chain', () => {
+    const declared = BlockVersionSchema.indexes().find(([fields]) => {
+      const keys = Object.keys(fields);
+      return keys.length === 2 && keys[0] === 'blockId' && keys[1] === 'seq';
+    });
+    expect(declared?.[1]).toMatchObject({ unique: true });
+  });
+
   it('rejects save() on an existing document', async () => {
     const existing = Versions.hydrate({ _id: new Types.ObjectId(), ...valid });
     await expect(existing.save()).rejects.toBeInstanceOf(
