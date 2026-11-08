@@ -29,6 +29,8 @@ export interface ProfileReport {
   readerWarnings: string[];
   proposalErrors: string[];
   unmappedPagesLinks: string[];
+  /** Addresses removed as unsafe; the visible text of each link is kept. */
+  unsafeLinks: string[];
   /** Valid-but-suspicious findings; they block the import until reviewed. */
   reviewFlags: string[];
   reviewed: boolean;
@@ -55,6 +57,11 @@ export function buildProfileReport(
   if (crossCheck && crossCheck.authors.pagesOnly.length > 0) {
     reviewFlags.push(
       `The .pages names author(s) with no comment in the .docx, so comments may be lost: ${crossCheck.authors.pagesOnly.join(', ')}.`,
+    );
+  }
+  if (plan && plan.unsafeLinks.length > 0) {
+    reviewFlags.push(
+      `${plan.unsafeLinks.length} link address(es) removed as unsafe, keeping their text.`,
     );
   }
   if (reviewFlags.length > 0 && !reviewed) {
@@ -106,6 +113,7 @@ export function buildProfileReport(
     readerWarnings: docx.warnings,
     proposalErrors: check.errors,
     unmappedPagesLinks: plan?.unmappedPagesLinks ?? [],
+    unsafeLinks: plan?.unsafeLinks ?? [],
     reviewFlags,
     reviewed,
     legalDropped: check.legalDropped,

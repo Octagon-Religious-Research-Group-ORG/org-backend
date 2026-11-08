@@ -113,6 +113,7 @@ const plan: ImportPlan = {
     { path: 'Data/g.jpeg', role: 'gallery' },
   ],
   unmappedPagesLinks: [],
+  unsafeLinks: [],
 };
 
 const files = new Map<string, Uint8Array>([

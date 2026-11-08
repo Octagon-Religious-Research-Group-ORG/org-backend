@@ -46,6 +46,7 @@ const plan = {
   blocks: [{ kind: 'paragraph' }, { kind: 'image' }],
   images: [{ path: 'Data/p.jpeg', role: 'picture' }],
   unmappedPagesLinks: ['https://www.icloud.com/pages/X'],
+  unsafeLinks: [],
 } as unknown as ImportPlan;
 
 const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
@@ -59,6 +60,21 @@ const check = (errors: string[] = [], reviewFlags: string[] = []) => ({
 });
 
 describe('buildProfileReport', () => {
+  it('reports removed link addresses and needs a review for them', () => {
+    const report = buildProfileReport(
+      'a',
+      docx(),
+      check(),
+      { ...plan, unsafeLinks: ['javascript:alert(1)'] },
+      cross('ok'),
+    );
+    expect(report.unsafeLinks).toEqual(['javascript:alert(1)']);
+    expect(report.reviewFlags).toEqual([
+      '1 link address(es) removed as unsafe, keeping their text.',
+    ]);
+    expect(report.status).toBe('mismatch');
+  });
+
   it('blocks a profile whose recorded review is void, flags or no flags', () => {
     const report = buildProfileReport(
       'a',
@@ -116,6 +132,7 @@ describe('buildProfileReport', () => {
       reviewFlags: [],
       reviewed: false,
       legalDropped: { paragraphs: 2, characters: 40 },
+      unsafeLinks: [],
     });
   });
 

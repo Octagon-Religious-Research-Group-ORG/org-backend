@@ -4,8 +4,13 @@ import type {
   BlockSection,
 } from '../../social/schemas/profile-block.schema';
 import type { ProfileVisibility } from '../../social/schemas/social-profile.schema';
+import { legacyDate } from './docx-reader';
 import type { DocxDocument, DocxParagraph } from './docx-reader';
-import type { CommentPlacement, ProfileProposal } from './proposal';
+import {
+  type CommentPlacement,
+  isLegalDrop,
+  type ProfileProposal,
+} from './proposal';
 
 /**
  * Who wrote imported text. Versions authored by the import are labelled so in
@@ -59,6 +64,8 @@ export interface ImportPlan {
   images: { path: string; role: 'picture' | 'gallery' }[];
   /** Every link that still points at Apple Pages after rewriting. */
   unmappedPagesLinks: string[];
+  /** Addresses removed as unsafe; the link's visible text is kept. */
+  unsafeLinks: string[];
 }
 
 export type IdFactory = (prefix: 'tab' | 'blk' | 'cmt') => string;
@@ -74,37 +81,60 @@ export function pagesKey(url: string): string | undefined {
   return match?.[1];
 }
 
+/** Anywhere in a paragraph, so a mistyped or plain-text Pages link is still seen. */
+const PAGES_URL = /[^\s)\]"'<>]*icloud\.com\/pages\/[^\s)\]"'<>]*/gi;
+const PAGES_ADDRESS = /icloud\.com\/pages\//i;
+
+/** Only these may become a clickable address. */
+const SAFE_LINK = /^(?:https?:|mailto:)/i;
+
 /** Markdown-escapes the characters that would break a `[text](url)` link. */
 function escapeText(text: string): string {
   return text.replace(/([\\[\]])/g, '\\$1');
 }
 
 /**
- * A paragraph's text with its links written as Markdown. Links between
- * migrated profiles become site addresses (`/tripp`); other iCloud links are
- * kept and reported, since they break when the Pages documents are retired.
+ * A paragraph's text with its links written as Markdown, each at the position
+ * the reader recorded (searching for the label breaks when two links share
+ * one, or a label also appears in plain text). Links between migrated profiles
+ * become site addresses (`/tripp`); other iCloud links are kept and reported,
+ * since they break when the Pages documents are retired. An address that is
+ * not http(s) or mailto is dropped, keeping the words, and reported in `unsafe`.
  */
 export function paragraphMarkdown(
   paragraph: DocxParagraph,
   slugByPagesKey: ReadonlyMap<string, string>,
   unmapped: string[],
+  unsafe: string[] = [],
 ): string {
-  let text = escapeText(paragraph.text.trim());
-  for (const link of paragraph.links) {
+  for (const [url] of paragraph.text.matchAll(PAGES_URL)) {
+    unmapped.push(url.replace(/[.,;:!?]+$/, ''));
+  }
+  const text = paragraph.text.trim();
+  const lead = paragraph.text.length - paragraph.text.trimStart().length;
+  const links = [...paragraph.links].sort((a, b) => a.start - b.start);
+  let out = '';
+  let cursor = 0;
+  const leftover: string[] = [];
+  for (const link of links) {
     const key = pagesKey(link.url);
     const slug = key ? slugByPagesKey.get(key) : undefined;
-    if (key && !slug) unmapped.push(link.url);
-    const target = (slug ? `/${slug}` : link.url).replace(/\)/g, '%29');
+    if (!slug && PAGES_ADDRESS.test(link.url)) unmapped.push(link.url);
+    if (!link.text) continue;
     const label = escapeText(link.text);
-    if (!label) continue;
-    const at = text.indexOf(label);
-    if (at >= 0) {
-      text = `${text.slice(0, at)}[${label}](${target})${text.slice(at + label.length)}`;
+    const safe = slug !== undefined || SAFE_LINK.test(link.url);
+    if (!safe) unsafe.push(link.url);
+    const target = (slug ? `/${slug}` : link.url).replace(/\)/g, '%29');
+    const written = safe ? `[${label}](${target})` : label;
+    const at = link.start - lead;
+    if (at >= cursor && text.slice(at, at + link.text.length) === link.text) {
+      out += `${escapeText(text.slice(cursor, at))}${written}`;
+      cursor = at + link.text.length;
     } else {
-      text = `${text} [${label}](${target})`;
+      leftover.push(written);
     }
   }
-  return text;
+  return [`${out}${escapeText(text.slice(cursor))}`, ...leftover].join(' ');
 }
 
 /** The typed or numbered label at the start of a paragraph, e.g. "II." or "A.". */
@@ -116,10 +146,10 @@ function labelOf(paragraph: DocxParagraph): string {
 }
 
 function kindOf(paragraph: DocxParagraph): BlockKind {
-  if (paragraph.headingLevel !== undefined) return 'heading';
   if (paragraph.text.trim() === '' && paragraph.images.length > 0) {
     return 'image';
   }
+  if (paragraph.headingLevel !== undefined) return 'heading';
   return labelOf(paragraph) ? 'outline-item' : 'paragraph';
 }
 
@@ -137,49 +167,53 @@ export function buildImportPlan(
   ids: IdFactory = randomIds,
 ): ImportPlan {
   const unmapped: string[] = [];
+  const unsafe: string[] = [];
+  const legalParagraphs = new Set(
+    proposal.dropped.filter(isLegalDrop).flatMap((drop) => drop.paragraphs),
+  );
   const blocks: PlannedBlock[] = [];
   const blockOf = new Map<number, string>();
   const orderIn = new Map<string, number>();
 
-  const add = (
-    index: number,
-    section: BlockSection,
-    tabId?: string,
-    override?: Partial<PlannedBlock>,
-  ) => {
+  const add = (index: number, section: BlockSection, tabId?: string) => {
     const paragraph = docx.paragraphs[index];
     const key = tabId ?? section;
-    const order = orderIn.get(key) ?? 0;
-    orderIn.set(key, order + 1);
-    const kind = kindOf(paragraph);
-    const block: PlannedBlock = {
-      blockId: ids('blk'),
-      section,
-      kind,
-      label: kind === 'outline-item' ? labelOf(paragraph) : '',
-      order,
-      ...(tabId ? { tabId } : {}),
-      text:
-        kind === 'image'
-          ? paragraph.images[0]
-          : paragraphMarkdown(paragraph, slugByPagesKey, unmapped),
-      paragraph: index,
-      ...override,
+    const emit = (kind: BlockKind, text: string): PlannedBlock => {
+      const order = orderIn.get(key) ?? 0;
+      orderIn.set(key, order + 1);
+      const block: PlannedBlock = {
+        blockId: ids('blk'),
+        section,
+        kind,
+        label: kind === 'outline-item' ? labelOf(paragraph) : '',
+        order,
+        ...(tabId ? { tabId } : {}),
+        text,
+        paragraph: index,
+      };
+      blocks.push(block);
+      return block;
     };
-    blocks.push(block);
-    blockOf.set(index, block.blockId);
-    // An image paragraph with several pictures becomes one block per picture.
-    if (kind === 'image') {
-      for (const extra of paragraph.images.slice(1)) {
-        const order2 = orderIn.get(key)!;
-        orderIn.set(key, order2 + 1);
-        blocks.push({
-          ...block,
-          blockId: ids('blk'),
-          order: order2,
-          text: extra,
-        });
-      }
+
+    // One block per picture, in place around the paragraph's text. A comment
+    // on the paragraph anchors to its text, or its first picture if it has none.
+    const kind = kindOf(paragraph);
+    const leading = kind === 'image' ? 0 : (paragraph.leadingImages ?? 0);
+    for (const image of paragraph.images.slice(0, leading)) {
+      emit('image', image);
+    }
+    const main =
+      kind === 'image'
+        ? emit('image', paragraph.images[0])
+        : emit(
+            kind,
+            paragraphMarkdown(paragraph, slugByPagesKey, unmapped, unsafe),
+          );
+    blockOf.set(index, main.blockId);
+    for (const image of paragraph.images.slice(
+      kind === 'image' ? 1 : leading,
+    )) {
+      emit('image', image);
     }
   };
 
@@ -221,7 +255,11 @@ export function buildImportPlan(
       commentId: comment.id,
       unplaced: 'not-anchored' as const,
     };
-    const date = comment.date ? new Date(comment.date) : undefined;
+    const date = comment.date ? legacyDate(comment.date) : undefined;
+    // A highlight on the Legal section must not carry its words over (§2b).
+    const onLegal = comment.paragraphIndices.some((index) =>
+      legalParagraphs.has(index),
+    );
     return {
       commentId: commentIdOf.get(comment.id)!,
       ...(comment.parentId && commentIdOf.has(comment.parentId)
@@ -233,11 +271,11 @@ export function buildImportPlan(
       ...(placement.paragraph !== undefined && blockOf.has(placement.paragraph)
         ? { anchorBlockId: blockOf.get(placement.paragraph) }
         : {}),
-      ...(comment.anchorText ? { anchorText: comment.anchorText } : {}),
-      legacyAuthorName: comment.author.trim() || 'Unknown (Apple Pages)',
-      ...(date && !Number.isNaN(date.getTime())
-        ? { legacyCreatedAt: date }
+      ...(comment.anchorText && !onLegal
+        ? { anchorText: comment.anchorText }
         : {}),
+      legacyAuthorName: comment.author.trim() || 'Unknown (Apple Pages)',
+      ...(date ? { legacyCreatedAt: date } : {}),
       body: comment.text,
       placement,
     };
@@ -262,5 +300,6 @@ export function buildImportPlan(
       })),
     ],
     unmappedPagesLinks: [...new Set(unmapped)].sort(),
+    unsafeLinks: [...new Set(unsafe)].sort(),
   };
 }

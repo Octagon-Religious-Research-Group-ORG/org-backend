@@ -71,6 +71,124 @@ describe('paragraphMarkdown', () => {
   });
 });
 
+describe('paragraphMarkdown link positions', () => {
+  const links = (
+    text: string,
+    list: { text: string; url: string; start: number }[],
+  ) => paragraphMarkdown(paragraph(0, { text, links: list }), new Map(), []);
+
+  it('writes two links with the same label where each one really is', () => {
+    expect(
+      links('see here and here', [
+        { text: 'here', url: 'https://a.example/1', start: 4 },
+        { text: 'here', url: 'https://b.example/2', start: 13 },
+      ]),
+    ).toBe('see [here](https://a.example/1) and [here](https://b.example/2)');
+  });
+
+  it('links the right occurrence when the label is also plain text', () => {
+    expect(
+      links('here is text, go here', [
+        { text: 'here', url: 'https://a.example/1', start: 17 },
+      ]),
+    ).toBe('here is text, go [here](https://a.example/1)');
+  });
+
+  it('accounts for leading spaces and out-of-order links', () => {
+    expect(
+      links('  one two', [
+        { text: 'two', url: 'https://b.example/2', start: 6 },
+        { text: 'one', url: 'https://a.example/1', start: 2 },
+      ]),
+    ).toBe('[one](https://a.example/1) [two](https://b.example/2)');
+  });
+
+  it('never nests overlapping links: the later one goes at the end', () => {
+    expect(
+      links('outer inner', [
+        { text: 'outer inner', url: 'https://a.example/1', start: 0 },
+        { text: 'inner', url: 'https://b.example/2', start: 6 },
+      ]),
+    ).toBe('[outer inner](https://a.example/1) [inner](https://b.example/2)');
+  });
+
+  it('keeps square brackets in the text escaped around links', () => {
+    expect(
+      links('[a] see [b]', [
+        { text: 'see', url: 'https://a.example/1', start: 4 },
+      ]),
+    ).toBe('\\[a\\] [see](https://a.example/1) \\[b\\]');
+  });
+
+  it.each([
+    'javascript:alert(1)',
+    'JAVASCRIPT:alert(1)',
+    'data:text/html,x',
+    'vbscript:x',
+    'file:///etc/passwd',
+    '#bookmark',
+    '//evil.example/x',
+    'hhttps://example.test/x',
+  ])('drops the address %s, keeping the words, and reports it', (url) => {
+    const unsafe: string[] = [];
+    expect(
+      paragraphMarkdown(
+        paragraph(0, {
+          text: 'click me',
+          links: [{ text: 'click', url, start: 0 }],
+        }),
+        new Map(),
+        [],
+        unsafe,
+      ),
+    ).toBe('click me');
+    expect(unsafe).toEqual([url]);
+  });
+
+  it.each(['https://a.example', 'HTTP://a.example', 'mailto:a@example.test'])(
+    'keeps %s',
+    (url) => {
+      const unsafe: string[] = [];
+      expect(
+        paragraphMarkdown(
+          paragraph(0, { text: 'x', links: [{ text: 'x', url, start: 0 }] }),
+          new Map(),
+          [],
+          unsafe,
+        ),
+      ).toBe(`[x](${url})`);
+      expect(unsafe).toEqual([]);
+    },
+  );
+
+  it('reports mistyped and plain-text Pages links, mapped ones excepted', () => {
+    const unmapped: string[] = [];
+    paragraphMarkdown(
+      paragraph(0, {
+        text: 'Read https://www.icloud.com/pages/plainText, or broken and mapped',
+        links: [
+          {
+            text: 'broken',
+            url: 'hhttps://www.icloud.com/pages/typo',
+            start: 47,
+          },
+          {
+            text: 'mapped',
+            url: 'https://www.icloud.com/pages/0080pSrnZRMtMf8XV8DAZ-7Lg',
+            start: 58,
+          },
+        ],
+      }),
+      SLUGS,
+      unmapped,
+    );
+    expect(unmapped).toEqual([
+      'https://www.icloud.com/pages/plainText',
+      'hhttps://www.icloud.com/pages/typo',
+    ]);
+  });
+});
+
 describe('buildImportPlan', () => {
   const doc: DocxDocument = {
     paragraphs: [
@@ -272,7 +390,143 @@ describe('buildImportPlan', () => {
         { path: 'Data/g.jpeg', role: 'gallery' },
       ],
       unmappedPagesLinks: [],
+      unsafeLinks: [],
     });
+  });
+
+  describe('pictures inside paragraphs', () => {
+    const planOf = (spec: Partial<DocxParagraph> & { text: string }) => {
+      const single: DocxDocument = {
+        ...doc,
+        paragraphs: [paragraph(0, spec)],
+        comments: [
+          {
+            id: '1',
+            author: 'A',
+            text: 'c',
+            anchorText: 'x',
+            paragraphIndices: [0],
+            anchored: true,
+          },
+        ],
+      };
+      const plan = buildImportPlan(
+        {
+          ...proposal,
+          sections: [{ section: 'bio', paragraphs: [0] }],
+          tabs: [],
+          images: { gallery: [] },
+        },
+        single,
+        [{ commentId: '1', paragraph: 0 }],
+        SLUGS,
+        sequentialIds(),
+      );
+      return plan;
+    };
+
+    it('emits a picture after the text it follows', () => {
+      const plan = planOf({ text: 'Words.', images: ['word/media/a.png'] });
+      expect(plan.blocks.map((b) => [b.kind, b.order, b.text])).toEqual([
+        ['paragraph', 0, 'Words.'],
+        ['image', 1, 'word/media/a.png'],
+      ]);
+    });
+
+    it('emits a picture that comes first before the text, in order', () => {
+      const plan = planOf({
+        text: 'Words.',
+        images: ['word/media/a.png', 'word/media/b.png'],
+        leadingImages: 1,
+      });
+      expect(plan.blocks.map((b) => [b.kind, b.order, b.text])).toEqual([
+        ['image', 0, 'word/media/a.png'],
+        ['paragraph', 1, 'Words.'],
+        ['image', 2, 'word/media/b.png'],
+      ]);
+      // A comment on the paragraph points at its words, not the picture.
+      expect(plan.comments[0].anchorBlockId).toBe(plan.blocks[1].blockId);
+    });
+
+    it('treats a picture in an empty heading as a picture', () => {
+      const plan = planOf({
+        text: '',
+        headingLevel: 3,
+        images: ['word/media/a.png'],
+      });
+      expect(plan.blocks.map((b) => [b.kind, b.text])).toEqual([
+        ['image', 'word/media/a.png'],
+      ]);
+    });
+
+    it('keeps the picture of a heading with text', () => {
+      const plan = planOf({
+        text: 'Heading',
+        headingLevel: 3,
+        images: ['word/media/a.png'],
+      });
+      expect(plan.blocks.map((b) => b.kind)).toEqual(['heading', 'image']);
+    });
+  });
+
+  it('clears the anchor text of a comment on the Legal section, and only that', () => {
+    const legal: DocxDocument = {
+      ...doc,
+      paragraphs: [
+        paragraph(0, { text: 'kept' }),
+        paragraph(1, { text: 'legal' }),
+      ],
+      comments: [
+        {
+          id: '1',
+          author: 'A',
+          text: 'c',
+          anchorText: 'kept\nlegal',
+          paragraphIndices: [0, 1],
+          anchored: true,
+        },
+        {
+          id: '2',
+          author: 'A',
+          text: 'c',
+          anchorText: 'kept',
+          paragraphIndices: [0],
+          anchored: true,
+        },
+      ],
+    };
+    const plan = buildImportPlan(
+      {
+        ...proposal,
+        sections: [{ section: 'bio', paragraphs: [0] }],
+        tabs: [],
+        dropped: [{ paragraphs: [1], reason: 'Legal section: not migrated' }],
+        images: { gallery: [] },
+      },
+      legal,
+      [{ commentId: '1', paragraph: 0 }],
+      SLUGS,
+      sequentialIds(),
+    );
+    expect(plan.comments[0].anchorText).toBeUndefined();
+    expect(plan.comments[1].anchorText).toBe('kept');
+  });
+
+  it('reads a comment date with no timezone as UTC, and an invalid one as absent', () => {
+    const dated: DocxDocument = {
+      ...doc,
+      comments: [
+        { ...doc.comments[0], date: '2026-07-26T13:19:54' },
+        { ...doc.comments[0], id: '2', date: 'garbage' },
+        { ...doc.comments[0], id: '3', date: undefined },
+      ],
+    };
+    const plan = buildImportPlan(proposal, dated, [], SLUGS, sequentialIds());
+    expect(plan.comments.map((c) => c.legacyCreatedAt)).toEqual([
+      new Date('2026-07-26T13:19:54Z'),
+      undefined,
+      undefined,
+    ]);
   });
 
   it('carries a nickname profile as anonymous (plan §2b)', () => {
