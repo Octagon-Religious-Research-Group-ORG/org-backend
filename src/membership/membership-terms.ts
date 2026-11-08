@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 /**
  * What every new member is told and agrees to before joining (plan §2b,
- * Tripp's answers Q08, Q10, D10, D22). The server owns this text, and each
+ * the owner's answers Q08, Q10, D10, D22). The server owns this text, and each
  * consent record stores its version and hash, so ORG can show exactly what a
  * member agreed to.
  *

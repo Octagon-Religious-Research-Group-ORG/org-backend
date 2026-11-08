@@ -4,7 +4,7 @@ import { SLUG_PATTERN } from '../social/schemas/social-profile.schema';
  * Addresses a member page may not take when someone joins. Applies only to
  * joining: the importer brings existing pages in under the addresses they
  * already have. Member pages live at the site root
- * (`orgspirituality.org/tripp`, Tripp, Q01), so a slug must never shadow an
+ * (`orgspirituality.org/some-name`, owner, Q01), so a slug must never shadow an
  * existing or planned page of the website.
  */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([

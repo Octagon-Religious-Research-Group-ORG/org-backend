@@ -84,7 +84,7 @@ export class JoinBeliefDto {
 
 /**
  * Everything a new member submits to join the Members Community. Bio and at
- * least one belief are required (Tripp, D10: joining "requires the upload of
+ * least one belief are required (owner, D10: joining "requires the upload of
  * bio and beliefs"); so are two ways to reach them, the account email being
  * the first (plan §2d item 4).
  */

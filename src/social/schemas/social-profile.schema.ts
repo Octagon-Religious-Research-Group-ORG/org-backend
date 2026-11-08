@@ -5,10 +5,10 @@ import { HydratedDocument } from 'mongoose';
  * Who can see a profile (plan D4, §2b D11, §2d), from widest to narrowest:
  * - `public`: everyone, guests and anyone holding the link included;
  * - `members`: every member, anonymous members included;
- * - `named-members`: only members who joined under their own name (Tripp,
+ * - `named-members`: only members who joined under their own name (owner,
  *   D11: "some members may not want an anonymous member or guest to see
  *   their page");
- * - `unlisted`: Tripp's "Private" — never listed in the Members Community,
+ * - `unlisted`: the owner's "Private" — never listed in the Members Community,
  *   though the member keeps a full timestamped record.
  */
 export const PROFILE_VISIBILITIES = [
@@ -22,7 +22,7 @@ export type ProfileVisibility = (typeof PROFILE_VISIBILITIES)[number];
 /**
  * - `claiming`: a join in progress holding its owner and address; never shown
  *   to anyone, and removed if the join fails or dies;
- * - `pending`: a new member's page waiting for an admin (Tripp's approval
+ * - `pending`: a new member's page waiting for an admin (the owner's approval
  *   step, plan §2d); shown only to its owner and admins;
  * - `approved`: shown according to its visibility.
  * Rows written before this field existed read as approved (schema default).
@@ -104,7 +104,7 @@ export class SocialProfile {
 
   /**
    * The member uses a nickname rather than their own name (D2; §2b: the
-   * migrated Stalemate, James Karma and Novi start this way). Self-declared.
+   * migrated nickname profiles start this way). Self-declared.
    */
   @Prop({ type: Boolean, default: false })
   anonymous: boolean;

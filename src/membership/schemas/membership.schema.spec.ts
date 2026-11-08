@@ -74,8 +74,8 @@ describe('membership schemas', () => {
 
   it('profiles default to approved, not anonymous, no contacts', async () => {
     const profile = new Profiles({
-      slug: 'tripp',
-      displayName: 'Tripp',
+      slug: 'some-member',
+      displayName: 'Some Member',
       source: 'migrated',
     });
     await expect(profile.validate()).resolves.toBeUndefined();

@@ -15,14 +15,14 @@ function setup(currentRole?: string) {
 }
 
 const change = {
-  actorUserId: 'user_tripp',
+  actorUserId: 'user_admin',
   targetUserId: 'user_member',
   role: 'moderator' as const,
   reason: '  Helps with moderation  ',
 };
 
 const entry = {
-  actorUserId: 'user_tripp',
+  actorUserId: 'user_admin',
   targetType: 'user',
   targetId: 'user_member',
   reason: 'Helps with moderation',

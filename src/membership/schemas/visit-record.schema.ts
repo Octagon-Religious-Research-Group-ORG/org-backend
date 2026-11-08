@@ -6,7 +6,7 @@ export const VISIT_KINDS = ['guest-entry'] as const;
 export type VisitKind = (typeof VISIT_KINDS)[number];
 
 /**
- * A visitor entering the Members Community without an account (Tripp, D10:
+ * A visitor entering the Members Community without an account (owner, D10:
  * "track visitors' nicknames and IP addresses"). **Append-only.** Disclosed on
  * the entry page and in the membership terms.
  */

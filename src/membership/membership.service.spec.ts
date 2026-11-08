@@ -125,8 +125,8 @@ function setup(
 
 function input(overrides: Partial<JoinMembershipDto> = {}): JoinMembershipDto {
   return {
-    displayName: ' Stalemate ',
-    slug: 'Stalemate',
+    displayName: ' Quiet Fern ',
+    slug: 'Quiet-Fern',
     anonymous: true,
     visibility: 'members',
     bio: 'First.\n\nSecond.',
@@ -245,13 +245,17 @@ describe('MembershipService', () => {
 
     it('reads older rows as approved and not anonymous', async () => {
       const { service, profileModel } = setup({
-        owned: { slug: 'tripp', displayName: 'Tripp', visibility: 'public' },
+        owned: {
+          slug: 'some-member',
+          displayName: 'Some Member',
+          visibility: 'public',
+        },
       });
       await expect(service.summary('u')).resolves.toEqual({
         status: 'approved',
         profile: {
-          slug: 'tripp',
-          displayName: 'Tripp',
+          slug: 'some-member',
+          displayName: 'Some Member',
           anonymous: false,
           visibility: 'public',
         },
@@ -353,13 +357,13 @@ describe('MembershipService', () => {
         [Record<string, unknown>],
       ];
       expect(row).toMatchObject({
-        slug: 'stalemate',
+        slug: 'quiet-fern',
         visibility: 'unlisted',
         reviewStatus: 'claiming',
         ownerUserId: 'user_a',
         source: 'native',
       });
-      expect(JSON.stringify(row)).not.toContain('Stalemate');
+      expect(JSON.stringify(row)).not.toContain('Quiet Fern');
       expect(row.contacts).toBeUndefined();
       const [[filter, update, options]] = ctx.profileModel.updateOne.mock
         .calls as unknown as [
@@ -367,7 +371,7 @@ describe('MembershipService', () => {
       ];
       expect(filter).toEqual({ _id: row._id, reviewStatus: 'claiming' });
       expect(update.$set).toEqual({
-        displayName: 'Stalemate',
+        displayName: 'Quiet Fern',
         visibility: 'members',
         anonymous: true,
         reviewStatus: 'pending',
@@ -578,7 +582,7 @@ describe('MembershipService', () => {
       ];
       expect(filter.reviewStatus).toBe('claiming');
       expect(filter.$or).toEqual([
-        { slug: 'stalemate' },
+        { slug: 'quiet-fern' },
         { ownerUserId: 'user_a' },
       ]);
       expect(filter.createdAt.$lt.getTime()).toBeLessThanOrEqual(

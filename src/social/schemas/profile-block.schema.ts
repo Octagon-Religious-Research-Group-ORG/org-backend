@@ -8,7 +8,7 @@ export const BLOCK_SECTIONS = [
   'texts',
   'contact',
   'legal',
-  // A section under the member's own heading (e.g. Tripp's "Theophanies");
+  // A section under the member's own heading (e.g. the owner's "Theophanies");
   // the heading itself is stored as the section's first block.
   'other',
 ] as const;

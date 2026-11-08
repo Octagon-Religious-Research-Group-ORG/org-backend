@@ -7,7 +7,7 @@ import {
 
 /**
  * Backup ways to reach a member, visible to the member and admins only (plan
- * §2d item 4: Tripp asks every member for at least two, in case one line is
+ * §2d item 4: the owner asks every member for at least two, in case one line is
  * lost). Kept out of `socialprofiles` on purpose, so no page serializer can
  * ever leak them.
  */

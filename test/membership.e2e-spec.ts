@@ -36,8 +36,8 @@ describe('Membership API (e2e)', () => {
   };
 
   const valid = {
-    displayName: 'Stalemate',
-    slug: 'stalemate',
+    displayName: 'Quiet Fern',
+    slug: 'quiet-fern',
     anonymous: true,
     visibility: 'named-members',
     bio: 'Hello.',
@@ -92,7 +92,7 @@ describe('Membership API (e2e)', () => {
       .expect({ status: 'pending' });
     expect(service.join).toHaveBeenCalledWith(
       'user_e2e',
-      expect.objectContaining({ slug: 'stalemate', anonymous: true }),
+      expect.objectContaining({ slug: 'quiet-fern', anonymous: true }),
       expect.any(Object),
     );
   });

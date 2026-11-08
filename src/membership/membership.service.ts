@@ -193,7 +193,7 @@ export class MembershipService {
    * removes the claim, so the member can retry and no half-page exists; rows
    * already written point at a profile id that never became a page.
    *
-   * @throws ForbiddenException without a verified account email (Tripp, Q08), or
+   * @throws ForbiddenException without a verified account email (owner, Q08), or
    *   when this account's page was deleted (whether it may return is the owner's call)
    * @throws ConflictException for stale terms, an existing page, or a taken address
    * @throws BadRequestException for an address the site cannot use, or empty text
@@ -326,7 +326,7 @@ export class MembershipService {
       .exec();
   }
 
-  /** One page per account, for ever: a deleted page still counts (Tripp's call). */
+  /** One page per account, for ever: a deleted page still counts (the owner's call). */
   private async refuseExistingPage(userId: string) {
     const existing = await this.profileModel
       .findOne({ ownerUserId: userId })

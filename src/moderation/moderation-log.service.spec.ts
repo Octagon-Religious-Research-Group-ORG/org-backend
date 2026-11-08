@@ -10,7 +10,7 @@ describe('ModerationLogService', () => {
     const before = Date.now();
 
     await service.record({
-      actorUserId: 'user_tripp',
+      actorUserId: 'user_admin',
       action: 'role.change.applied',
       targetType: 'user',
       targetId: 'user_member',

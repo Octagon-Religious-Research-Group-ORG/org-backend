@@ -21,7 +21,7 @@ function comment(overrides: Record<string, unknown> = {}) {
     profileId,
     body: 'I agree',
     source: 'migrated',
-    legacyAuthorName: 'Tripp ORG',
+    legacyAuthorName: 'Alex Example',
     ...overrides,
   });
 }
@@ -125,7 +125,7 @@ describe('members-area content schemas', () => {
     it('rejects a source file without a valid SHA-256', async () => {
       const record = new Imports({
         profileId,
-        slug: 'renan',
+        slug: 'sample-member',
         pagesUrl: 'https://www.icloud.com/pages/x',
         sources: [
           { kind: 'docx', fileName: 'a.docx', bytes: 1, sha256: 'nope' },

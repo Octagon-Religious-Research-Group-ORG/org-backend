@@ -37,9 +37,9 @@ describe('MembershipController', () => {
   });
 
   it('checks an address, treating a missing one as empty', async () => {
-    await controller.slugAvailability('tripp');
+    await controller.slugAvailability('some-member');
     await controller.slugAvailability(['a', 'b']);
-    expect(service.slugAvailability).toHaveBeenNthCalledWith(1, 'tripp');
+    expect(service.slugAvailability).toHaveBeenNthCalledWith(1, 'some-member');
     expect(service.slugAvailability).toHaveBeenNthCalledWith(2, '');
   });
 
@@ -67,7 +67,7 @@ describe('slugProblem', () => {
   it('flags format and reserved site pages', () => {
     expect(slugProblem('a')).toBe('format');
     expect(slugProblem('x'.repeat(81))).toBe('format');
-    expect(slugProblem('Tripp')).toBe('format');
+    expect(slugProblem('Some-Member')).toBe('format');
     expect(slugProblem('membership')).toBe('reserved');
     expect(slugProblem('some-member')).toBeUndefined();
   });
