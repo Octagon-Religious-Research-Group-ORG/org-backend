@@ -42,6 +42,16 @@ export class MongoImportStore implements ImportStore {
     return (await this.models.SocialProfile.exists({ slug })) !== null;
   }
 
+  /** A profile `--replace` would not remove: it was not imported. */
+  async hasNonImportedProfile(slug: string) {
+    return (
+      (await this.models.SocialProfile.exists({
+        slug,
+        source: { $ne: 'migrated' },
+      })) !== null
+    );
+  }
+
   async createTab(row: Record<string, unknown>) {
     await this.models.BeliefTab.create(row);
   }

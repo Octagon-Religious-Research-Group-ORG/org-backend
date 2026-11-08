@@ -60,6 +60,7 @@ describe('import:pages database guard (the CLI itself)', () => {
   it.each(['test', 'org-latest-production'])(
     'refuses %p (production is named test) and opens no store',
     async (database) => {
+      writeMembers([member('alpha')]);
       const close = connectTo(database);
 
       await expect(run('--confirm', database, '--replace')).resolves.toBe(2);
@@ -70,6 +71,7 @@ describe('import:pages database guard (the CLI itself)', () => {
   );
 
   it('refuses the test database without a matching --confirm', async () => {
+    writeMembers([member('alpha')]);
     connectTo('org-testing');
 
     await expect(run('--confirm', 'test')).resolves.toBe(2);
@@ -78,416 +80,469 @@ describe('import:pages database guard (the CLI itself)', () => {
   });
 
   it('proceeds on the test database when confirmed', async () => {
+    writeMembers([member('alpha')]);
     connectTo('org-testing');
+    memoryStore();
 
     await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
 
     expect(MongoImportStore).toHaveBeenCalledTimes(1);
   });
 
-  describe('importing real files', () => {
-    const STYLES =
-      '<w:style w:styleId="Heading2"><w:name w:val="Heading 2"/></w:style>' +
-      '<w:style w:styleId="Heading3"><w:name w:val="Heading 3"/></w:style>';
-    const H2 = '<w:pStyle w:val="Heading2"/>';
-    const H3 = '<w:pStyle w:val="Heading3"/>';
-    const BODY = p('Bio', H2) + p('my bio') + p('Beliefs', H2);
-    const PNG = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-      'base64',
-    );
-    const image =
-      '<w:p><w:r><w:drawing><a:blip r:embed="R1"/></w:drawing></w:r></w:p>';
+  const STYLES =
+    '<w:style w:styleId="Heading2"><w:name w:val="Heading 2"/></w:style>' +
+    '<w:style w:styleId="Heading3"><w:name w:val="Heading 3"/></w:style>';
+  const H2 = '<w:pStyle w:val="Heading2"/>';
+  const H3 = '<w:pStyle w:val="Heading3"/>';
+  const BODY = p('Bio', H2) + p('my bio') + p('Beliefs', H2);
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64',
+  );
+  const image =
+    '<w:p><w:r><w:drawing><a:blip r:embed="R1"/></w:drawing></w:r></w:p>';
 
-    interface Member {
-      slug: string;
-      body: string;
-      parts?: Partial<Parameters<typeof buildDocx>[0]>;
-      edit?: (proposal: ProfileProposal) => void;
-    }
+  interface Member {
+    slug: string;
+    body: string;
+    parts?: Partial<Parameters<typeof buildDocx>[0]>;
+    edit?: (proposal: ProfileProposal) => void;
+  }
 
-    function member(slug: string, extra = '', parts = {}): Member {
-      return { slug, body: BODY + p('I. one') + extra, parts };
-    }
+  function member(slug: string, extra = '', parts = {}): Member {
+    return { slug, body: BODY + p('I. one') + extra, parts };
+  }
 
-    function writeMembers(members: Member[]) {
-      const manifest = members.map(({ slug, body, parts, edit }, at) => {
-        const pagesUrl = `https://www.icloud.com/pages/id${at}`;
-        const docx = buildDocx({ styles: STYLES, ...parts, body });
-        writeFileSync(join(dir, `${slug}.docx`), docx);
-        writeFileSync(join(dir, `${slug}.pages`), buildPages('', ''));
-        const proposal = proposeStructure(
-          { slug, displayName: slug, pagesUrl, visibility: 'public' },
-          readDocx(docx),
-        );
-        edit?.(proposal);
-        writeFileSync(
-          join(dir, `${slug}.proposal.json`),
-          JSON.stringify(proposal),
-        );
-        return {
-          slug,
-          displayName: slug,
-          pagesUrl,
-          visibility: 'public',
-          docx: `${slug}.docx`,
-          pages: `${slug}.pages`,
-        };
-      });
-      writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
-    }
-
-    const reportHead = () =>
-      readFileSync(join(dir, 'import-report.md'), 'utf8').split('\n')[0];
-    const reportJson = () =>
-      JSON.parse(readFileSync(join(dir, 'import-report.json'), 'utf8')) as {
-        status: string;
-        profiles: { slug: string; reasons: string[] }[];
-      };
-    const fileSha = (name: string) =>
-      createHash('sha256')
-        .update(readFileSync(join(dir, name)))
-        .digest('hex');
-    const proposalOf = (slug: string) =>
-      JSON.parse(
-        readFileSync(join(dir, `${slug}.proposal.json`), 'utf8'),
-      ) as ProfileProposal;
-    const bindingOf = (slug: string) => ({
-      sourceSha256: fileSha(`${slug}.docx`),
-      pagesSha256: fileSha(`${slug}.pages`),
-      proposalSha256: proposalSha256(proposalOf(slug)),
-    });
-    /** Records a sound review of the profile exactly as it now stands. */
-    const review = (slug: string, extra: object = {}) => {
-      const proposal = proposalOf(slug);
-      proposal.reviewed = {
-        by: 'Sam',
-        at: '2026-11-08T10:00:00Z',
-        ...bindingOf(slug),
-        ...extra,
-      };
+  function writeMembers(members: Member[]) {
+    const manifest = members.map(({ slug, body, parts, edit }, at) => {
+      const pagesUrl = `https://www.icloud.com/pages/id${at}`;
+      const docx = buildDocx({ styles: STYLES, ...parts, body });
+      writeFileSync(join(dir, `${slug}.docx`), docx);
+      writeFileSync(join(dir, `${slug}.pages`), buildPages('', ''));
+      const proposal = proposeStructure(
+        { slug, displayName: slug, pagesUrl, visibility: 'public' },
+        readDocx(docx),
+      );
+      edit?.(proposal);
       writeFileSync(
         join(dir, `${slug}.proposal.json`),
         JSON.stringify(proposal),
       );
-    };
-
-    /** A store that keeps rows in memory; `createConnection` is faked. */
-    function memoryStore() {
-      const rows = {
-        profile: [] as Row[],
-        tabs: [] as Row[],
-        blocks: [] as Row[],
-        versions: [] as Row[],
-        comments: [] as Row[],
-        records: [] as Row[],
-        images: [] as Row[],
+      return {
+        slug,
+        displayName: slug,
+        pagesUrl,
+        visibility: 'public',
+        docx: `${slug}.docx`,
+        pages: `${slug}.pages`,
       };
-      let images = 0;
-      const push = (list: Row[]) => (row: Row) => {
-        list.push(row);
-        return Promise.resolve();
-      };
-      const store = {
-        rows,
-        model: () => ({}),
-        profileExists: jest.fn(() => Promise.resolve(false)),
-        removeImported: jest.fn(() => Promise.resolve({})),
-        createTab: push(rows.tabs),
-        createBlock: push(rows.blocks),
-        appendVersion: push(rows.versions),
-        createComment: push(rows.comments),
-        createImportRecord: jest.fn(push(rows.records)),
-        createProfile: push(rows.profile),
-        storeImage: (
-          image: { data: Buffer },
-          metadata: Record<string, unknown>,
-        ) => {
-          const id = `img${++images}`;
-          rows.images.push({ id, ...metadata, bytes: image.data.length });
-          return Promise.resolve(id);
-        },
-        verifyBlock: () => Promise.resolve({ valid: true, length: 1 }),
-        readBack: (profileId: Types.ObjectId) =>
-          Promise.resolve({
-            profile: rows.profile.find((r) => same(r._id, profileId)) ?? null,
-            tabs: rows.tabs.filter((r) => same(r.profileId, profileId)),
-            blocks: rows.blocks.filter((r) => same(r.profileId, profileId)),
-            versions: rows.versions.filter((r) =>
-              rows.blocks.some(
-                (b) => b.blockId === r.blockId && same(b.profileId, profileId),
-              ),
-            ),
-            comments: rows.comments.filter((r) => same(r.profileId, profileId)),
-            importRecords: rows.records.filter((r) =>
-              same(r.profileId, profileId),
-            ),
-            images: rows.images,
-          }),
-      };
-      (MongoImportStore as jest.Mock).mockImplementation(() => store);
-      return store;
-    }
-
-    const refusesInDryRun = async (reason: string) => {
-      const connect = jest.spyOn(mongoose, 'createConnection');
-      await expect(run('--dry-run')).resolves.toBe(1);
-      expect(connect).not.toHaveBeenCalled();
-      expect(reportHead()).toBe('# Pages import report: MISMATCH');
-      expect(
-        reportJson().profiles.flatMap((profile) => profile.reasons),
-      ).toEqual(expect.arrayContaining([expect.stringContaining(reason)]));
-    };
-
-    it('passes a clean profile in a dry run without touching a database', async () => {
-      writeMembers([member('alpha')]);
-      const connect = jest.spyOn(mongoose, 'createConnection');
-
-      await expect(run('--dry-run')).resolves.toBe(0);
-
-      expect(connect).not.toHaveBeenCalled();
-      expect(reportHead()).toBe('# Pages import report: OK');
     });
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
+  }
 
-    it.each<[string, Member]>([
-      [
-        'a paragraph too long for a version',
-        member('beta', p('II. ' + 'y'.repeat(25_000))),
-      ],
-      [
-        'an empty comment body',
-        member(
-          'beta',
-          '<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>II. a</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
-          { comments: '<w:comment w:id="1" w:author="A"><w:p/></w:comment>' },
-        ),
-      ],
-      [
-        'a picture that cannot be decoded',
-        member('beta', image, {
+  const reportHead = () =>
+    readFileSync(join(dir, 'import-report.md'), 'utf8').split('\n')[0];
+  const reportJson = () =>
+    JSON.parse(readFileSync(join(dir, 'import-report.json'), 'utf8')) as {
+      status: string;
+      profiles: { slug: string; reasons: string[] }[];
+    };
+  const fileSha = (name: string) =>
+    createHash('sha256')
+      .update(readFileSync(join(dir, name)))
+      .digest('hex');
+  const proposalOf = (slug: string) =>
+    JSON.parse(
+      readFileSync(join(dir, `${slug}.proposal.json`), 'utf8'),
+    ) as ProfileProposal;
+  const bindingOf = (slug: string) => ({
+    sourceSha256: fileSha(`${slug}.docx`),
+    pagesSha256: fileSha(`${slug}.pages`),
+    proposalSha256: proposalSha256(proposalOf(slug)),
+  });
+  /** Records a sound review of the profile exactly as it now stands. */
+  const review = (slug: string, extra: object = {}) => {
+    const proposal = proposalOf(slug);
+    proposal.reviewed = {
+      by: 'Sam',
+      at: '2026-11-08T10:00:00Z',
+      ...bindingOf(slug),
+      ...extra,
+    };
+    writeFileSync(join(dir, `${slug}.proposal.json`), JSON.stringify(proposal));
+  };
+
+  /** A store that keeps rows in memory; `createConnection` is faked. */
+  function memoryStore() {
+    const rows = {
+      profile: [] as Row[],
+      tabs: [] as Row[],
+      blocks: [] as Row[],
+      versions: [] as Row[],
+      comments: [] as Row[],
+      records: [] as Row[],
+      images: [] as Row[],
+    };
+    let images = 0;
+    const push = (list: Row[]) => (row: Row) => {
+      list.push(row);
+      return Promise.resolve();
+    };
+    const store = {
+      rows,
+      model: () => ({}),
+      profileExists: jest.fn<Promise<boolean>, [unknown?]>(() =>
+        Promise.resolve(false),
+      ),
+      hasNonImportedProfile: jest.fn(() => Promise.resolve(false)),
+      removeImported: jest.fn(() => Promise.resolve({})),
+      createTab: push(rows.tabs),
+      createBlock: push(rows.blocks),
+      appendVersion: push(rows.versions),
+      createComment: push(rows.comments),
+      createImportRecord: jest.fn(push(rows.records)),
+      createProfile: push(rows.profile),
+      storeImage: (
+        image: { data: Buffer },
+        metadata: Record<string, unknown>,
+      ) => {
+        const id = `img${++images}`;
+        rows.images.push({ id, ...metadata, bytes: image.data.length });
+        return Promise.resolve(id);
+      },
+      verifyBlock: () => Promise.resolve({ valid: true, length: 1 }),
+      readBack: (profileId: Types.ObjectId) =>
+        Promise.resolve({
+          profile: rows.profile.find((r) => same(r._id, profileId)) ?? null,
+          tabs: rows.tabs.filter((r) => same(r.profileId, profileId)),
+          blocks: rows.blocks.filter((r) => same(r.profileId, profileId)),
+          versions: rows.versions.filter((r) =>
+            rows.blocks.some(
+              (b) => b.blockId === r.blockId && same(b.profileId, profileId),
+            ),
+          ),
+          comments: rows.comments.filter((r) => same(r.profileId, profileId)),
+          importRecords: rows.records.filter((r) =>
+            same(r.profileId, profileId),
+          ),
+          images: rows.images,
+        }),
+    };
+    (MongoImportStore as jest.Mock).mockImplementation(() => store);
+    return store;
+  }
+
+  const refusesInDryRun = async (reason: string) => {
+    const connect = jest.spyOn(mongoose, 'createConnection');
+    await expect(run('--dry-run')).resolves.toBe(1);
+    expect(connect).not.toHaveBeenCalled();
+    expect(reportHead()).toBe('# Pages import report: MISMATCH');
+    expect(reportJson().profiles.flatMap((profile) => profile.reasons)).toEqual(
+      expect.arrayContaining([expect.stringContaining(reason)]),
+    );
+  };
+
+  it('passes a clean profile in a dry run without touching a database', async () => {
+    writeMembers([member('alpha')]);
+    const connect = jest.spyOn(mongoose, 'createConnection');
+
+    await expect(run('--dry-run')).resolves.toBe(0);
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(reportHead()).toBe('# Pages import report: OK');
+  });
+
+  it.each<[string, Member]>([
+    [
+      'a paragraph too long for a version',
+      member('beta', p('II. ' + 'y'.repeat(25_000))),
+    ],
+    [
+      'an empty comment body',
+      member(
+        'beta',
+        '<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>II. a</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
+        { comments: '<w:comment w:id="1" w:author="A"><w:p/></w:comment>' },
+      ),
+    ],
+    [
+      'a picture that cannot be decoded',
+      member('beta', image, {
+        rels: '<Relationship Id="R1" Target="media/a.png"/>',
+        media: { 'word/media/a.png': new Uint8Array([1, 2, 3]) },
+      }),
+    ],
+    [
+      'a picture relationship outside the package',
+      member('beta', image, {
+        rels: '<Relationship Id="R1" Target="../media/up.png"/>',
+        media: { 'word/media/up.png': new Uint8Array([1]) },
+      }),
+    ],
+    ['a one-letter address', member('z')],
+  ])('fails a dry run over %s, in a later profile', async (_name, bad) => {
+    writeMembers([member('alpha'), bad]);
+    await refusesInDryRun('row or picture check(s) failed');
+  });
+
+  it('accepts a picture in an empty heading', async () => {
+    writeMembers([
+      member(
+        'beta',
+        `<w:p><w:pPr>${H3}</w:pPr><w:r><w:drawing><a:blip r:embed="R1"/></w:drawing></w:r></w:p>`,
+        {
           rels: '<Relationship Id="R1" Target="media/a.png"/>',
-          media: { 'word/media/a.png': new Uint8Array([1, 2, 3]) },
-        }),
-      ],
-      [
-        'a picture relationship outside the package',
-        member('beta', image, {
-          rels: '<Relationship Id="R1" Target="../media/up.png"/>',
-          media: { 'word/media/up.png': new Uint8Array([1]) },
-        }),
-      ],
-      ['a one-letter address', member('z')],
-    ])('fails a dry run over %s, in a later profile', async (_name, bad) => {
-      writeMembers([member('alpha'), bad]);
-      await refusesInDryRun('row or picture check(s) failed');
+          media: { 'word/media/a.png': PNG },
+        },
+      ),
+    ]);
+    await expect(run('--dry-run')).resolves.toBe(0);
+  });
+
+  describe('the review gate', () => {
+    const flagged = (reviewed: unknown): Member => ({
+      ...member('alpha', p('(Fill this in)')),
+      edit: (proposal) => {
+        proposal.reviewed = reviewed as ProfileProposal['reviewed'];
+      },
     });
 
-    it('accepts a picture in an empty heading', async () => {
+    it('blocks a flagged profile with no review', async () => {
+      writeMembers([member('alpha', p('(Fill this in)'))]);
+      await refusesInDryRun('needs review');
+    });
+
+    it.each([
+      ['null', null],
+      ['empty fields', { by: '', at: '' }],
+      ['no hash', { by: 'Sam', at: '2026-11-08T10:00:00Z' }],
+    ])(
+      'blocks a review that is %s, saying how to fix it',
+      async (_n, reviewed) => {
+        writeMembers([flagged(reviewed)]);
+        await refusesInDryRun('Review is void');
+        const reasons = reportJson().profiles[0].reasons.join(' ');
+        expect(reasons).toContain('set "reviewed" in its proposal to');
+        expect(reasons).toContain(bindingOf('alpha').sourceSha256);
+        expect(reasons).toContain(bindingOf('alpha').pagesSha256);
+        expect(reasons).toContain(bindingOf('alpha').proposalSha256);
+        expect(console.error).toHaveBeenCalledWith(
+          expect.stringContaining('set "reviewed" in its proposal to'),
+        );
+      },
+    );
+
+    it('blocks a review of a document that has since changed', async () => {
       writeMembers([
-        member(
-          'beta',
-          `<w:p><w:pPr>${H3}</w:pPr><w:r><w:drawing><a:blip r:embed="R1"/></w:drawing></w:r></w:p>`,
-          {
-            rels: '<Relationship Id="R1" Target="media/a.png"/>',
-            media: { 'word/media/a.png': PNG },
-          },
-        ),
+        flagged({
+          by: 'Sam',
+          at: '2026-11-08T10:00:00Z',
+          sourceSha256: 'b'.repeat(64),
+        }),
       ]);
+      await refusesInDryRun('the .docx has changed since this review');
+    });
+
+    it('accepts a review tied to what would be imported', async () => {
+      writeMembers([flagged(undefined)]);
+      review('alpha');
+
       await expect(run('--dry-run')).resolves.toBe(0);
     });
 
-    describe('the review gate', () => {
-      const flagged = (reviewed: unknown): Member => ({
-        ...member('alpha', p('(Fill this in)')),
-        edit: (proposal) => {
-          proposal.reviewed = reviewed as ProfileProposal['reviewed'];
-        },
-      });
+    it('voids a review when the .pages changes afterwards', async () => {
+      writeMembers([flagged(undefined)]);
+      review('alpha');
+      writeFileSync(join(dir, 'alpha.pages'), buildPages('', '\u0000'));
 
-      it('blocks a flagged profile with no review', async () => {
-        writeMembers([member('alpha', p('(Fill this in)'))]);
-        await refusesInDryRun('needs review');
-      });
+      await refusesInDryRun('the .pages has changed since this review');
+    });
 
-      it.each([
-        ['null', null],
-        ['empty fields', { by: '', at: '' }],
-        ['no hash', { by: 'Sam', at: '2026-11-08T10:00:00Z' }],
-      ])(
-        'blocks a review that is %s, saying how to fix it',
-        async (_n, reviewed) => {
-          writeMembers([flagged(reviewed)]);
-          await refusesInDryRun('Review is void');
-          const reasons = reportJson().profiles[0].reasons.join(' ');
-          expect(reasons).toContain('set "reviewed" in its proposal to');
-          expect(reasons).toContain(bindingOf('alpha').sourceSha256);
-          expect(reasons).toContain(bindingOf('alpha').pagesSha256);
-          expect(reasons).toContain(bindingOf('alpha').proposalSha256);
-          expect(console.error).toHaveBeenCalledWith(
-            expect.stringContaining('set "reviewed" in its proposal to'),
-          );
-        },
+    it('voids a review when a belief is moved to dropped afterwards', async () => {
+      writeMembers([flagged(undefined)]);
+      review('alpha');
+      const proposal = proposalOf('alpha');
+      const moved = proposal.tabs.pop()!;
+      proposal.dropped.push({ paragraphs: moved.paragraphs, reason: 'x' });
+      writeFileSync(join(dir, 'alpha.proposal.json'), JSON.stringify(proposal));
+
+      await refusesInDryRun('the proposal has changed since this review');
+    });
+
+    describe('reader warnings', () => {
+      const footnote = member(
+        'alpha',
+        '<w:p><w:r><w:t>II. a</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>',
       );
+      const warning = 'Paragraph 4: a footnote or endnote cannot be imported.';
 
-      it('blocks a review of a document that has since changed', async () => {
-        writeMembers([
-          flagged({
-            by: 'Sam',
-            at: '2026-11-08T10:00:00Z',
-            sourceSha256: 'b'.repeat(64),
-          }),
-        ]);
-        await refusesInDryRun('the .docx has changed since this review');
+      it('blocks an unnamed warning, printing the text to add', async () => {
+        writeMembers([footnote]);
+        await refusesInDryRun('.docx reader warning(s)');
+        expect(reportJson().profiles[0].reasons.join(' ')).toContain(
+          `"acceptedWarnings":["${warning}"]`,
+        );
       });
 
-      it('accepts a review tied to what would be imported', async () => {
-        writeMembers([flagged(undefined)]);
-        review('alpha');
-
+      it('accepts a warning named by a review of this exact source', async () => {
+        writeMembers([footnote]);
+        review('alpha', { acceptedWarnings: [warning] });
         await expect(run('--dry-run')).resolves.toBe(0);
       });
 
-      it('voids a review when the .pages changes afterwards', async () => {
-        writeMembers([flagged(undefined)]);
-        review('alpha');
-        writeFileSync(join(dir, 'alpha.pages'), buildPages('', '\u0000'));
-
-        await refusesInDryRun('the .pages has changed since this review');
-      });
-
-      it('voids a review when a belief is moved to dropped afterwards', async () => {
-        writeMembers([flagged(undefined)]);
-        review('alpha');
-        const proposal = proposalOf('alpha');
-        const moved = proposal.tabs.pop()!;
-        proposal.dropped.push({ paragraphs: moved.paragraphs, reason: 'x' });
-        writeFileSync(
-          join(dir, 'alpha.proposal.json'),
-          JSON.stringify(proposal),
-        );
-
-        await refusesInDryRun('the proposal has changed since this review');
-      });
-
-      describe('reader warnings', () => {
-        const footnote = member(
-          'alpha',
-          '<w:p><w:r><w:t>II. a</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>',
-        );
-        const warning =
-          'Paragraph 4: a footnote or endnote cannot be imported.';
-
-        it('blocks an unnamed warning, printing the text to add', async () => {
-          writeMembers([footnote]);
-          await refusesInDryRun('.docx reader warning(s)');
-          expect(reportJson().profiles[0].reasons.join(' ')).toContain(
-            `"acceptedWarnings":["${warning}"]`,
-          );
+      it('still blocks a warning named by a void review', async () => {
+        writeMembers([footnote]);
+        review('alpha', {
+          acceptedWarnings: [warning],
+          sourceSha256: 'b'.repeat(64),
         });
-
-        it('accepts a warning named by a review of this exact source', async () => {
-          writeMembers([footnote]);
-          review('alpha', { acceptedWarnings: [warning] });
-          await expect(run('--dry-run')).resolves.toBe(0);
-        });
-
-        it('still blocks a warning named by a void review', async () => {
-          writeMembers([footnote]);
-          review('alpha', {
-            acceptedWarnings: [warning],
-            sourceSha256: 'b'.repeat(64),
-          });
-          await refusesInDryRun('.docx reader warning(s)');
-        });
+        await refusesInDryRun('.docx reader warning(s)');
       });
     });
+  });
 
-    it('imports, reads every row back and reports OK', async () => {
-      writeMembers([member('alpha'), member('beta')]);
-      connectTo('org-testing');
-      const store = memoryStore();
+  it('imports, reads every row back and reports OK', async () => {
+    writeMembers([member('alpha'), member('beta')]);
+    connectTo('org-testing');
+    const store = memoryStore();
 
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
 
-      expect(reportHead()).toBe('# Pages import report: OK');
-      expect(store.rows.profile).toHaveLength(2);
-    });
+    expect(reportHead()).toBe('# Pages import report: OK');
+    expect(store.rows.profile).toHaveLength(2);
+  });
 
-    it('keeps a Legal-named category of beliefs in the import record', async () => {
-      writeMembers([
-        {
-          slug: 'alpha',
-          body:
-            BODY +
-            p('Legal Rights and Liberty', H3) +
-            p('I. MEMBER_BELIEF_MARKER') +
-            p('Legal', H2) +
-            p('A LEGAL_SECTION_MARKER'),
-        },
-      ]);
-      connectTo('org-testing');
-      const store = memoryStore();
-      review('alpha');
+  it('keeps a Legal-named category of beliefs in the import record', async () => {
+    writeMembers([
+      {
+        slug: 'alpha',
+        body:
+          BODY +
+          p('Legal Rights and Liberty', H3) +
+          p('I. MEMBER_BELIEF_MARKER') +
+          p('Legal', H2) +
+          p('A LEGAL_SECTION_MARKER'),
+      },
+    ]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    review('alpha');
 
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(0);
 
-      const record = store.rows.records[0];
-      expect(record.extractedText).toContain('MEMBER_BELIEF_MARKER');
-      expect(record.extractedText).not.toContain('LEGAL_SECTION_MARKER');
-    });
+    const record = store.rows.records[0];
+    expect(record.extractedText).toContain('MEMBER_BELIEF_MARKER');
+    expect(record.extractedText).not.toContain('LEGAL_SECTION_MARKER');
+  });
 
-    it('says so when a profile write was swallowed', async () => {
-      writeMembers([member('alpha')]);
-      connectTo('org-testing');
-      const store = memoryStore();
-      store.createProfile = () => Promise.resolve();
+  it('says so when a profile write was swallowed', async () => {
+    writeMembers([member('alpha')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.createProfile = () => Promise.resolve();
 
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
 
-      expect(reportHead()).toBe('# Pages import report: READ-BACK MISMATCH');
+    expect(reportHead()).toBe('# Pages import report: READ-BACK MISMATCH');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringMatching(/^profile .*: missing$/),
+    );
+    expect(console.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('imported and verified'),
+    );
+  });
+
+  it('reports FAILED, naming the profile and how to clear it, on a write failure', async () => {
+    writeMembers([member('alpha'), member('beta')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.createImportRecord
+      .mockImplementationOnce(() => Promise.resolve())
+      .mockImplementationOnce(() => Promise.reject(new Error('disk full')));
+
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
+
+    const report = readFileSync(join(dir, 'import-report.md'), 'utf8');
+    expect(report.split('\n')[0]).toBe('# Pages import report: FAILED');
+    expect(report).toContain('The write of profile beta failed: disk full');
+    expect(report).toContain('--replace');
+    expect(reportJson().status).toBe('failed');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('--replace'),
+    );
+  });
+
+  it.each(['--dry-run', '--propose'])(
+    'refuses an empty manifest under %s',
+    async (flag) => {
+      const connect = jest.spyOn(mongoose, 'createConnection');
+      await expect(run(flag)).resolves.toBe(2);
+      expect(connect).not.toHaveBeenCalled();
       expect(console.error).toHaveBeenCalledWith(
-        expect.stringMatching(/^profile .*: missing$/),
+        'Refused: manifest.json lists no profiles.',
       );
-      expect(console.warn).not.toHaveBeenCalledWith(
-        expect.stringContaining('imported and verified'),
-      );
-    });
+    },
+  );
 
-    it('reports FAILED, naming the profile and how to clear it, on a write failure', async () => {
-      writeMembers([member('alpha'), member('beta')]);
-      connectTo('org-testing');
-      const store = memoryStore();
-      store.createImportRecord
-        .mockImplementationOnce(() => Promise.resolve())
-        .mockImplementationOnce(() => Promise.reject(new Error('disk full')));
+  it('says it cannot measure when the read-back itself fails', async () => {
+    writeMembers([member('alpha')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.readBack = () => Promise.reject(new Error('connection lost'));
 
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(3);
 
-      const report = readFileSync(join(dir, 'import-report.md'), 'utf8');
-      expect(report.split('\n')[0]).toBe('# Pages import report: FAILED');
-      expect(report).toContain('The write of profile beta failed: disk full');
-      expect(report).toContain('--replace');
-      expect(reportJson().status).toBe('failed');
-      expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining('--replace'),
-      );
-    });
+    const report = readFileSync(join(dir, 'import-report.md'), 'utf8');
+    expect(report.split('\n')[0]).toBe('# Pages import report: CANNOT-MEASURE');
+    expect(report).toContain(
+      'alpha was written, but reading it back failed: connection lost',
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('FAILED while writing'),
+    );
+  });
 
-    it('writes nothing at all when one address is already taken', async () => {
-      writeMembers([member('alpha'), member('beta')]);
-      connectTo('org-testing');
-      const store = memoryStore();
-      store.profileExists.mockImplementation((slug?: unknown) =>
-        Promise.resolve(slug === 'beta'),
-      );
+  it('checks with --replace before deleting anything', async () => {
+    writeMembers([member('alpha')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.hasNonImportedProfile.mockResolvedValue(true);
 
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(2);
+    await expect(run('--confirm', 'org-testing', '--replace')).resolves.toBe(2);
 
-      expect(store.createImportRecord).not.toHaveBeenCalled();
-      expect(store.rows.images).toEqual([]);
-      expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining('"beta" already exists'),
-      );
-    });
+    expect(store.removeImported).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('nothing was removed or written'),
+    );
+  });
+
+  it('replaces an earlier import of the address', async () => {
+    writeMembers([member('alpha')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    // Taken until the earlier import is removed, as in a real database.
+    store.profileExists.mockImplementation(() =>
+      Promise.resolve(store.removeImported.mock.calls.length === 0),
+    );
+
+    await expect(run('--confirm', 'org-testing', '--replace')).resolves.toBe(0);
+    expect(store.removeImported).toHaveBeenCalledWith(['alpha']);
+  });
+
+  it('writes nothing at all when one address is already taken', async () => {
+    writeMembers([member('alpha'), member('beta')]);
+    connectTo('org-testing');
+    const store = memoryStore();
+    store.profileExists.mockImplementation((slug?: unknown) =>
+      Promise.resolve(slug === 'beta'),
+    );
+
+    await expect(run('--confirm', 'org-testing')).resolves.toBe(2);
+
+    expect(store.createImportRecord).not.toHaveBeenCalled();
+    expect(store.rows.images).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('"beta" already exists'),
+    );
   });
 });

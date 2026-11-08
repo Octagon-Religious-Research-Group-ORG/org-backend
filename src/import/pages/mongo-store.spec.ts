@@ -169,6 +169,27 @@ describe('MongoImportStore.removeImported', () => {
   });
 });
 
+describe('MongoImportStore.hasNonImportedProfile', () => {
+  it('asks for a profile with that address that was not imported', async () => {
+    const exists = jest.fn(() => Promise.resolve({ _id: 'x' }));
+    const connection = {
+      models: {},
+      model: () => ({ exists }),
+      db: {},
+    } as unknown as Connection;
+    const store = new MongoImportStore(connection);
+
+    await expect(store.hasNonImportedProfile('a')).resolves.toBe(true);
+    expect(exists).toHaveBeenCalledWith({
+      slug: 'a',
+      source: { $ne: 'migrated' },
+    });
+
+    exists.mockResolvedValueOnce(null as never);
+    await expect(store.hasNonImportedProfile('a')).resolves.toBe(false);
+  });
+});
+
 describe('MongoImportStore.readBack', () => {
   afterEach(() => jest.restoreAllMocks());
 

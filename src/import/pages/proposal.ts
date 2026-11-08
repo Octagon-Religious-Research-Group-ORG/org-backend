@@ -525,7 +525,8 @@ function canonicalJson(value: unknown): string {
  * hash. Moving a belief to `dropped` after a review changes it.
  */
 export function proposalSha256(proposal: ProfileProposal): string {
-  const { reviewed: _reviewed, ...content } = proposal;
+  const content: Partial<ProfileProposal> = { ...proposal };
+  delete content.reviewed;
   return createHash('sha256').update(canonicalJson(content)).digest('hex');
 }
 

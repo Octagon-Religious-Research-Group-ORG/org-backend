@@ -205,6 +205,10 @@ export async function main(): Promise<number> {
     return 2;
   }
   const manifest = readManifest(dir);
+  if (manifest.length === 0) {
+    console.error('Refused: manifest.json lists no profiles.');
+    return 2;
+  }
 
   if (args.includes('--propose')) {
     // A picture whose exact bytes appear in more than one member's package is
@@ -351,29 +355,46 @@ export async function main(): Promise<number> {
       return 2;
     }
 
-    if (args.includes('--replace')) {
+    // All or nothing: find an address that is taken before removing or
+    // writing anything. --replace only ever clears earlier imports.
+    const replace = args.includes('--replace');
+    for (const item of prepared) {
+      const slug = item.plan!.slug;
+      const taken = replace
+        ? await store.hasNonImportedProfile(slug)
+        : await store.profileExists(slug);
+      if (taken) {
+        console.error(
+          replace
+            ? `Refused: the address "${slug}" belongs to a profile that was not imported, which --replace will not remove; nothing was removed or written.`
+            : `Refused: a profile with the address "${slug}" already exists; nothing was written. A failed earlier import is cleared with --replace.`,
+        );
+        return 2;
+      }
+    }
+
+    if (replace) {
       // Test database only (checked above): removes earlier imports of these
-      // profiles and rows a failed import left without a profile.
+      // profiles and what a failed import of them left behind.
       const removed = await store.removeImported(
         prepared.map((item) => item.plan!.slug),
       );
       console.warn(`Replaced: removed ${JSON.stringify(removed)}`);
     }
 
-    // All or nothing: find an address that is taken before writing anything.
-    for (const item of prepared) {
-      if (await store.profileExists(item.plan!.slug)) {
-        console.error(
-          `Refused: a profile with the address "${item.plan!.slug}" already exists; nothing was written. A failed earlier import is cleared with --replace.`,
-        );
-        return 2;
-      }
-    }
-
     const results: Record<string, unknown>[] = [];
+    const reportWith = (status: string, detail: string[]) =>
+      writeReports(
+        dir,
+        reports,
+        { mode: 'import', database, results },
+        { status, detail },
+      );
     for (const item of prepared) {
+      const slug = item.plan!.slug;
+      let imported: Awaited<ReturnType<typeof executeImport>>;
       try {
-        const { written, ...result } = await executeImport(
+        imported = await executeImport(
           item.plan!,
           {
             files: item.loaded.files,
@@ -384,7 +405,21 @@ export async function main(): Promise<number> {
           store,
           processImage,
         );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const clear =
+          'Re-run with --replace to clear what was written (test databases only), then import again.';
+        reportWith('failed', [
+          `The write of profile ${slug} failed: ${reason}`,
+          clear,
+        ]);
+        console.error(`FAILED while writing ${slug}: ${reason}`);
+        console.error(clear);
+        return EXIT.mismatch;
+      }
 
+      const { written, ...result } = imported;
+      try {
         // Read back what was written (Rule 26.1) and re-verify every chain.
         const snapshot = await store.readBack(
           new mongoose.Types.ObjectId(result.profileId),
@@ -407,7 +442,7 @@ export async function main(): Promise<number> {
         };
         const matches = differences.length === 0 && brokenChains.length === 0;
         results.push({
-          slug: item.plan!.slug,
+          slug,
           ...result,
           readBack: counts,
           differences,
@@ -415,29 +450,16 @@ export async function main(): Promise<number> {
           matches,
         });
         console.warn(
-          `${item.plan!.slug}: ${matches ? 'imported and verified' : 'READ-BACK MISMATCH'} ` +
+          `${slug}: ${matches ? 'imported and verified' : 'READ-BACK MISMATCH'} ` +
             `(${counts.tabs} tabs, ${counts.blocks} blocks, ${counts.comments} comments, ${counts.images} images)`,
         );
         for (const difference of differences) console.error(difference);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        const clear =
-          'Re-run with --replace to clear what was written (test databases only), then import again.';
-        writeReports(
-          dir,
-          reports,
-          { mode: 'import', database, results },
-          {
-            status: 'failed',
-            detail: [
-              `The write of profile ${item.plan!.slug} failed: ${reason}`,
-              clear,
-            ],
-          },
-        );
-        console.error(`FAILED while writing ${item.plan!.slug}: ${reason}`);
-        console.error(clear);
-        return EXIT.mismatch;
+        const unverified = `${slug} was written, but reading it back failed: ${reason}. It is NOT verified; check the database, or clear it with --replace (test databases only).`;
+        reportWith('cannot-measure', [unverified]);
+        console.error(unverified);
+        return EXIT['cannot-measure'];
       }
     }
 
