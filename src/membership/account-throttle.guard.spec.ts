@@ -1,5 +1,5 @@
 import type { ExecutionContext } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModule } from '@nestjs/testing';
 import { ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
 import {
   DEFAULT_THROTTLE,
@@ -7,14 +7,13 @@ import {
 } from '../config/throttle';
 import { AccountThrottleGuard } from './account-throttle.guard';
 
-class Route {
-  handler() {}
-}
+class Route {}
+const handler = () => undefined;
 
 function contextFor(sub: string) {
   const request = { auth: { payload: { sub } }, ip: '1.2.3.4', headers: {} };
   return {
-    getHandler: () => Route.prototype.handler,
+    getHandler: () => handler,
     getClass: () => Route,
     switchToHttp: () => ({
       getRequest: () => request,
@@ -24,8 +23,14 @@ function contextFor(sub: string) {
 }
 
 describe('AccountThrottleGuard', () => {
+  let moduleRef: TestingModule;
+
+  // The storage holds a 24-hour timer per key; closing clears them, or Jest
+  // never exits when this file runs on its own.
+  afterEach(() => moduleRef.close());
+
   async function setup() {
-    const moduleRef = await Test.createTestingModule({
+    moduleRef = await Test.createTestingModule({
       imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
       providers: [AccountThrottleGuard],
     }).compile();
