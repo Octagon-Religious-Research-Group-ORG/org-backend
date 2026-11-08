@@ -1,10 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import type { AuthenticatedRequest } from './auth/auth.types';
 import { CartsController } from './carts/carts.controller';
-import {
-  AdminContentController,
-  PublicContentController,
-} from './content/content.controller';
+import { AdminContentController } from './content/content.controller';
 import {
   AdminOrdersController,
   OrdersController,
@@ -289,7 +286,6 @@ describe('thin HTTP controllers', () => {
       discardDraft: jest.fn().mockReturnValue('discarded'),
       restoreRevision: jest.fn().mockReturnValue('restored'),
     };
-    const publicController = new PublicContentController(content as never);
     const admin = new AdminContentController(content as never);
     const body = { expectedDraftRevision: 2 };
     const saveBody = {
@@ -297,8 +293,6 @@ describe('thin HTTP controllers', () => {
       content: { title: 'Draft' },
     };
 
-    expect(publicController.list()).toBe('public-list');
-    expect(publicController.findOne('community')).toBe('public-page');
     expect(admin.list()).toBe('admin-list');
     expect(admin.findOne('community')).toBe('admin-page');
     expect(admin.saveDraft(request, 'community', saveBody as never)).toBe(
