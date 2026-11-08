@@ -4,6 +4,12 @@ import { buildRows, type ImportInputs, type Row } from './execute-import';
 import type { ImportPlan } from './import-plan';
 import type { ProcessedImage } from './image';
 
+/** MongoDB refuses a single document larger than this. */
+export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
+
+/** Room for the real report, which the import record carries and this check does not have yet. */
+export const REPORT_ALLOWANCE_BYTES = 1024 * 1024;
+
 /** A placeholder: a real hash is 64 hex characters, like this. */
 const NO_HASH = '0'.repeat(64);
 
@@ -73,6 +79,12 @@ export async function preflightImport(
 
   const models = validators();
   const check = async (model: string, label: string, row: Row) => {
+    const limit =
+      MAX_DOCUMENT_BYTES -
+      (model === 'ImportRecord' ? REPORT_ALLOWANCE_BYTES : 0);
+    if (mongoose.mongo.BSON.calculateObjectSize(row) > limit) {
+      errors.push(`${label}: larger than MongoDB's 16 MB document limit`);
+    }
     const Model = models.get(model)!;
     try {
       await new Model(row).validate();

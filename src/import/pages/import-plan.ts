@@ -145,6 +145,53 @@ function labelOf(paragraph: DocxParagraph): string {
   );
 }
 
+/**
+ * A paragraph's pictures and text pieces in document order: a picture between
+ * two runs splits the text around it. A picture inside a link's words moves to
+ * the end of the link, so one link is never cut in two.
+ */
+function inDocumentOrder(paragraph: DocxParagraph): (string | DocxParagraph)[] {
+  const { text, links, images } = paragraph;
+  const end = text.trimEnd().length;
+  const offsets = paragraph.imageOffsets ?? images.map(() => end);
+  const pieces: (string | { from: number; to: number })[] = [];
+  let cursor = text.length - text.trimStart().length;
+  offsets.forEach((offset, at) => {
+    const link = links.find(
+      (l) => offset > l.start && offset < l.start + l.text.length,
+    );
+    const position = Math.max(
+      cursor,
+      Math.min(end, link ? link.start + link.text.length : offset),
+    );
+    if (text.slice(cursor, position).trim()) {
+      pieces.push({ from: cursor, to: position });
+    }
+    cursor = position;
+    pieces.push(images[at]);
+  });
+  if (text.slice(cursor, end).trim()) pieces.push({ from: cursor, to: end });
+
+  const ranges = pieces.filter((piece) => typeof piece !== 'string');
+  return pieces.map((piece) => {
+    if (typeof piece === 'string') return piece;
+    if (ranges.length === 1) return paragraph;
+    const isFirst = piece === ranges[0];
+    const isLast = piece === ranges[ranges.length - 1];
+    return {
+      ...paragraph,
+      text: text.slice(piece.from, piece.to),
+      links: links
+        .filter(
+          (l) =>
+            (isFirst || l.start >= piece.from) &&
+            (isLast || l.start < piece.to),
+        )
+        .map((l) => ({ ...l, start: l.start - piece.from })),
+    };
+  });
+}
+
 function kindOf(paragraph: DocxParagraph): BlockKind {
   if (paragraph.text.trim() === '' && paragraph.images.length > 0) {
     return 'image';
@@ -195,25 +242,26 @@ export function buildImportPlan(
       return block;
     };
 
-    // One block per picture, in place around the paragraph's text. A comment
-    // on the paragraph anchors to its text, or its first picture if it has none.
+    // One block per picture, in place among the paragraph's text. A comment on
+    // the paragraph anchors to its first text, or its first picture if none.
     const kind = kindOf(paragraph);
-    const leading = kind === 'image' ? 0 : (paragraph.leadingImages ?? 0);
-    for (const image of paragraph.images.slice(0, leading)) {
-      emit('image', image);
+    if (kind === 'image') {
+      blockOf.set(index, emit('image', paragraph.images[0]).blockId);
+      for (const image of paragraph.images.slice(1)) emit('image', image);
+      return;
     }
-    const main =
-      kind === 'image'
-        ? emit('image', paragraph.images[0])
-        : emit(
-            kind,
-            paragraphMarkdown(paragraph, slugByPagesKey, unmapped, unsafe),
-          );
-    blockOf.set(index, main.blockId);
-    for (const image of paragraph.images.slice(
-      kind === 'image' ? 1 : leading,
-    )) {
-      emit('image', image);
+    let anchored = false;
+    for (const piece of inDocumentOrder(paragraph)) {
+      if (typeof piece === 'string') {
+        emit('image', piece);
+        continue;
+      }
+      const block = emit(
+        anchored ? 'paragraph' : kind,
+        paragraphMarkdown(piece, slugByPagesKey, unmapped, unsafe),
+      );
+      if (!anchored) blockOf.set(index, block.blockId);
+      anchored = true;
     }
   };
 

@@ -439,7 +439,7 @@ describe('buildImportPlan', () => {
       const plan = planOf({
         text: 'Words.',
         images: ['word/media/a.png', 'word/media/b.png'],
-        leadingImages: 1,
+        imageOffsets: [0, 6],
       });
       expect(plan.blocks.map((b) => [b.kind, b.order, b.text])).toEqual([
         ['image', 0, 'word/media/a.png'],
@@ -448,6 +448,68 @@ describe('buildImportPlan', () => {
       ]);
       // A comment on the paragraph points at its words, not the picture.
       expect(plan.comments[0].anchorBlockId).toBe(plan.blocks[1].blockId);
+    });
+
+    it('splits the text around a picture between two runs', () => {
+      const plan = planOf({
+        text: 'I. Before the picture after it',
+        numbering: undefined,
+        images: ['word/media/a.png'],
+        imageOffsets: [19],
+      });
+      expect(
+        plan.blocks.map((b) => [b.kind, b.label, b.order, b.text]),
+      ).toEqual([
+        ['outline-item', 'I.', 0, 'I. Before the pictu'],
+        ['image', '', 1, 'word/media/a.png'],
+        ['paragraph', '', 2, 're after it'],
+      ]);
+      // A comment on the paragraph points at its first words.
+      expect(plan.comments[0].anchorBlockId).toBe(plan.blocks[0].blockId);
+    });
+
+    it('keeps each link with its own piece of text', () => {
+      const plan = planOf({
+        text: 'see one then see two',
+        links: [
+          { text: 'one', url: 'https://a.example/1', start: 4 },
+          { text: 'two', url: 'https://a.example/2', start: 17 },
+        ],
+        images: ['word/media/a.png'],
+        imageOffsets: [8],
+      });
+      expect(plan.blocks.map((b) => b.text)).toEqual([
+        'see [one](https://a.example/1)',
+        'word/media/a.png',
+        'then see [two](https://a.example/2)',
+      ]);
+    });
+
+    it('moves a picture inside a link to the end of the link', () => {
+      const plan = planOf({
+        text: 'see one two more',
+        links: [{ text: 'one two', url: 'https://a.example/1', start: 4 }],
+        images: ['word/media/a.png'],
+        imageOffsets: [6],
+      });
+      expect(plan.blocks.map((b) => b.text)).toEqual([
+        'see [one two](https://a.example/1)',
+        'word/media/a.png',
+        'more',
+      ]);
+    });
+
+    it('keeps two pictures around one run, skipping blank space', () => {
+      const plan = planOf({
+        text: 'one  ',
+        images: ['word/media/a.png', 'word/media/b.png'],
+        imageOffsets: [0, 3],
+      });
+      expect(plan.blocks.map((b) => b.kind)).toEqual([
+        'image',
+        'paragraph',
+        'image',
+      ]);
     });
 
     it('treats a picture in an empty heading as a picture', () => {

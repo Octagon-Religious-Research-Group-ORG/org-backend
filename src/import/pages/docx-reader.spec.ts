@@ -566,8 +566,8 @@ describe('readDocx', () => {
             '<w:p><w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r></w:p>',
         }),
       );
-      expect(doc.paragraphs.map((x) => x.leadingImages)).toEqual([
-        1,
+      expect(doc.paragraphs.map((x) => x.imageOffsets)).toEqual([
+        [0, 4],
         undefined,
         undefined,
       ]);
@@ -606,6 +606,52 @@ describe('readDocx', () => {
         'Paragraph 0: image rWeb has no embedded file.',
         'Paragraph 0: image (no id) has no embedded file.',
       ]);
+    });
+  });
+
+  describe('links on pictures', () => {
+    const rels =
+      '<Relationship Id="rImg" Target="media/a.png"/>' +
+      '<Relationship Id="rLink" Target="https://example.test" TargetMode="External"/>';
+    const media = { 'word/media/a.png': new Uint8Array([1]) };
+    const picture =
+      '<w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r>';
+
+    it('warns when a link wraps only a picture', () => {
+      const doc = readDocx(
+        buildDocx({
+          rels,
+          media,
+          body: `<w:p><w:hyperlink r:id="rLink">${picture}</w:hyperlink></w:p>`,
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Paragraph 0: a link on a picture cannot be kept, only the picture.',
+      ]);
+    });
+
+    it('warns about a link attached to the picture itself', () => {
+      const doc = readDocx(
+        buildDocx({
+          rels,
+          media,
+          body: '<w:p><w:r><w:drawing><a:hlinkClick r:id="rLink"/><a:blip r:embed="rImg"/></w:drawing></w:r></w:p><w:p><a:hlinkClick/></w:p>',
+        }),
+      );
+      expect(doc.warnings).toEqual([
+        'Paragraph 0: a link on a picture cannot be kept, only the picture.',
+      ]);
+    });
+
+    it('does not warn about a link with words around a picture', () => {
+      const doc = readDocx(
+        buildDocx({
+          rels,
+          media,
+          body: `<w:p><w:hyperlink r:id="rLink"><w:r><w:t>words</w:t></w:r>${picture}</w:hyperlink></w:p><w:p><w:hyperlink r:id="rLink"/></w:p>`,
+        }),
+      );
+      expect(doc.warnings).toEqual([]);
     });
   });
 

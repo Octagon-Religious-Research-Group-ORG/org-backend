@@ -24,8 +24,11 @@ export interface DocxParagraph {
   links: DocxLink[];
   /** Package paths of embedded images, e.g. "word/media/image1.png". */
   images: string[];
-  /** How many of `images` come before the first text; absent means none. */
-  leadingImages?: number;
+  /**
+   * Where each of `images` sits in the untrimmed text, set only when a picture
+   * has text after it. Absent means every picture follows the text.
+   */
+  imageOffsets?: number[];
   inTable: boolean;
 }
 
@@ -66,6 +69,8 @@ interface FieldState {
   phase: 'instr' | 'result';
   /** Length of the paragraph's text when the field began. */
   start: number;
+  /** How many pictures the paragraph held when the field began. */
+  images: number;
 }
 
 const HYPERLINK_INSTR = /^\s*HYPERLINK\s+(?:\\l\s+)?"([^"]*)"/;
@@ -182,7 +187,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
       if (anchor.text) anchor.text += '\n';
     }
 
-    let leadingImages = 0;
+    const imageOffsets: number[] = [];
     const fields: FieldState[] = [];
     const emit = (text: string) => {
       if (fields.some((field) => field.phase === 'instr')) return;
@@ -196,7 +201,17 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
         if (text.trim()) anchor.paragraphs.add(index);
       }
     };
+    const pictureLink = () =>
+      warnings.push(
+        `Paragraph ${index}: a link on a picture cannot be kept, only the picture.`,
+      );
     const addLink = (field: FieldState, url: string) => {
+      if (
+        field.result.trim() === '' &&
+        paragraph.images.length > field.images
+      ) {
+        pictureLink();
+      }
       const leading = field.result.length - field.result.trimStart().length;
       paragraph.links.push({
         text: field.result.trim(),
@@ -219,7 +234,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
         return;
       }
       paragraph.images.push(relationship.target);
-      if (paragraph.text.trim() === '') leadingImages += 1;
+      imageOffsets.push(paragraph.text.length);
     };
 
     const walk = (node: Element) => {
@@ -267,6 +282,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
                 result: '',
                 phase: 'instr',
                 start: paragraph.text.length,
+                images: paragraph.images.length,
               });
             } else if (type === 'separate' && fields.length > 0) {
               fields[fields.length - 1].phase = 'result';
@@ -286,6 +302,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
               result: '',
               phase: 'result',
               start: paragraph.text.length,
+              images: paragraph.images.length,
             };
             fields.push(field);
             walk(child);
@@ -301,6 +318,7 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
               result: '',
               phase: 'result',
               start: paragraph.text.length,
+              images: paragraph.images.length,
             };
             fields.push(field);
             walk(child);
@@ -309,6 +327,9 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
             if (url) addLink(field, url);
             break;
           }
+          case 'a:hlinkClick':
+            if (attr(child, 'r:id')) pictureLink();
+            break;
           case 'w:footnoteReference':
           case 'w:endnoteReference':
             warnings.push(
@@ -341,8 +362,9 @@ export function readDocx(bytes: Uint8Array): DocxDocument {
     if (paragraph.text.trim() !== '' || paragraph.images.length > 0) {
       warnings.push(...numberingWarnings);
     }
-    if (leadingImages > 0 && paragraph.text.trim() !== '') {
-      paragraph.leadingImages = leadingImages;
+    const textEnd = paragraph.text.trimEnd().length;
+    if (textEnd > 0 && imageOffsets.some((offset) => offset < textEnd)) {
+      paragraph.imageOffsets = imageOffsets;
     }
     paragraphs.push(paragraph);
   };

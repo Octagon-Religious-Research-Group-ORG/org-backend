@@ -1,4 +1,8 @@
-import { preflightImport } from './preflight';
+import {
+  MAX_DOCUMENT_BYTES,
+  preflightImport,
+  REPORT_ALLOWANCE_BYTES,
+} from './preflight';
 import type { ImportPlan } from './import-plan';
 import type { ProcessedImage } from './image';
 
@@ -164,6 +168,26 @@ describe('preflightImport', () => {
       'Image Data/p.jpeg could not be converted: unsupported image format',
     ]);
     expect(failing).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a document over the 16 MB limit, and only then', async () => {
+    const withText = (size: number) =>
+      preflightImport(
+        plan(),
+        { ...inputs, extractedText: 'x'.repeat(size) },
+        convert,
+      );
+    await expect(withText(MAX_DOCUMENT_BYTES)).resolves.toEqual([
+      "Import record: larger than MongoDB's 16 MB document limit",
+    ]);
+    await expect(
+      withText(MAX_DOCUMENT_BYTES - REPORT_ALLOWANCE_BYTES),
+    ).resolves.toEqual([
+      "Import record: larger than MongoDB's 16 MB document limit",
+    ]);
+    await expect(
+      withText(MAX_DOCUMENT_BYTES - REPORT_ALLOWANCE_BYTES - 1000),
+    ).resolves.toEqual([]);
   });
 
   it('reports a picture the plan expects and the package lacks', async () => {
