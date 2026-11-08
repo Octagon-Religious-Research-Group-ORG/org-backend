@@ -25,6 +25,18 @@ export interface StoredVersion extends VersionHashInput {
 }
 
 /**
+ * Replaces each lone surrogate with U+FFFD, which is what BSON stores for one.
+ *
+ * `JSON.stringify` hashes a lone surrogate as the escape `\ud83d`, while the
+ * database keeps U+FFFD, so a version hashed from the raw text could never
+ * verify again. Well-formed text comes back unchanged, so no existing hash
+ * moves. Everything that appends a version must pass its text through here.
+ */
+export function toStorableText(text: string): string {
+  return text.replace(/\p{Cs}/gu, '�');
+}
+
+/**
  * SHA-256 over a canonical encoding of a version.
  *
  * A JSON array (not an object) is used so field order is fixed by position and

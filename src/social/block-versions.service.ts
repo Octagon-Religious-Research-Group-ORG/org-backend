@@ -18,6 +18,7 @@ import {
   type ChainVerdict,
   computeVersionHash,
   GENESIS_HASH,
+  toStorableText,
   verifyChain,
 } from './version-chain';
 
@@ -63,7 +64,8 @@ export class BlockVersionsService {
    * @throws BadRequestException when the text is too long
    * @throws ConflictException when the block keeps changing under this save
    */
-  async appendVersion(input: AppendVersionInput) {
+  async appendVersion(rawInput: AppendVersionInput) {
+    const input = { ...rawInput, text: toStorableText(rawInput.text) };
     if (input.text.length > MAX_BLOCK_TEXT_LENGTH) {
       throw new BadRequestException(
         `A paragraph can hold at most ${MAX_BLOCK_TEXT_LENGTH} characters.`,

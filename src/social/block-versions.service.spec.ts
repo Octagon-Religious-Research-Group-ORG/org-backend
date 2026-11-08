@@ -1,10 +1,16 @@
+import mongoose from 'mongoose';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import {
   BlockVersionsService,
   MAX_APPEND_ATTEMPTS,
 } from './block-versions.service';
 import { MAX_BLOCK_TEXT_LENGTH } from './schemas/block-version.schema';
-import { computeVersionHash, GENESIS_HASH } from './version-chain';
+import {
+  computeVersionHash,
+  GENESIS_HASH,
+  type StoredVersion,
+  verifyChain,
+} from './version-chain';
 
 interface QueryChain<T> {
   sort: jest.Mock<QueryChain<T>>;
@@ -158,5 +164,33 @@ describe('BlockVersionsService.verifyBlock', () => {
       headHash: stored[0].hash,
     });
     expect(versionModel.find).toHaveBeenCalledWith({ blockId: 'blk-1' });
+  });
+});
+
+describe('a lone surrogate in the text', () => {
+  const LONE = 'before \ud83d after';
+
+  it('still verifies after a real BSON round trip', async () => {
+    const { service, versionModel } = setup([null]);
+    await service.appendVersion({ ...input, text: LONE });
+    const written = versionModel.create.mock.calls[0][0];
+
+    const { BSON } = mongoose.mongo;
+    const stored = BSON.deserialize(BSON.serialize(written)) as StoredVersion;
+
+    expect(stored.text).toBe('before � after');
+    expect(verifyChain('blk-1', [stored])).toMatchObject({ valid: true });
+  });
+
+  it('leaves the hash of well-formed text, emoji included, untouched', async () => {
+    const { service, versionModel } = setup([null]);
+    const text = 'One God 😀 and é';
+    await service.appendVersion({ ...input, text });
+    const written = versionModel.create.mock.calls[0][0];
+
+    expect(written.text).toBe(text);
+    expect(written.hash).toBe(
+      computeVersionHash({ ...(written as never), text }),
+    );
   });
 });
