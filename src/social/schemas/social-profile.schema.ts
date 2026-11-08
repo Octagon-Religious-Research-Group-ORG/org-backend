@@ -20,12 +20,18 @@ export const PROFILE_VISIBILITIES = [
 export type ProfileVisibility = (typeof PROFILE_VISIBILITIES)[number];
 
 /**
+ * - `claiming`: a join in progress holding its owner and address; never shown
+ *   to anyone, and removed if the join fails or dies;
  * - `pending`: a new member's page waiting for an admin (Tripp's approval
  *   step, plan §2d); shown only to its owner and admins;
  * - `approved`: shown according to its visibility.
  * Rows written before this field existed read as approved (schema default).
  */
-export const PROFILE_REVIEW_STATUSES = ['pending', 'approved'] as const;
+export const PROFILE_REVIEW_STATUSES = [
+  'claiming',
+  'pending',
+  'approved',
+] as const;
 export type ProfileReviewStatus = (typeof PROFILE_REVIEW_STATUSES)[number];
 
 /** How a member can be reached (plan §2d item 4). */
@@ -117,6 +123,15 @@ export class SocialProfile {
    */
   @Prop({ type: [ContactEntrySchema], default: [] })
   contacts: ContactEntry[];
+
+  /**
+   * Addresses of existing pages whose display name reads like this one (same
+   * name in another alphabet, or one letter apart). Admins only, for reviewing
+   * the page: it does not refuse the name, and no page or member-facing
+   * response may include it.
+   */
+  @Prop({ type: [String], default: [] })
+  similarNameOf: string[];
 
   /** Clerk user id of the member who owns the page; absent until claimed. */
   @Prop({ type: String })

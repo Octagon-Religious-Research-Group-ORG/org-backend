@@ -69,7 +69,23 @@ describe('slugProblem', () => {
     expect(slugProblem('x'.repeat(81))).toBe('format');
     expect(slugProblem('Tripp')).toBe('format');
     expect(slugProblem('membership')).toBe('reserved');
-    expect(slugProblem('tripp')).toBeUndefined();
+    expect(slugProblem('some-member')).toBeUndefined();
+  });
+
+  it('reserves staff names and addresses that imply authority', () => {
+    for (const address of [
+      'tripp',
+      'renan',
+      'administrator',
+      'moderator',
+      'official',
+      'cart',
+      'checkout',
+      'directory',
+      'eam',
+    ]) {
+      expect(slugProblem(address)).toBe('reserved');
+    }
   });
 
   it('reserves every page of the current website', () => {

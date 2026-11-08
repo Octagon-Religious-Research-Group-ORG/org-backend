@@ -1,21 +1,28 @@
 import { SLUG_PATTERN } from '../social/schemas/social-profile.schema';
 
 /**
- * Addresses a member page may not take. Member pages live at the site root
+ * Addresses a member page may not take when someone joins. Applies only to
+ * joining: the importer brings existing pages in under the addresses they
+ * already have. Member pages live at the site root
  * (`orgspirituality.org/tripp`, Tripp, Q01), so a slug must never shadow an
  * existing or planned page of the website.
  */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   'about',
   'admin',
+  'administrator',
   'api',
   'archive',
   'assets',
   'beliefs',
   'callback',
+  'cart',
+  'checkout',
   'community',
   'contact',
+  'directory',
   'donations',
+  'eam',
   'future',
   'future-ideas',
   'gifts-contributions',
@@ -29,11 +36,14 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   'logout',
   'members',
   'membership',
+  'moderator',
   'offerings',
+  'official',
   'org',
   'orders',
   'privacy',
   'profile',
+  'renan',
   'research',
   'search',
   'settings',
@@ -43,6 +53,8 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   'signup',
   'static',
   'terms',
+  // The two admins' own names: a look-alike address here would pass for them.
+  'tripp',
   'tripp-org',
 ]);
 

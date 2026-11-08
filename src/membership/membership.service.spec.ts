@@ -8,7 +8,12 @@ import {
   MAX_JOIN_PARAGRAPHS,
   MAX_JOIN_TEXT_CHARS,
 } from './membership.dto';
-import { MembershipService, splitParagraphs } from './membership.service';
+import {
+  JOIN_CLAIM_STALE_MS,
+  MAX_SIMILAR_NAMES,
+  MembershipService,
+  splitParagraphs,
+} from './membership.service';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
 
 const duplicateKey = Object.assign(new Error('E11000 duplicate key'), {
@@ -25,6 +30,10 @@ function setup(
     slugTaken?: boolean;
     identity?: { email?: string; emailVerified: boolean };
     profileError?: Error;
+    finalizeMatched?: number;
+    finalizeError?: Error;
+    releaseError?: Error;
+    existingNames?: Array<{ slug: string; displayName: string }>;
   } = {},
 ) {
   const writes: string[] = [];
@@ -39,12 +48,32 @@ function setup(
       Promise.resolve(options.slugTaken ? { _id: 'x' } : null),
     ),
     findOne: jest.fn(() => lean(options.owned ?? null)),
+    find: jest.fn(() => ({
+      select: () => lean(options.existingNames ?? []),
+    })),
     create: jest.fn((row: Record<string, unknown>) => {
-      writes.push('profile');
+      writes.push('claim');
       return options.profileError
         ? Promise.reject(options.profileError)
         : Promise.resolve(row);
     }),
+    updateOne: jest.fn(() => ({
+      exec: () => {
+        writes.push('finalize');
+        return options.finalizeError
+          ? Promise.reject(options.finalizeError)
+          : Promise.resolve({ matchedCount: options.finalizeMatched ?? 1 });
+      },
+    })),
+    deleteOne: jest.fn(() => ({
+      exec: () => {
+        writes.push('release');
+        return options.releaseError
+          ? Promise.reject(options.releaseError)
+          : Promise.resolve({});
+      },
+    })),
+    deleteMany: jest.fn(() => ({ exec: () => Promise.resolve({}) })),
   };
   const tabModel = { create: jest.fn(log('tab')) };
   const blockModel = { create: jest.fn(log('block')) };
@@ -171,6 +200,43 @@ describe('MembershipService', () => {
   });
 
   describe('summary', () => {
+    it('never reports a join in progress as a page', async () => {
+      await expect(
+        setup({
+          owned: {
+            slug: 's',
+            reviewStatus: 'claiming',
+            displayName: '(joining)',
+          },
+        }).service.summary('u'),
+      ).resolves.toStrictEqual({ status: 'none' });
+    });
+
+    it('answers the status, name, address and visibility and nothing else', async () => {
+      const { service } = setup({
+        owned: {
+          _id: 'internal',
+          slug: 'some-member',
+          displayName: 'Some Member',
+          visibility: 'members',
+          reviewStatus: 'approved',
+          ownerUserId: 'user_a',
+          contacts: [{ method: 'signal', value: '@on-page' }],
+          similarNameOf: ['other'],
+          imageIds: ['img'],
+        },
+      });
+      await expect(service.summary('user_a')).resolves.toStrictEqual({
+        status: 'approved',
+        profile: {
+          slug: 'some-member',
+          displayName: 'Some Member',
+          anonymous: false,
+          visibility: 'members',
+        },
+      });
+    });
+
     it('is none without a page', async () => {
       await expect(setup().service.summary('u')).resolves.toEqual({
         status: 'none',
@@ -214,14 +280,15 @@ describe('MembershipService', () => {
   });
 
   describe('join', () => {
-    it('writes consent first, then contacts, tabs and history, and the page last', async () => {
+    it('claims the owner and address first, then consent, contacts, history, and finishes the page last', async () => {
       const ctx = setup();
       await ctx.service.join('user_a', input(), origin);
 
-      expect(ctx.writes[0]).toBe('consent');
-      expect(ctx.writes[1]).toBe('contacts');
-      expect(ctx.writes.at(-1)).toBe('profile');
-      expect(ctx.writes.filter((w) => w === 'profile')).toHaveLength(1);
+      expect(ctx.writes[0]).toBe('claim');
+      expect(ctx.writes[1]).toBe('consent');
+      expect(ctx.writes[2]).toBe('contacts');
+      expect(ctx.writes.at(-1)).toBe('finalize');
+      expect(ctx.writes.filter((w) => w === 'finalize')).toHaveLength(1);
 
       expect(ctx.consentModel.create).toHaveBeenCalledWith({
         userId: 'user_a',
@@ -279,7 +346,7 @@ describe('MembershipService', () => {
       expect(blocks.every((b) => b.profileId === tabs[0].profileId)).toBe(true);
     });
 
-    it('creates the page pending, owned, anonymous, with only filled contacts', async () => {
+    it('holds no member data on the claim, then fills in the page pending', async () => {
       const ctx = setup();
       await ctx.service.join('user_a', input(), origin);
       const [[row]] = ctx.profileModel.create.mock.calls as unknown as [
@@ -287,14 +354,27 @@ describe('MembershipService', () => {
       ];
       expect(row).toMatchObject({
         slug: 'stalemate',
+        visibility: 'unlisted',
+        reviewStatus: 'claiming',
+        ownerUserId: 'user_a',
+        source: 'native',
+      });
+      expect(JSON.stringify(row)).not.toContain('Stalemate');
+      expect(row.contacts).toBeUndefined();
+      const [[filter, update, options]] = ctx.profileModel.updateOne.mock
+        .calls as unknown as [
+        [Record<string, unknown>, { $set: unknown }, unknown],
+      ];
+      expect(filter).toEqual({ _id: row._id, reviewStatus: 'claiming' });
+      expect(update.$set).toEqual({
         displayName: 'Stalemate',
         visibility: 'members',
         anonymous: true,
         reviewStatus: 'pending',
         contacts: [{ method: 'telegram', value: '@me' }],
-        ownerUserId: 'user_a',
-        source: 'native',
+        similarNameOf: [],
       });
+      expect(options).toEqual({ runValidators: true });
       expect(row._id).toBe(
         (ctx.tabModel.create.mock.calls[0][0] as { profileId: unknown })
           .profileId,
@@ -425,17 +505,256 @@ describe('MembershipService', () => {
       expect(ctx.writes).toEqual([]);
     });
 
-    it('turns a lost race for the address into a conflict', async () => {
+    it('leaves one set of rows after a double submit: the loser writes nothing', async () => {
+      const ctx = setup();
+      ctx.profileModel.create
+        .mockImplementationOnce((row: Record<string, unknown>) =>
+          Promise.resolve(row),
+        )
+        .mockImplementationOnce(() => Promise.reject(duplicateKey));
+      const results = await Promise.allSettled([
+        ctx.service.join('u', input(), origin),
+        ctx.service.join('u', input(), origin),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual([
+        'fulfilled',
+        'rejected',
+      ]);
+      expect(ctx.consentModel.create).toHaveBeenCalledTimes(1);
+      expect(ctx.contactsModel.updateOne).toHaveBeenCalledTimes(1);
+      expect(ctx.tabModel.create).toHaveBeenCalledTimes(2);
+      expect(ctx.blockModel.create).toHaveBeenCalledTimes(5);
+      expect(ctx.versions.appendVersion).toHaveBeenCalledTimes(5);
+    });
+
+    it('stops a lost race at the claim, having written nothing else', async () => {
       const ctx = setup({ profileError: duplicateKey });
       await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
         'just taken',
       );
+      expect(ctx.writes).toEqual(['claim']);
     });
 
     it('passes any other database error through', async () => {
       const boom = new Error('network');
       const ctx = setup({ profileError: boom });
       await expect(ctx.service.join('u', input(), origin)).rejects.toBe(boom);
+      expect(ctx.writes).toEqual(['claim']);
+    });
+
+    it('gives the claim back when writing the page fails', async () => {
+      const boom = new Error('network');
+      const ctx = setup();
+      ctx.tabModel.create.mockRejectedValueOnce(boom);
+      await expect(ctx.service.join('u', input(), origin)).rejects.toBe(boom);
+      expect(ctx.profileModel.deleteOne).toHaveBeenCalledWith({
+        _id: expect.anything() as unknown,
+        reviewStatus: 'claiming',
+      });
+      expect(ctx.writes).toContain('release');
+      expect(ctx.writes).not.toContain('finalize');
+    });
+
+    it('reports the real failure even when the claim cannot be given back', async () => {
+      const boom = new Error('network');
+      const ctx = setup({ finalizeError: boom, releaseError: new Error('x') });
+      await expect(ctx.service.join('u', input(), origin)).rejects.toBe(boom);
+    });
+
+    it('does not report a page when the claim vanished before finishing', async () => {
+      const ctx = setup({ finalizeMatched: 0 });
+      await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(ctx.writes).toContain('release');
+    });
+
+    it('frees only a stale claim on this owner or address', async () => {
+      const ctx = setup();
+      const before = Date.now();
+      await ctx.service.join('user_a', input(), origin);
+      const [[filter]] = ctx.profileModel.deleteMany.mock.calls as unknown as [
+        [{ reviewStatus: string; createdAt: { $lt: Date }; $or: unknown }],
+      ];
+      expect(filter.reviewStatus).toBe('claiming');
+      expect(filter.$or).toEqual([
+        { slug: 'stalemate' },
+        { ownerUserId: 'user_a' },
+      ]);
+      expect(filter.createdAt.$lt.getTime()).toBeLessThanOrEqual(
+        before - JOIN_CLAIM_STALE_MS + 1000,
+      );
+    });
+
+    it('sees the double submit of a claim in progress and writes nothing', async () => {
+      const ctx = setup({
+        owned: { slug: 's', reviewStatus: 'claiming', visibility: 'unlisted' },
+      });
+      await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
+        'already being saved',
+      );
+      expect(ctx.writes).toEqual([]);
+    });
+
+    it('refuses a member whose page was deleted, before writing, and says who to contact', async () => {
+      const ctx = setup({
+        owned: {
+          slug: 's',
+          displayName: 'S',
+          visibility: 'public',
+          deletedAt: new Date(),
+        },
+      });
+      await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
+        ForbiddenException,
+      );
+      await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
+        'contact an admin',
+      );
+      expect(ctx.writes).toEqual([]);
+      expect(ctx.contactsModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('does not count the account email as a backup contact', async () => {
+      const ctx = setup();
+      await expect(
+        ctx.service.join(
+          'u',
+          input({
+            backupContacts: [{ method: 'email', value: ' A@Proton.me ' }],
+          }),
+          origin,
+        ),
+      ).rejects.toThrow('at least one way to reach you');
+      expect(ctx.writes).toEqual([]);
+    });
+
+    it('accepts a real backup contact alongside the account email', async () => {
+      const ctx = setup();
+      await ctx.service.join(
+        'u',
+        input({
+          backupContacts: [
+            { method: 'email', value: 'a@proton.me' },
+            { method: 'signal', value: '@other' },
+          ],
+        }),
+        origin,
+      );
+      expect(ctx.contactsModel.updateOne).toHaveBeenCalledWith(
+        { userId: 'u' },
+        { $set: { backup: [{ method: 'signal', value: '@other' }] } },
+        { upsert: true },
+      );
+    });
+
+    describe('invisible text', () => {
+      const z = '\u200b';
+      it.each([
+        ['a zero-width name', { displayName: z }],
+        ['a zero-width bio', { bio: z }],
+        ['a zero-width belief title', { beliefs: [{ title: z, text: 'x' }] }],
+        [
+          'a zero-width belief',
+          { beliefs: [{ title: 'x', text: `${z}\n\n${z}` }] },
+        ],
+      ])('refuses %s before writing', async (_label, overrides) => {
+        const ctx = setup();
+        await expect(
+          ctx.service.join('u', input(overrides), origin),
+        ).rejects.toThrow('need some text');
+        expect(ctx.writes).toEqual([]);
+      });
+
+      it('does not store a zero-width paragraph or count a zero-width contact', async () => {
+        const ctx = setup();
+        await ctx.service.join(
+          'u',
+          input({ bio: `Real.\n\n${z}`, beliefs: [{ title: 'x', text: 'y' }] }),
+          origin,
+        );
+        expect(ctx.writes.filter((w) => w === 'version')).toHaveLength(2);
+        const other = setup();
+        await expect(
+          other.service.join(
+            'u',
+            input({ backupContacts: [{ method: 'signal', value: z }] }),
+            origin,
+          ),
+        ).rejects.toThrow('at least one way');
+      });
+    });
+
+    describe('near-duplicate names', () => {
+      const existingNames = [
+        { slug: 'quiet-harbor', displayName: 'Quiet Harbor' },
+        { slug: 'morning-field', displayName: 'Morning Field' },
+      ];
+
+      it.each([
+        ['the same name', 'quiet harbor'],
+        ['Cyrillic look-alikes', 'Quiеt Hаrbor'],
+      ])('flags %s for the admin without refusing it', async (_label, name) => {
+        const ctx = setup({ existingNames });
+        await ctx.service.join(
+          'u',
+          input({ displayName: name, slug: 'new-one' }),
+          origin,
+        );
+        const [[, update]] = ctx.profileModel.updateOne.mock
+          .calls as unknown as [
+          [unknown, { $set: { similarNameOf: string[] } }],
+        ];
+        expect(update.$set.similarNameOf).toEqual(['quiet-harbor']);
+      });
+
+      it('does not flag an unrelated name, and ignores other joins in progress', async () => {
+        const ctx = setup({ existingNames });
+        await ctx.service.join('u', input({ displayName: 'Tall Oak' }), origin);
+        const [[, update]] = ctx.profileModel.updateOne.mock
+          .calls as unknown as [
+          [unknown, { $set: { similarNameOf: string[] } }],
+        ];
+        expect(update.$set.similarNameOf).toEqual([]);
+        expect(ctx.profileModel.find).toHaveBeenCalledWith({
+          reviewStatus: { $ne: 'claiming' },
+        });
+      });
+
+      it('never returns the flag to the member', async () => {
+        const ctx = setup({ owned: null, existingNames });
+        ctx.profileModel.findOne
+          .mockReturnValueOnce(lean(null))
+          .mockReturnValueOnce(
+            lean({
+              slug: 's',
+              displayName: 'S',
+              visibility: 'members',
+              reviewStatus: 'pending',
+              similarNameOf: ['quiet-harbor'],
+            }),
+          );
+        const out = await ctx.service.join('u', input(), origin);
+        expect(JSON.stringify(out)).not.toContain('quiet-harbor');
+      });
+
+      it('caps how many pages one flag names', async () => {
+        const many = Array.from({ length: MAX_SIMILAR_NAMES + 5 }, (_, i) => ({
+          slug: `same-${i}`,
+          displayName: 'Quiet Harbor',
+        }));
+        const ctx = setup({ existingNames: many });
+        await ctx.service.join(
+          'u',
+          input({ displayName: 'Quiet Harbor' }),
+          origin,
+        );
+        const [[, update]] = ctx.profileModel.updateOne.mock
+          .calls as unknown as [
+          [unknown, { $set: { similarNameOf: string[] } }],
+        ];
+        expect(update.$set.similarNameOf).toHaveLength(MAX_SIMILAR_NAMES);
+      });
     });
   });
 });

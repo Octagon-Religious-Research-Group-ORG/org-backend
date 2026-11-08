@@ -82,6 +82,7 @@ describe('membership schemas', () => {
     expect(profile.reviewStatus).toBe('approved');
     expect(profile.anonymous).toBe(false);
     expect(profile.contacts).toHaveLength(0);
+    expect(profile.similarNameOf).toHaveLength(0);
   });
 
   it('profiles accept every visibility level and refuse others', async () => {

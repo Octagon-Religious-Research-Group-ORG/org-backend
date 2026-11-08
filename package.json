@@ -103,6 +103,7 @@
       "carts/carts.controller.ts",
       "carts/carts.service.ts",
       "config/dns.ts",
+      "config/env.schema.ts",
       "config/http-app.ts",
       "config/site-env.ts",
       "config/throttle.ts",
@@ -143,7 +144,8 @@
       "membership/membership.service.ts",
       "membership/membership.controller.ts",
       "membership/membership-terms.ts",
-      "membership/reserved-slugs.ts"
+      "membership/reserved-slugs.ts",
+      "membership/member-text.ts"
     ],
     "coverageThreshold": {
       "global": {

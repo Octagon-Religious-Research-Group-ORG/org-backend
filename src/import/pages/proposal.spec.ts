@@ -13,6 +13,7 @@ import {
   reviewProblems,
   romanValue,
 } from './proposal';
+import { RESERVED_SLUGS } from '../../membership/reserved-slugs';
 
 type Spec = Partial<DocxParagraph> & { text: string };
 
@@ -990,6 +991,14 @@ describe('checkProposal', () => {
       'Dropped group 2 has no reason.',
       'Paragraph 4 is not placed, dropped or a heading.',
     ]);
+  });
+
+  it('is not limited by the addresses reserved for new joiners', () => {
+    for (const slug of RESERVED_SLUGS) {
+      const proposal = valid();
+      proposal.slug = slug;
+      expect(checkProposal(proposal, doc).errors).toEqual([]);
+    }
   });
 
   it('refuses a paragraph placed twice and an over-long slug', () => {
