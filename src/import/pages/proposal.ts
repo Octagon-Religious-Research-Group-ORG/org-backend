@@ -784,6 +784,15 @@ export function checkProposal(
     }
   });
   for (const drop of proposal.dropped.filter(isLegalDrop)) {
+    // Real Legal sections are checklists; a heading inside one may be a
+    // member's next section, which fell under Legal because it was deeper.
+    for (const index of drop.paragraphs) {
+      if (docx.paragraphs[index]?.headingLevel !== undefined) {
+        reviewFlags.push(
+          `Heading at paragraph ${index} sits inside the dropped Legal section; check that it is really part of it.`,
+        );
+      }
+    }
     const first = Math.min(...drop.paragraphs);
     const heading = content
       .filter((p) => p.headingLevel !== undefined && p.index < first)

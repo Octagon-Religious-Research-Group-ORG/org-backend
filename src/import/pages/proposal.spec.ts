@@ -348,6 +348,22 @@ describe('proposeStructure', () => {
       ]);
     });
 
+    it('flags a heading caught inside the Legal section', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'a' },
+        h('Legal'),
+        { text: 'checklist' },
+        h('My other thoughts', 3),
+        { text: 'not legal at all' },
+      ]);
+      expect(
+        checkProposal(proposeStructure(INPUT, doc), doc).reviewFlags,
+      ).toEqual([
+        'Heading at paragraph 4 sits inside the dropped Legal section; check that it is really part of it.',
+      ]);
+    });
+
     it('reports its size and flags one over either limit', () => {
       const legal = (count: number, length: number) =>
         docx([
