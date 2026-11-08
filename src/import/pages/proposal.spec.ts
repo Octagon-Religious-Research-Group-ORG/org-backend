@@ -314,7 +314,9 @@ describe('proposeStructure', () => {
         ]);
         const proposal = proposeStructure(INPUT, doc);
         expect(proposal.dropped.map((drop) => drop.paragraphs)).toEqual([[3]]);
-        expect(checkProposal(proposal, doc).reviewFlags).toEqual([]);
+        expect(checkProposal(proposal, doc).reviewFlags).toEqual([
+          'Legal section dropped: 1 paragraphs (1 characters); confirm it holds only the Legal section.',
+        ]);
       },
     );
 
@@ -360,8 +362,30 @@ describe('proposeStructure', () => {
       expect(
         checkProposal(proposeStructure(INPUT, doc), doc).reviewFlags,
       ).toEqual([
+        'Legal section dropped: 3 paragraphs (42 characters); confirm it holds only the Legal section.',
         'Heading at paragraph 4 sits inside the dropped Legal section; check that it is really part of it.',
       ]);
+    });
+
+    it('flags a small Legal drop too: 25 belief-like paragraphs, for example', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'I. a' },
+        h('Legal'),
+        ...Array.from({ length: 25 }, () => ({ text: 'y'.repeat(164) })),
+      ]);
+      expect(
+        checkProposal(proposeStructure(INPUT, doc), doc).reviewFlags,
+      ).toEqual([
+        'Legal section dropped: 25 paragraphs (4100 characters); confirm it holds only the Legal section.',
+      ]);
+    });
+
+    it('flags nothing about a Legal section with no text', () => {
+      const doc = docx([h('Beliefs'), { text: 'I. a' }, h('Legal')]);
+      expect(
+        checkProposal(proposeStructure(INPUT, doc), doc).reviewFlags,
+      ).toEqual([]);
     });
 
     it('reports its size and flags one over either limit', () => {
@@ -377,18 +401,23 @@ describe('proposeStructure', () => {
       const run = (doc: DocxDocument) =>
         checkProposal(proposeStructure(INPUT, doc), doc);
 
+      const larger = ' It is larger than expected, so read it closely.';
       expect(run(legal(LEGAL_REVIEW_PARAGRAPHS, 1))).toEqual(
         expect.objectContaining({
-          reviewFlags: [],
+          reviewFlags: [
+            'Legal section dropped: 30 paragraphs (30 characters); confirm it holds only the Legal section.',
+          ],
           legalDropped: { paragraphs: 30, characters: 30 },
         }),
       );
       expect(run(legal(LEGAL_REVIEW_PARAGRAPHS + 1, 1)).reviewFlags).toEqual([
-        'Legal section dropped: 31 paragraphs (31 characters), more than expected; check that it holds nothing else.',
+        `Legal section dropped: 31 paragraphs (31 characters); confirm it holds only the Legal section.${larger}`,
       ]);
-      expect(run(legal(1, LEGAL_REVIEW_CHARACTERS)).reviewFlags).toEqual([]);
+      expect(run(legal(1, LEGAL_REVIEW_CHARACTERS)).reviewFlags).toEqual([
+        'Legal section dropped: 1 paragraphs (5000 characters); confirm it holds only the Legal section.',
+      ]);
       expect(run(legal(1, LEGAL_REVIEW_CHARACTERS + 1)).reviewFlags).toEqual([
-        'Legal section dropped: 1 paragraphs (5001 characters), more than expected; check that it holds nothing else.',
+        `Legal section dropped: 1 paragraphs (5001 characters); confirm it holds only the Legal section.${larger}`,
       ]);
     });
 
@@ -426,6 +455,22 @@ describe('proposeStructure', () => {
         ]),
       );
     });
+  });
+
+  it('flags any dropped paragraph holding a picture, whatever its size', () => {
+    const doc = docx([
+      { text: '', images: ['word/media/image1.png'] },
+      h('Beliefs'),
+      { text: 'I. a' },
+      h('Legal'),
+      { text: '', images: ['word/media/image1.png'] },
+    ]);
+    expect(
+      checkProposal(proposeStructure(INPUT, doc), doc).reviewFlags,
+    ).toEqual([
+      '1 dropped paragraph(s) hold pictures (paragraph 0): Before the first section: title and navigation.',
+      '1 dropped paragraph(s) hold pictures (paragraph 4): Legal section: not migrated (owner decision, plan §2b).',
+    ]);
   });
 
   it('flags drops outside Legal over the character limit, across groups', () => {
@@ -703,6 +748,7 @@ describe('checkProposal', () => {
 
     expect(checkProposal(proposal, flaggedDoc).reviewFlags).toEqual([
       '4 paragraphs (25 characters) dropped: Before the first section: title and navigation.',
+      'Legal section dropped: 5 paragraphs (50 characters); confirm it holds only the Legal section.',
       'Tab 1 ("Beliefs (introduction)") holds 16 paragraphs.',
       '1 comment(s) could not be placed on a paragraph.',
       '1 comment(s) highlight text across tabs.',

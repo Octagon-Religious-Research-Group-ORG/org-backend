@@ -718,6 +718,14 @@ export function checkProposal(
   const legalDropped = { paragraphs: 0, characters: 0 };
   for (const drop of proposal.dropped) {
     const { kept, characters } = sizeOf(drop);
+    const pictured = kept.filter(
+      (index) => docx.paragraphs[index].images.length > 0,
+    );
+    if (pictured.length > 0) {
+      reviewFlags.push(
+        `${pictured.length} dropped paragraph(s) hold pictures (paragraph ${pictured.join(', ')}): ${drop.reason}.`,
+      );
+    }
     if (isLegalDrop(drop)) {
       legalDropped.paragraphs += kept.length;
       legalDropped.characters += characters;
@@ -739,12 +747,14 @@ export function checkProposal(
       `${characterTotal} characters dropped outside the Legal section.`,
     );
   }
-  if (
-    legalDropped.paragraphs > LEGAL_REVIEW_PARAGRAPHS ||
-    legalDropped.characters > LEGAL_REVIEW_CHARACTERS
-  ) {
+  // Every Legal drop is confirmed by a person: this text leaves the import
+  // record too, and nothing else would ever show that it held a member's words.
+  if (legalDropped.characters > 0) {
+    const oversized =
+      legalDropped.paragraphs > LEGAL_REVIEW_PARAGRAPHS ||
+      legalDropped.characters > LEGAL_REVIEW_CHARACTERS;
     reviewFlags.push(
-      `Legal section dropped: ${legalDropped.paragraphs} paragraphs (${legalDropped.characters} characters), more than expected; check that it holds nothing else.`,
+      `Legal section dropped: ${legalDropped.paragraphs} paragraphs (${legalDropped.characters} characters); confirm it holds only the Legal section.${oversized ? ' It is larger than expected, so read it closely.' : ''}`,
     );
   }
   proposal.tabs.forEach((tab, at) => {
