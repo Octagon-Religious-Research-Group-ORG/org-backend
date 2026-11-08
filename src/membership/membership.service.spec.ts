@@ -3,6 +3,8 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
+import mongoose from 'mongoose';
+import { SocialProfileSchema } from '../social/schemas/social-profile.schema';
 import {
   type JoinMembershipDto,
   MAX_JOIN_PARAGRAPHS,
@@ -182,9 +184,9 @@ describe('MembershipService', () => {
   describe('slugAvailability', () => {
     it('answers only no for a bad format, a website page and a taken address', async () => {
       for (const check of [
-        setup().service.slugAvailability('A B'),
-        setup().service.slugAvailability(' Beliefs '),
-        setup({ slugTaken: true }).service.slugAvailability('some-member'),
+        setup().service.slugAvailability('A B', 'u'),
+        setup().service.slugAvailability(' Beliefs ', 'u'),
+        setup({ slugTaken: true }).service.slugAvailability('some-member', 'u'),
       ]) {
         await expect(check).resolves.toStrictEqual({ available: false });
       }
@@ -192,10 +194,70 @@ describe('MembershipService', () => {
 
     it('accepts a free address, checked lower-cased', async () => {
       const { service, profileModel } = setup();
-      await expect(service.slugAvailability(' New-Member ')).resolves.toEqual({
-        available: true,
+      await expect(
+        service.slugAvailability(' New-Member ', 'u'),
+      ).resolves.toEqual({ available: true });
+      expect(profileModel.exists).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'new-member' }),
+      );
+    });
+
+    it('needs a verified email, as joining does, before answering', async () => {
+      const ctx = setup({ identity: { emailVerified: false } });
+      await expect(
+        ctx.service.slugAvailability('some-member', 'u'),
+      ).rejects.toThrow(ForbiddenException);
+      expect(ctx.profileModel.exists).not.toHaveBeenCalled();
+    });
+
+    describe('claims', () => {
+      const ago = (ms: number) => new Date(Date.now() - ms);
+      // Applies the filter the way MongoDB would.
+      function withRow(row: Record<string, unknown>) {
+        const ctx = setup();
+        ctx.profileModel.exists.mockImplementation(((filter: {
+          slug: string;
+          $or: Array<{
+            reviewStatus?: unknown;
+            createdAt?: { $gte: Date };
+          }>;
+        }) => {
+          const hit =
+            row.slug === filter.slug &&
+            filter.$or.some((condition) =>
+              condition.createdAt
+                ? (row.createdAt as Date) >= condition.createdAt.$gte
+                : row.reviewStatus !== 'claiming',
+            );
+          return Promise.resolve(hit ? { _id: 'x' } : null);
+        }) as never);
+        return ctx.service.slugAvailability('some-member', 'u');
+      }
+      const row = (reviewStatus: string, createdAt: Date) => ({
+        slug: 'some-member',
+        reviewStatus,
+        createdAt,
       });
-      expect(profileModel.exists).toHaveBeenCalledWith({ slug: 'new-member' });
+
+      it('frees an address whose claim went stale', async () => {
+        await expect(
+          withRow(row('claiming', ago(JOIN_CLAIM_STALE_MS + 1000))),
+        ).resolves.toEqual({ available: true });
+      });
+
+      it('holds an address while a join is in progress', async () => {
+        await expect(withRow(row('claiming', ago(1000)))).resolves.toEqual({
+          available: false,
+        });
+      });
+
+      it('does not free a real page, however old', async () => {
+        for (const status of ['pending', 'approved']) {
+          await expect(
+            withRow(row(status, ago(JOIN_CLAIM_STALE_MS * 10))),
+          ).resolves.toEqual({ available: false });
+        }
+      });
     });
   });
 
@@ -447,6 +509,154 @@ describe('MembershipService', () => {
       expect(ctx.writes).toEqual([]);
     });
 
+    describe('limits in the units the database counts', () => {
+      const emoji = (count: number) => '🙂'.repeat(count);
+      it.each([
+        ['a name', { displayName: emoji(61) }],
+        ['a bio', { bio: emoji(10_001) }],
+        ['a belief', { beliefs: [{ title: 'x', text: emoji(10_001) }] }],
+        ['a belief title', { beliefs: [{ title: emoji(61), text: 'x' }] }],
+        ['a contact', { contacts: [{ method: 'signal', value: emoji(101) }] }],
+        [
+          'a backup contact',
+          { backupContacts: [{ method: 'signal', value: emoji(101) }] },
+        ],
+      ] as const)(
+        'refuses %s that is too long, before any write',
+        async (_l, patch) => {
+          const ctx = setup();
+          await expect(
+            ctx.service.join(
+              'u',
+              input(patch as Partial<JoinMembershipDto>),
+              origin,
+            ),
+          ).rejects.toThrow('too long');
+          expect(ctx.writes).toEqual([]);
+          expect(ctx.profileModel.deleteMany).not.toHaveBeenCalled();
+        },
+      );
+
+      it('accepts every field at exactly its limit', async () => {
+        const ctx = setup();
+        await ctx.service.join(
+          'u',
+          input({
+            displayName: emoji(60),
+            bio: emoji(10_000),
+            beliefs: [{ title: emoji(60), text: emoji(10_000) }],
+            contacts: [{ method: 'signal', value: emoji(100) }],
+            backupContacts: [{ method: 'signal', value: emoji(100) }],
+          }),
+          origin,
+        );
+        expect(ctx.writes.at(-1)).toBe('finalize');
+      });
+    });
+
+    describe('errors that quote what the member wrote', () => {
+      const connection = mongoose.createConnection();
+      afterAll(() => connection.close());
+      const Profiles = connection.model('LeakTest', SocialProfileSchema);
+      const secret = 'SECRET-MEMBER-TEXT'.repeat(10);
+      const validationError = () =>
+        new Profiles({
+          slug: 'a-b',
+          source: 'native',
+          displayName: secret,
+        })
+          .validate()
+          .catch((error: Error) => error) as Promise<Error>;
+
+      it('checks the premise: Mongoose quotes the value', async () => {
+        expect((await validationError()).message).toContain(
+          'SECRET-MEMBER-TEXT',
+        );
+      });
+
+      it('replaces a validation error at the final save with a fixed refusal', async () => {
+        const ctx = setup({ finalizeError: await validationError() });
+        const error = (await ctx.service
+          .join('u', input(), origin)
+          .catch((e: unknown) => e)) as Error;
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect(JSON.stringify(error) + error.message).not.toContain('SECRET');
+        expect(ctx.writes).toContain('release');
+      });
+
+      it('replaces a validation error at the claim', async () => {
+        const ctx = setup({ profileError: await validationError() });
+        await expect(
+          ctx.service.join('u', input(), origin),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('replaces a cast error and a duplicate key while writing', async () => {
+        const cast = new mongoose.Error.CastError('Number', secret, 'order');
+        const castCtx = setup();
+        castCtx.tabModel.create.mockRejectedValueOnce(cast);
+        const castError = (await castCtx.service
+          .join('u', input(), origin)
+          .catch((e: unknown) => e)) as Error;
+        expect(castError).toBeInstanceOf(BadRequestException);
+        expect(castError.message).not.toContain('SECRET');
+
+        const dupCtx = setup();
+        dupCtx.tabModel.create.mockRejectedValueOnce(duplicateKey);
+        await expect(
+          dupCtx.service.join('u', input(), origin),
+        ).rejects.toBeInstanceOf(ConflictException);
+      });
+    });
+
+    it('lets the owner reuse their own address after their claim went stale', async () => {
+      const ctx = setup();
+      let row: Record<string, unknown> | null = {
+        slug: 'quiet-fern',
+        ownerUserId: 'user_a',
+        reviewStatus: 'claiming',
+      };
+      ctx.profileModel.deleteMany.mockImplementation(() => ({
+        exec: () => {
+          row = null;
+          return Promise.resolve({});
+        },
+      }));
+      ctx.profileModel.findOne.mockImplementation(() => lean(row));
+      ctx.profileModel.exists.mockImplementation((() =>
+        Promise.resolve(row)) as never);
+      await ctx.service.join('user_a', input({ slug: 'quiet-fern' }), origin);
+      expect(ctx.writes[0]).toBe('claim');
+      expect(ctx.writes.at(-1)).toBe('finalize');
+    });
+
+    it('accepts text of exactly the overall limit, and refuses one character more', async () => {
+      const box = 'x'.repeat(20_000);
+      const nine = Array.from({ length: 9 }, (_, i) => ({
+        title: `T${i}`,
+        text: box,
+      }));
+      expect(box.length * 10).toBe(MAX_JOIN_TEXT_CHARS);
+
+      const atLimit = setup();
+      await atLimit.service.join(
+        'u',
+        input({ bio: box, beliefs: nine }),
+        origin,
+      );
+      expect(atLimit.writes.at(-1)).toBe('finalize');
+
+      const over = setup();
+      await expect(
+        over.service.join(
+          'u',
+          input({ bio: box, beliefs: [...nine, { title: 'x', text: 'y' }] }),
+          origin,
+        ),
+      ).rejects.toThrow('characters');
+      expect(over.writes).toEqual([]);
+    });
+
     it('refuses too many paragraphs across bio and beliefs before writing', async () => {
       const ctx = setup();
       const half = 'x\n\n'.repeat(MAX_JOIN_PARAGRAPHS / 2);
@@ -551,8 +761,11 @@ describe('MembershipService', () => {
       const ctx = setup();
       ctx.tabModel.create.mockRejectedValueOnce(boom);
       await expect(ctx.service.join('u', input(), origin)).rejects.toBe(boom);
+      const [[claim]] = ctx.profileModel.create.mock.calls as unknown as [
+        [{ _id: unknown }],
+      ];
       expect(ctx.profileModel.deleteOne).toHaveBeenCalledWith({
-        _id: expect.anything() as unknown,
+        _id: claim._id,
         reviewStatus: 'claiming',
       });
       expect(ctx.writes).toContain('release');

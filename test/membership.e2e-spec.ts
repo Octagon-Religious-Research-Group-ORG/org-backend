@@ -6,10 +6,12 @@ import type {
 } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
+import { ThrottlerModule } from '@nestjs/throttler';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { ClerkAuthGuard } from '../src/auth/auth.guard';
 import { configureHttpApp } from '../src/config/http-app';
+import { DEFAULT_THROTTLE } from '../src/config/throttle';
 import {
   MembershipController,
   MyMembershipController,
@@ -49,6 +51,7 @@ describe('Membership API (e2e)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
+      imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
       controllers: [MembershipController, MyMembershipController],
       providers: [{ provide: MembershipService, useValue: service }],
     })

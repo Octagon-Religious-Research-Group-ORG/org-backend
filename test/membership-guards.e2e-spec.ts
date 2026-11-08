@@ -1,10 +1,10 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import {
   Body,
   type CanActivate,
   Controller,
   type ExecutionContext,
   type INestApplication,
+  Logger,
   Post,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +18,7 @@ import { ClerkAuthGuard } from '../src/auth/auth.guard';
 import { configureHttpApp } from '../src/config/http-app';
 import {
   DEFAULT_THROTTLE,
+  SLUG_CHECK_ACCOUNT_THROTTLE,
   SLUG_CHECK_THROTTLE,
   WRITE_THROTTLE,
 } from '../src/config/throttle';
@@ -39,9 +40,17 @@ const service = {
   join: jest.fn(() => Promise.resolve({ status: 'pending' })),
 };
 
+const errorLog = jest.spyOn(Logger.prototype, 'error');
+
 const signedIn: CanActivate = {
   canActivate(context: ExecutionContext) {
-    context.switchToHttp().getRequest().auth = { payload: { sub: 'user_e2e' } };
+    const request = context.switchToHttp().getRequest<{
+      headers: Record<string, string | undefined>;
+      auth?: { payload: { sub: string } };
+    }>();
+    request.auth = {
+      payload: { sub: request.headers['x-test-user'] ?? 'user_e2e' },
+    };
     return true;
   },
 };
@@ -117,6 +126,75 @@ describe('Membership guards over HTTP (e2e)', () => {
         await slugCheck().expect(200);
       }
       await slugCheck().expect(429);
+    });
+
+    it('rations the address check per account, whatever the IP', async () => {
+      const check = (ip: string, user = 'user_one') =>
+        request(app.getHttpServer())
+          .get('/api/v1/membership/slug-availability?slug=abc')
+          .set('X-Forwarded-For', ip)
+          .set('x-test-user', user);
+      for (let i = 0; i < SLUG_CHECK_ACCOUNT_THROTTLE.limit; i++) {
+        await check(`10.1.${Math.floor(i / 250)}.${i % 250}`).expect(200);
+      }
+      await check('10.9.9.9').expect(429);
+      await check('10.9.9.9', 'user_two').expect(200);
+    });
+
+    describe('text limits, counted as the database counts', () => {
+      const valid = {
+        displayName: 'Quiet Fern',
+        slug: 'quiet-fern',
+        anonymous: true,
+        visibility: 'members',
+        bio: 'Hello.',
+        beliefs: [{ title: 'God', text: 'One.' }],
+        contacts: [],
+        backupContacts: [{ method: 'signal', value: '@me' }],
+        termsVersion: 'v1',
+      };
+      // Two UTF-16 units each: 70 of them pass a code-point count of 120.
+      const emoji = (count: number) => '🙂'.repeat(count);
+
+      beforeEach(() => service.join.mockClear());
+
+      it.each([
+        ['name', { displayName: emoji(70) }],
+        ['belief title', { beliefs: [{ title: emoji(70), text: 'x' }] }],
+        ['bio', { bio: emoji(10_001) }],
+        ['belief', { beliefs: [{ title: 'x', text: emoji(10_001) }] }],
+        ['contact', { contacts: [{ method: 'signal', value: emoji(101) }] }],
+        [
+          'backup contact',
+          { backupContacts: [{ method: 'signal', value: emoji(101) }] },
+        ],
+      ])(
+        'refuses an emoji %s past the limit before the service',
+        async (_l, patch) => {
+          await request(app.getHttpServer())
+            .post('/api/v1/me/membership')
+            .send({ ...valid, ...patch })
+            .expect(400);
+          expect(service.join).not.toHaveBeenCalled();
+        },
+      );
+
+      it('accepts a name of exactly the limit in emoji', async () => {
+        await request(app.getHttpServer())
+          .post('/api/v1/me/membership')
+          .send({ ...valid, displayName: emoji(60) })
+          .expect(201);
+      });
+
+      it('does not log or echo text from a malformed request', async () => {
+        errorLog.mockClear();
+        const response = await request(app.getHttpServer())
+          .post('/api/v1/me/membership')
+          .set('Content-Type', 'application/json')
+          .send('{"bio": SECRET-BELIEF-TEXT');
+        expect(response.status).toBe(400);
+        expect(errorLog).not.toHaveBeenCalled();
+      });
     });
 
     describe('request size', () => {

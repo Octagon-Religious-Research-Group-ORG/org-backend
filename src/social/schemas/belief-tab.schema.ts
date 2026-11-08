@@ -15,6 +15,8 @@ export type TabReviewStatus = (typeof TAB_REVIEW_STATUSES)[number];
  * the `profileblocks` carrying this `tabId`, and comments written on the tab
  * carry it too, so a comment always belongs to exactly one belief.
  */
+export const MAX_TAB_TITLE_LENGTH = 120;
+
 @Schema({ collection: 'belieftabs', timestamps: true, autoIndex: false })
 export class BeliefTab {
   @Prop({ type: Types.ObjectId, required: true })
@@ -25,7 +27,12 @@ export class BeliefTab {
   tabId: string;
 
   /** The label under the tab's art, e.g. "Theology" or "I. God". */
-  @Prop({ type: String, required: true, trim: true, maxlength: 120 })
+  @Prop({
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: MAX_TAB_TITLE_LENGTH,
+  })
   title: string;
 
   /** The member's category, e.g. the owner's "Theology" (plan D03), if any. */

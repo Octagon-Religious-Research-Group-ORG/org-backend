@@ -72,6 +72,16 @@ describe('membership schemas', () => {
     ).rejects.toThrow(/method/);
   });
 
+  it('allows one page per owner, and any number of unclaimed pages', () => {
+    const owner = SocialProfileSchema.indexes().find(
+      ([fields]) => Object.keys(fields).join() === 'ownerUserId',
+    );
+    expect(owner?.[1]).toMatchObject({
+      unique: true,
+      partialFilterExpression: { ownerUserId: { $type: 'string' } },
+    });
+  });
+
   it('profiles default to approved, not anonymous, no contacts', async () => {
     const profile = new Profiles({
       slug: 'some-member',

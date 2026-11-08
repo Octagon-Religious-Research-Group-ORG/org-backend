@@ -6,17 +6,19 @@ import {
   IsBoolean,
   IsIn,
   IsString,
-  Length,
-  MaxLength,
   ValidateNested,
 } from 'class-validator';
 import { MAX_BLOCK_TEXT_LENGTH } from '../social/schemas/block-version.schema';
+import { MAX_TAB_TITLE_LENGTH } from '../social/schemas/belief-tab.schema';
 import {
   CONTACT_METHODS,
   type ContactMethod,
+  MAX_CONTACT_VALUE_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
   PROFILE_VISIBILITIES,
   type ProfileVisibility,
 } from '../social/schemas/social-profile.schema';
+import { Utf16Length } from './utf16-length';
 
 /** Most beliefs a new member can enter at once; more are added on the page. */
 export const MAX_JOIN_BELIEFS = 20;
@@ -35,10 +37,7 @@ export const MAX_JOIN_PARAGRAPHS = 200;
  */
 export const MAX_JOIN_TEXT_CHARS = 200_000;
 
-const MAX_DISPLAY_NAME = 120;
 const MAX_SLUG = 80;
-const MAX_BELIEF_TITLE = 120;
-const MAX_CONTACT_VALUE = 200;
 const MAX_CONTACT_ROWS = 5;
 const MAX_TERMS_VERSION = 40;
 
@@ -54,10 +53,10 @@ const JSON_STRUCTURE_BYTES = 4096;
 export const MAX_JOIN_BODY_BYTES =
   3 *
     (MAX_JOIN_TEXT_CHARS +
-      MAX_DISPLAY_NAME +
+      MAX_DISPLAY_NAME_LENGTH +
       MAX_SLUG +
-      MAX_JOIN_BELIEFS * MAX_BELIEF_TITLE +
-      2 * MAX_CONTACT_ROWS * MAX_CONTACT_VALUE +
+      MAX_JOIN_BELIEFS * MAX_TAB_TITLE_LENGTH +
+      2 * MAX_CONTACT_ROWS * MAX_CONTACT_VALUE_LENGTH +
       MAX_TERMS_VERSION) +
   JSON_STRUCTURE_BYTES;
 
@@ -66,19 +65,19 @@ export class ContactEntryDto {
   method: ContactMethod;
 
   @IsString()
-  @Length(1, MAX_CONTACT_VALUE)
+  @Utf16Length(1, MAX_CONTACT_VALUE_LENGTH)
   value: string;
 }
 
 export class JoinBeliefDto {
   /** The tab label, e.g. "God" or "I. Basic Beliefs". */
   @IsString()
-  @Length(1, MAX_BELIEF_TITLE)
+  @Utf16Length(1, MAX_TAB_TITLE_LENGTH)
   title: string;
 
   /** Paragraphs separated by a blank line. */
   @IsString()
-  @Length(1, MAX_BLOCK_TEXT_LENGTH)
+  @Utf16Length(1, MAX_BLOCK_TEXT_LENGTH)
   text: string;
 }
 
@@ -90,12 +89,12 @@ export class JoinBeliefDto {
  */
 export class JoinMembershipDto {
   @IsString()
-  @Length(1, MAX_DISPLAY_NAME)
+  @Utf16Length(1, MAX_DISPLAY_NAME_LENGTH)
   displayName: string;
 
   /** Page address, `orgspirituality.org/<slug>`. Lower-cased by the server. */
   @IsString()
-  @Length(2, MAX_SLUG)
+  @Utf16Length(2, MAX_SLUG)
   slug: string;
 
   /** True when the display name is a nickname (anonymous membership). */
@@ -106,7 +105,7 @@ export class JoinMembershipDto {
   visibility: ProfileVisibility;
 
   @IsString()
-  @Length(1, MAX_BLOCK_TEXT_LENGTH)
+  @Utf16Length(1, MAX_BLOCK_TEXT_LENGTH)
   bio: string;
 
   @IsArray()
@@ -133,6 +132,6 @@ export class JoinMembershipDto {
 
   /** The terms version the member read and agreed to. */
   @IsString()
-  @MaxLength(MAX_TERMS_VERSION)
+  @Utf16Length(0, MAX_TERMS_VERSION)
   termsVersion: string;
 }

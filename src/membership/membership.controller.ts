@@ -14,6 +14,7 @@ import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { SLUG_CHECK_THROTTLE, WriteThrottle } from '../config/throttle';
+import { AccountThrottleGuard } from './account-throttle.guard';
 import { JoinMembershipDto } from './membership.dto';
 import { MembershipService, type RequestOrigin } from './membership.service';
 
@@ -36,15 +37,20 @@ export class MembershipController {
   }
 
   /**
-   * Requires a login and is rationed because a "no" reveals that a page
-   * exists, unlisted and pending pages included.
+   * Requires a login with a verified email, and is rationed per visitor and
+   * per account, because a "no" reveals that a page exists, unlisted and
+   * pending pages included.
    */
   @Get('slug-availability')
-  @UseGuards(ClerkAuthGuard)
+  @UseGuards(ClerkAuthGuard, AccountThrottleGuard)
   @Throttle({ default: SLUG_CHECK_THROTTLE })
-  slugAvailability(@Query('slug') slug: unknown) {
+  slugAvailability(
+    @Req() request: AuthenticatedRequest,
+    @Query('slug') slug: unknown,
+  ) {
     return this.membership.slugAvailability(
       typeof slug === 'string' ? slug : '',
+      getUserSub(request),
     );
   }
 

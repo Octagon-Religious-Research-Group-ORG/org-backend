@@ -37,10 +37,17 @@ describe('MembershipController', () => {
   });
 
   it('checks an address, treating a missing one as empty', async () => {
-    await controller.slugAvailability('some-member');
-    await controller.slugAvailability(['a', 'b']);
-    expect(service.slugAvailability).toHaveBeenNthCalledWith(1, 'some-member');
-    expect(service.slugAvailability).toHaveBeenNthCalledWith(2, '');
+    const req = request({
+      auth: { payload: { sub: 'user_a' } },
+    }) as AuthenticatedRequest;
+    await controller.slugAvailability(req, 'some-member');
+    await controller.slugAvailability(req, ['a', 'b']);
+    expect(service.slugAvailability).toHaveBeenNthCalledWith(
+      1,
+      'some-member',
+      'user_a',
+    );
+    expect(service.slugAvailability).toHaveBeenNthCalledWith(2, '', 'user_a');
   });
 
   it('records a guest entry with the request origin', async () => {

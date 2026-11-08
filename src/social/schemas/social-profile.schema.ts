@@ -44,12 +44,20 @@ export const CONTACT_METHODS = [
 ] as const;
 export type ContactMethod = (typeof CONTACT_METHODS)[number];
 
+export const MAX_DISPLAY_NAME_LENGTH = 120;
+export const MAX_CONTACT_VALUE_LENGTH = 200;
+
 @Schema({ _id: false })
 export class ContactEntry {
   @Prop({ type: String, enum: CONTACT_METHODS, required: true })
   method: ContactMethod;
 
-  @Prop({ type: String, required: true, trim: true, maxlength: 200 })
+  @Prop({
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: MAX_CONTACT_VALUE_LENGTH,
+  })
   value: string;
 }
 
@@ -88,7 +96,12 @@ export class SocialProfile {
   })
   slug: string;
 
-  @Prop({ type: String, required: true, trim: true, maxlength: 120 })
+  @Prop({
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: MAX_DISPLAY_NAME_LENGTH,
+  })
   displayName: string;
 
   @Prop({ type: [String], default: [] })

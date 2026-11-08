@@ -6,18 +6,22 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { Error as MongooseError, Model, Types } from 'mongoose';
 import { ClerkUserInfoService } from '../auth/clerk-user-info.service';
 import { BlockVersionsService } from '../social/block-versions.service';
 import {
   BeliefTab,
   type BeliefTabDocument,
+  MAX_TAB_TITLE_LENGTH,
 } from '../social/schemas/belief-tab.schema';
+import { MAX_BLOCK_TEXT_LENGTH } from '../social/schemas/block-version.schema';
 import {
   ProfileBlock,
   type ProfileBlockDocument,
 } from '../social/schemas/profile-block.schema';
 import {
+  MAX_CONTACT_VALUE_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
   type ProfileReviewStatus,
   type ProfileVisibility,
   SocialProfile,
@@ -67,6 +71,10 @@ export const MAX_SIMILAR_NAMES = 10;
  */
 export const JOIN_CLAIM_STALE_MS = 10 * 60 * 1000;
 
+function staleClaimCutoff() {
+  return new Date(Date.now() - JOIN_CLAIM_STALE_MS);
+}
+
 /** Claim rows carry no member data: consent is not recorded yet. */
 const CLAIM_PLACEHOLDER_NAME = '(joining)';
 
@@ -95,6 +103,26 @@ function isDuplicateKey(error: unknown): boolean {
     'code' in error &&
     (error as { code?: unknown }).code === 11000
   );
+}
+
+/**
+ * Mongoose and MongoDB quote the offending value in their error messages, and
+ * Nest logs any error that is not an HttpException, so these never leave the
+ * service as they are: what a member wrote must not reach a 500 or a log.
+ */
+function withoutMemberText(error: unknown): unknown {
+  if (
+    error instanceof MongooseError.ValidationError ||
+    error instanceof MongooseError.CastError
+  ) {
+    return new BadRequestException(
+      'Something you entered could not be saved. Please check it and try again.',
+    );
+  }
+  if (isDuplicateKey(error)) {
+    return new ConflictException('Please try again in a moment.');
+  }
+  return error;
 }
 
 /** Paragraphs of a text box: separated by one or more blank lines. */
@@ -150,7 +178,14 @@ export class MembershipService {
     });
   }
 
-  async slugAvailability(value: string): Promise<SlugAvailability> {
+  /**
+   * @throws ForbiddenException without a verified account email, as for joining
+   */
+  async slugAvailability(
+    value: string,
+    userId: string,
+  ): Promise<SlugAvailability> {
+    await this.requireVerifiedEmail(userId);
     const refusal = await this.slugRefusal(value.trim().toLowerCase());
     return { available: refusal === undefined };
   }
@@ -158,9 +193,25 @@ export class MembershipService {
   private async slugRefusal(slug: string): Promise<SlugRefusal | undefined> {
     const problem = slugProblem(slug);
     if (problem) return problem;
-    return (await this.profileModel.exists({ slug })) === null
-      ? undefined
-      : 'taken';
+    // A claim whose join died no longer holds its address, for anyone.
+    const taken = await this.profileModel.exists({
+      slug,
+      $or: [
+        { reviewStatus: { $ne: 'claiming' } },
+        { createdAt: { $gte: staleClaimCutoff() } },
+      ],
+    });
+    return taken === null ? undefined : 'taken';
+  }
+
+  private async requireVerifiedEmail(userId: string) {
+    const identity = await this.clerk.getIdentity(userId);
+    if (!identity.email || !identity.emailVerified) {
+      throw new ForbiddenException(
+        'Please confirm your email address before joining. Every ORG account needs one.',
+      );
+    }
+    return { email: identity.email };
   }
 
   async summary(userId: string): Promise<MembershipSummary> {
@@ -203,12 +254,7 @@ export class MembershipService {
     input: JoinMembershipDto,
     origin: RequestOrigin,
   ): Promise<MembershipSummary> {
-    const identity = await this.clerk.getIdentity(userId);
-    if (!identity.email || !identity.emailVerified) {
-      throw new ForbiddenException(
-        'Please confirm your email address before joining. Every ORG account needs one.',
-      );
-    }
+    const identity = await this.requireVerifiedEmail(userId);
     if (input.termsVersion !== MEMBERSHIP_TERMS.version) {
       throw new ConflictException(
         'The membership terms changed while you were reading them. Please read them again.',
@@ -259,6 +305,22 @@ export class MembershipService {
         'Please add at least one way to reach you besides your email.',
       );
     }
+    const contacts = cleanContacts(input.contacts);
+    // The limits the schemas enforce, in the units they count (UTF-16), so a
+    // value can never pass here and then fail at the save, after writes.
+    if (
+      displayName.length > MAX_DISPLAY_NAME_LENGTH ||
+      input.bio.length > MAX_BLOCK_TEXT_LENGTH ||
+      input.beliefs.some((b) => b.text.length > MAX_BLOCK_TEXT_LENGTH) ||
+      beliefs.some((belief) => belief.title.length > MAX_TAB_TITLE_LENGTH) ||
+      [...contacts, ...backup].some(
+        ({ value }) => value.length > MAX_CONTACT_VALUE_LENGTH,
+      )
+    ) {
+      throw new BadRequestException(
+        'Something you entered is too long. Please shorten it and try again.',
+      );
+    }
 
     const slug = input.slug.trim().toLowerCase();
     await this.releaseStaleClaims(slug, userId);
@@ -292,7 +354,7 @@ export class MembershipService {
               visibility: input.visibility,
               anonymous: input.anonymous,
               reviewStatus: 'pending',
-              contacts: cleanContacts(input.contacts),
+              contacts,
               similarNameOf,
             },
           },
@@ -309,7 +371,7 @@ export class MembershipService {
         .deleteOne({ _id: profileId, reviewStatus: 'claiming' })
         .exec()
         .catch(() => undefined);
-      throw error;
+      throw withoutMemberText(error);
     }
 
     return this.summary(userId);
@@ -320,7 +382,7 @@ export class MembershipService {
     await this.profileModel
       .deleteMany({
         reviewStatus: 'claiming',
-        createdAt: { $lt: new Date(Date.now() - JOIN_CLAIM_STALE_MS) },
+        createdAt: { $lt: staleClaimCutoff() },
         $or: [{ slug }, { ownerUserId: userId }],
       })
       .exec();
@@ -376,7 +438,7 @@ export class MembershipService {
           'That page address was just taken, or you already have a page.',
         );
       }
-      throw error;
+      throw withoutMemberText(error);
     }
   }
 

@@ -1,4 +1,4 @@
-import { Throttle, seconds } from '@nestjs/throttler';
+import { hours, Throttle, seconds } from '@nestjs/throttler';
 
 /** Site-wide limit applied by the global ThrottlerGuard, per client IP. */
 export const DEFAULT_THROTTLE = { ttl: seconds(60), limit: 120 };
@@ -18,6 +18,12 @@ export const WRITE_THROTTLE = { ttl: seconds(60), limit: 10 };
  * far below what walking through a list of names would need.
  */
 export const SLUG_CHECK_THROTTLE = { ttl: seconds(60), limit: 20 };
+
+/**
+ * The same check per account per day: choosing an address takes a handful of
+ * tries, so a day's ration stops one login walking a list of names slowly.
+ */
+export const SLUG_CHECK_ACCOUNT_THROTTLE = { ttl: hours(24), limit: 200 };
 
 /** Applies {@link WRITE_THROTTLE} to a route or controller. */
 export const WriteThrottle = () => Throttle({ default: WRITE_THROTTLE });
