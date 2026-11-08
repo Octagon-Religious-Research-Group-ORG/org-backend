@@ -11,5 +11,13 @@ export const DEFAULT_THROTTLE = { ttl: seconds(60), limit: 120 };
  */
 export const WRITE_THROTTLE = { ttl: seconds(60), limit: 10 };
 
+/**
+ * The page-address check. Every answer says whether a page exists, including
+ * pages the member hides from the directory, so it is rationed tightly: well
+ * above what typing an address needs (the form waits for a pause in typing),
+ * far below what walking through a list of names would need.
+ */
+export const SLUG_CHECK_THROTTLE = { ttl: seconds(60), limit: 20 };
+
 /** Applies {@link WRITE_THROTTLE} to a route or controller. */
 export const WriteThrottle = () => Throttle({ default: WRITE_THROTTLE });

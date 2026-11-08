@@ -49,6 +49,14 @@ describe('membership schemas', () => {
     ).rejects.toThrow(/kind/);
   });
 
+  it('never stores the browser type (the terms do not disclose it)', () => {
+    const at = { acceptedAt: new Date(), at: new Date() };
+    const consent = new Consents({ ...at, userAgent: 'ua' }).toObject();
+    const visit = new Visits({ ...at, userAgent: 'ua' }).toObject();
+    expect(consent).not.toHaveProperty('userAgent');
+    expect(visit).not.toHaveProperty('userAgent');
+  });
+
   it('backup contacts only accept known methods', async () => {
     await expect(
       new Contacts({

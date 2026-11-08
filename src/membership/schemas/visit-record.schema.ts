@@ -20,9 +20,6 @@ export class VisitRecord {
 
   @Prop({ type: String, maxlength: 64 })
   ip?: string;
-
-  @Prop({ type: String, maxlength: 500 })
-  userAgent?: string;
 }
 
 export type VisitRecordDocument = HydratedDocument<VisitRecord>;

@@ -8,24 +8,24 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
-import { WriteThrottle } from '../config/throttle';
+import { SLUG_CHECK_THROTTLE, WriteThrottle } from '../config/throttle';
 import { JoinMembershipDto } from './membership.dto';
 import { MembershipService, type RequestOrigin } from './membership.service';
 
-/** The visitor's address (real client IP behind the proxy, see http-app.ts). */
+/**
+ * The visitor's address (real client IP behind the proxy, see http-app.ts).
+ * Only what the membership terms disclose: the browser type is not read.
+ */
 export function originOf(request: Request): RequestOrigin {
-  const userAgent = request.headers['user-agent'];
-  return {
-    ...(request.ip ? { ip: request.ip } : {}),
-    ...(typeof userAgent === 'string' ? { userAgent } : {}),
-  };
+  return request.ip ? { ip: request.ip } : {};
 }
 
-/** Public: the terms, the guest entry and the page-address check. */
+/** The terms and the guest entry are public; the address check needs a login. */
 @Controller('membership')
 export class MembershipController {
   constructor(private readonly membership: MembershipService) {}
@@ -35,7 +35,13 @@ export class MembershipController {
     return this.membership.terms();
   }
 
+  /**
+   * Requires a login and is rationed because a "no" reveals that a page
+   * exists, unlisted and pending pages included.
+   */
   @Get('slug-availability')
+  @UseGuards(ClerkAuthGuard)
+  @Throttle({ default: SLUG_CHECK_THROTTLE })
   slugAvailability(@Query('slug') slug: unknown) {
     return this.membership.slugAvailability(
       typeof slug === 'string' ? slug : '',

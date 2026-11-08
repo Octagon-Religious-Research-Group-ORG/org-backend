@@ -13,10 +13,10 @@ function request(fields: Record<string, unknown>) {
 }
 
 describe('originOf', () => {
-  it('takes the client IP and user agent when present', () => {
+  it('takes the client IP and never the browser type (not disclosed)', () => {
     expect(
       originOf(request({ ip: '1.2.3.4', headers: { 'user-agent': 'ua' } })),
-    ).toEqual({ ip: '1.2.3.4', userAgent: 'ua' });
+    ).toEqual({ ip: '1.2.3.4' });
     expect(originOf(request({}))).toEqual({});
   });
 });

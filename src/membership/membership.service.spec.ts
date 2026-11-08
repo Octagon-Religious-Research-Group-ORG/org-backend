@@ -111,7 +111,7 @@ function input(overrides: Partial<JoinMembershipDto> = {}): JoinMembershipDto {
   };
 }
 
-const origin = { ip: '203.0.113.9', userAgent: 'test-agent' };
+const origin = { ip: '203.0.113.9' };
 
 describe('splitParagraphs', () => {
   it('splits on blank lines and drops empty paragraphs', () => {
@@ -132,34 +132,29 @@ describe('MembershipService', () => {
 
   it('records a guest entry with its IP, clipped to safe lengths', async () => {
     const { service, visitModel } = setup();
-    await service.recordGuestEntry({ ip: '1'.repeat(80), userAgent: 'u' });
+    await service.recordGuestEntry({ ip: '1'.repeat(80) });
     await service.recordGuestEntry({});
     expect(visitModel.create).toHaveBeenNthCalledWith(1, {
       kind: 'guest-entry',
       at: expect.any(Date) as Date,
       ip: '1'.repeat(64),
-      userAgent: 'u',
     });
     expect(visitModel.create).toHaveBeenNthCalledWith(2, {
       kind: 'guest-entry',
       at: expect.any(Date) as Date,
       ip: undefined,
-      userAgent: undefined,
     });
   });
 
   describe('slugAvailability', () => {
-    it('refuses a bad format, a website page and a taken address', async () => {
-      await expect(setup().service.slugAvailability('A B')).resolves.toEqual({
-        available: false,
-        reason: 'format',
-      });
-      await expect(
+    it('answers only no for a bad format, a website page and a taken address', async () => {
+      for (const check of [
+        setup().service.slugAvailability('A B'),
         setup().service.slugAvailability(' Beliefs '),
-      ).resolves.toEqual({ available: false, reason: 'reserved' });
-      await expect(
-        setup({ slugTaken: true }).service.slugAvailability('tripp'),
-      ).resolves.toEqual({ available: false, reason: 'taken' });
+        setup({ slugTaken: true }).service.slugAvailability('some-member'),
+      ]) {
+        await expect(check).resolves.toStrictEqual({ available: false });
+      }
     });
 
     it('accepts a free address, checked lower-cased', async () => {
@@ -230,7 +225,6 @@ describe('MembershipService', () => {
         termsHash: MEMBERSHIP_TERMS_HASH,
         acceptedAt: expect.any(Date) as Date,
         ip: origin.ip,
-        userAgent: origin.userAgent,
       });
       expect(ctx.contactsModel.updateOne).toHaveBeenCalledWith(
         { userId: 'user_a' },

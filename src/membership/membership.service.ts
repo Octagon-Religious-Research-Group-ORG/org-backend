@@ -25,7 +25,7 @@ import {
 } from '../social/schemas/social-profile.schema';
 import type { ContactEntryDto, JoinMembershipDto } from './membership.dto';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
-import { slugProblem } from './reserved-slugs';
+import { type SlugProblem, slugProblem } from './reserved-slugs';
 import {
   ConsentRecord,
   type ConsentRecordDocument,
@@ -39,10 +39,9 @@ import {
   type VisitRecordDocument,
 } from './schemas/visit-record.schema';
 
-/** Where a request came from; both disclosed in the membership terms. */
+/** Where a request came from; disclosed in the membership terms. */
 export interface RequestOrigin {
   ip?: string;
-  userAgent?: string;
 }
 
 export type MembershipStatus = 'none' | ProfileReviewStatus;
@@ -57,9 +56,12 @@ export interface MembershipSummary {
   };
 }
 
-export type SlugAvailability =
-  | { available: true }
-  | { available: false; reason: 'format' | 'reserved' | 'taken' };
+/** Deliberately only yes or no: the reason would say more than a visitor needs. */
+export interface SlugAvailability {
+  available: boolean;
+}
+
+type SlugRefusal = SlugProblem | 'taken';
 
 /** MongoDB duplicate-key error (unique index violation). */
 function isDuplicateKey(error: unknown): boolean {
@@ -121,16 +123,20 @@ export class MembershipService {
       kind: 'guest-entry',
       at: new Date(),
       ip: clip(origin.ip, 64),
-      userAgent: clip(origin.userAgent, 500),
     });
   }
 
   async slugAvailability(value: string): Promise<SlugAvailability> {
-    const slug = value.trim().toLowerCase();
+    const refusal = await this.slugRefusal(value.trim().toLowerCase());
+    return { available: refusal === undefined };
+  }
+
+  private async slugRefusal(slug: string): Promise<SlugRefusal | undefined> {
     const problem = slugProblem(slug);
-    if (problem) return { available: false, reason: problem };
-    const taken = (await this.profileModel.exists({ slug })) !== null;
-    return taken ? { available: false, reason: 'taken' } : { available: true };
+    if (problem) return problem;
+    return (await this.profileModel.exists({ slug })) === null
+      ? undefined
+      : 'taken';
   }
 
   async summary(userId: string): Promise<MembershipSummary> {
@@ -184,13 +190,13 @@ export class MembershipService {
     }
 
     const slug = input.slug.trim().toLowerCase();
-    const availability = await this.slugAvailability(slug);
-    if (!availability.available) {
-      if (availability.reason === 'taken') {
-        throw new ConflictException('That page address is already taken.');
-      }
+    const refusal = await this.slugRefusal(slug);
+    if (refusal === 'taken') {
+      throw new ConflictException('That page address is already taken.');
+    }
+    if (refusal) {
       throw new BadRequestException(
-        availability.reason === 'reserved'
+        refusal === 'reserved'
           ? 'That page address is used by the website. Please choose another.'
           : 'A page address uses lowercase letters, numbers and single hyphens.',
       );
@@ -224,7 +230,6 @@ export class MembershipService {
       termsHash: MEMBERSHIP_TERMS_HASH,
       acceptedAt: now,
       ip: clip(origin.ip, 64),
-      userAgent: clip(origin.userAgent, 500),
     });
     await this.contactsModel
       .updateOne({ userId }, { $set: { backup } }, { upsert: true })
