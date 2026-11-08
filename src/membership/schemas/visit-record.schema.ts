@@ -10,7 +10,12 @@ export type VisitKind = (typeof VISIT_KINDS)[number];
  * "track visitors' nicknames and IP addresses"). **Append-only.** Disclosed on
  * the entry page and in the membership terms.
  */
-@Schema({ collection: 'visitrecords', autoIndex: false, versionKey: false })
+@Schema({
+  collection: 'visitrecords',
+  autoIndex: false,
+  autoCreate: false,
+  versionKey: false,
+})
 export class VisitRecord {
   @Prop({ type: String, enum: VISIT_KINDS, required: true })
   kind: VisitKind;

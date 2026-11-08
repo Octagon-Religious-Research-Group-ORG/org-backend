@@ -18,6 +18,12 @@ describe('MANAGED_SCHEMAS', () => {
     }
   });
 
+  it('never creates a collection just by compiling a model', () => {
+    for (const { name, schema } of MANAGED_SCHEMAS) {
+      expect([name, schema.get('autoCreate')]).toEqual([name, false]);
+    }
+  });
+
   it('has unique model names', () => {
     const names = MANAGED_SCHEMAS.map(({ name }) => name);
     expect(new Set(names).size).toBe(names.length);

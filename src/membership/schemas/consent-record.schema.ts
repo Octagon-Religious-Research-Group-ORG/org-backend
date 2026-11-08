@@ -7,7 +7,12 @@ import { makeAppendOnly } from '../../social/append-only';
  * agreement is a new record, so the history of what each member accepted, and
  * when, can never be rewritten.
  */
-@Schema({ collection: 'consentrecords', autoIndex: false, versionKey: false })
+@Schema({
+  collection: 'consentrecords',
+  autoIndex: false,
+  autoCreate: false,
+  versionKey: false,
+})
 export class ConsentRecord {
   @Prop({ type: String, required: true, immutable: true })
   userId: string;

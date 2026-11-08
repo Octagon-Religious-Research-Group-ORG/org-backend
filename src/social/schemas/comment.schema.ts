@@ -21,7 +21,12 @@ export const MAX_ANCHOR_TEXT_LENGTH = 20_000;
  * - `legacyCreatedAt` is the date Apple Pages recorded. It is shown as such and
  *   never treated as proof; `createdAt` is when this row was written.
  */
-@Schema({ collection: 'comments', timestamps: true, autoIndex: false })
+@Schema({
+  collection: 'comments',
+  timestamps: true,
+  autoIndex: false,
+  autoCreate: false,
+})
 export class Comment {
   /** Stable public id, never reused. */
   @Prop({ type: String, required: true })

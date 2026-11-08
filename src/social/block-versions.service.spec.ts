@@ -296,7 +296,9 @@ describe('a lone surrogate in the text', () => {
 
     expect(written.text).toBe(text);
     expect(written.hash).toBe(
-      computeVersionHash({ ...(written as never), text }),
+      computeVersionHash(
+        written as unknown as Parameters<typeof computeVersionHash>[0],
+      ),
     );
   });
 });

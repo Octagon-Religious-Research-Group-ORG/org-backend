@@ -85,7 +85,12 @@ export const LegacySourceSchema = SchemaFactory.createForClass(LegacySource);
  * and orders record) because a migrated profile exists before anyone has
  * claimed it, so it cannot require a login.
  */
-@Schema({ collection: 'socialprofiles', timestamps: true, autoIndex: false })
+@Schema({
+  collection: 'socialprofiles',
+  timestamps: true,
+  autoIndex: false,
+  autoCreate: false,
+})
 export class SocialProfile {
   @Prop({
     type: String,

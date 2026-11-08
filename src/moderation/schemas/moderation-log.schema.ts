@@ -6,7 +6,12 @@ import { makeAppendOnly } from '../../social/append-only';
  * Who did what to whom, and why: role changes now, moderation decisions
  * later (plan §5). **Append-only** — an entry is never changed or removed.
  */
-@Schema({ collection: 'moderationlog', autoIndex: false, versionKey: false })
+@Schema({
+  collection: 'moderationlog',
+  autoIndex: false,
+  autoCreate: false,
+  versionKey: false,
+})
 export class ModerationLogEntry {
   /** Clerk user id, or `system:<process>` for automated actions. */
   @Prop({ type: String, required: true, immutable: true })

@@ -17,7 +17,12 @@ export type TabReviewStatus = (typeof TAB_REVIEW_STATUSES)[number];
  */
 export const MAX_TAB_TITLE_LENGTH = 120;
 
-@Schema({ collection: 'belieftabs', timestamps: true, autoIndex: false })
+@Schema({
+  collection: 'belieftabs',
+  timestamps: true,
+  autoIndex: false,
+  autoCreate: false,
+})
 export class BeliefTab {
   @Prop({ type: Types.ObjectId, required: true })
   profileId: Types.ObjectId;

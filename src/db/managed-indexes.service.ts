@@ -15,7 +15,9 @@ export type IndexMode = 'check' | 'create';
  * Checks the indexes of every collection that opts out of auto-indexing when the server starts and, only when
  * `MANAGE_INDEXES=create`, creates the declared ones that are missing.
  *
- * `check` (the default) changes nothing. Either way a missing or undeclared
+ * `check` (the default) changes nothing: the managed schemas also set
+ * `autoCreate: false`, so compiling their models can't create an empty
+ * collection. Either way a missing or undeclared
  * index is logged as an error, so it is visible in the host's logs instead of
  * surfacing later as a duplicate or a slow query. Startup is never blocked.
  */

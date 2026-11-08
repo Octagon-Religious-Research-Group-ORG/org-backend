@@ -159,7 +159,6 @@ describe('AdminAccessService', () => {
       authEmail: 'ADMIN@example.test',
       authEmailVerified: true,
       authRoleCheckedAt: new Date(),
-      authRoleCheckedAt: expect.any(Date),
       isAdmin: true,
     });
     const model = {

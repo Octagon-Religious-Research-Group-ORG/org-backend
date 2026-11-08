@@ -29,7 +29,12 @@ export type BlockKind = (typeof BLOCK_KINDS)[number];
  * and which version is current. Comments and votes point at `blockId`, so an
  * edit never orphans them.
  */
-@Schema({ collection: 'profileblocks', timestamps: true, autoIndex: false })
+@Schema({
+  collection: 'profileblocks',
+  timestamps: true,
+  autoIndex: false,
+  autoCreate: false,
+})
 export class ProfileBlock {
   @Prop({ type: Types.ObjectId, required: true })
   profileId: Types.ObjectId;

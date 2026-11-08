@@ -28,6 +28,7 @@ export const EMPTY_BLOCK_TEXT_REFUSAL =
 @Schema({
   collection: 'blockversions',
   autoIndex: false,
+  autoCreate: false,
   versionKey: false,
 })
 export class BlockVersion {

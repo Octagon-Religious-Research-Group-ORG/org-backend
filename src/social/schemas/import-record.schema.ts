@@ -34,6 +34,7 @@ export const ImportSourceFileSchema =
 @Schema({
   collection: 'importrecords',
   autoIndex: false,
+  autoCreate: false,
   versionKey: false,
 })
 export class ImportRecord {

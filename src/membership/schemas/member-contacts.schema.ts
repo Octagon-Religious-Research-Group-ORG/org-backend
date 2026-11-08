@@ -11,7 +11,12 @@ import {
  * lost). Kept out of `socialprofiles` on purpose, so no page serializer can
  * ever leak them.
  */
-@Schema({ collection: 'membercontacts', timestamps: true, autoIndex: false })
+@Schema({
+  collection: 'membercontacts',
+  timestamps: true,
+  autoIndex: false,
+  autoCreate: false,
+})
 export class MemberContacts {
   @Prop({ type: String, required: true })
   userId: string;
