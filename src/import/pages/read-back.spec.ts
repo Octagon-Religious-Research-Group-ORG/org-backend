@@ -100,7 +100,8 @@ describe('compareReadBack', () => {
 
   it('reports a field the database lacks', () => {
     const actual = matching();
-    const { title: _title, ...untitled } = actual.tabs[0];
+    const untitled = { ...actual.tabs[0] };
+    delete untitled.title;
     actual.tabs = [untitled];
     expect(compareReadBack(written(), actual)).toEqual([
       'tab t1: title differs',

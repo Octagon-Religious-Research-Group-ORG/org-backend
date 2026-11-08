@@ -12,7 +12,7 @@ export interface ProcessedImage {
 
 /**
  * Converts an uploaded or imported picture to the stored form: upright
- * (EXIF rotation applied; Tripp's gallery photos came out sideways without
+ * (EXIF rotation applied; gallery photos came out sideways without
  * it), at most 1600 px on the longest side, WebP. Metadata (EXIF, GPS) is not
  * copied to the output.
  *

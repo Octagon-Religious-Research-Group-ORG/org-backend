@@ -97,7 +97,7 @@ function escapeText(text: string): string {
  * A paragraph's text with its links written as Markdown, each at the position
  * the reader recorded (searching for the label breaks when two links share
  * one, or a label also appears in plain text). Links between migrated profiles
- * become site addresses (`/tripp`); other iCloud links are kept and reported,
+ * become site addresses (`/some-member`); other iCloud links are kept and reported,
  * since they break when the Pages documents are retired. An address that is
  * not http(s) or mailto is dropped, keeping the words, and reported in `unsafe`.
  */

@@ -4,7 +4,7 @@ import { decompressIwa } from './snappy';
 import { safeUnzip } from './zip-safe';
 
 export interface PagesDataFile {
-  /** Path inside the package, e.g. "Data/IMG_4970-55.jpeg". */
+  /** Path inside the package, e.g. "Data/IMG_0001-55.jpeg". */
   path: string;
   bytes: number;
   sha256: string;

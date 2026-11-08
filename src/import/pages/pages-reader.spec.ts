@@ -181,8 +181,8 @@ describe('readPages', () => {
     const pages = readPages(
       pagesFile({
         'Index/Document.iwa': iwa('I agree with this'),
-        'Index/AnnotationAuthorStorage-1732610.iwa': iwa('Tripp ORG'),
-        'Data/IMG_4970-55.jpeg': big,
+        'Index/AnnotationAuthorStorage-1732610.iwa': iwa('Bram ORG'),
+        'Data/IMG_0001-55.jpeg': big,
         'Data/pasted-movie-small-35.png': new Uint8Array(5),
         'Data/b.png': new Uint8Array(5),
         'Data/notes.plist': new Uint8Array(10),
@@ -191,11 +191,11 @@ describe('readPages', () => {
     );
 
     expect(pages.documentText).toBe('I agree with this');
-    expect(pages.authorText).toBe('Tripp ORG');
+    expect(pages.authorText).toBe('Bram ORG');
     expect(
       pages.dataFiles.map((f) => [f.path, f.bytes, f.image, f.thumbnail]),
     ).toEqual([
-      ['Data/IMG_4970-55.jpeg', 30, true, false],
+      ['Data/IMG_0001-55.jpeg', 30, true, false],
       ['Data/notes.plist', 10, false, false],
       ['Data/b.png', 5, true, false],
       ['Data/pasted-movie-small-35.png', 5, true, true],
@@ -245,13 +245,13 @@ describe('crossCheck', () => {
   it('passes when every comment and author is present, ignoring layout', () => {
     const result = crossCheck(
       docx([
-        comment('1', 'Tripp ORG', 'Double letter'),
-        comment('2', 'Emily', 'First line\n\nsecond   line'),
+        comment('1', 'Bram ORG', 'Double letter'),
+        comment('2', 'Wren', 'First line\n\nsecond   line'),
       ]),
       pages(
         'xx Double letter yy First line zz second line',
         // As in the real table: names held apart by non-text protobuf bytes.
-        '\u0000\n\u0005Emily\u0012\u0002\n\tTripp   ORG\u0012',
+        '\u0000\n\u0005Wren\u0012\u0002\n\tBram   ORG\u0012',
       ),
     );
 
@@ -271,10 +271,10 @@ describe('crossCheck', () => {
 
   it('matches an author as a whole name, not a part of one', () => {
     const result = crossCheck(
-      docx([comment('1', 'Tripp', 'x')]),
-      pages('x', 'Tripp ORG'),
+      docx([comment('1', 'Bram', 'x')]),
+      pages('x', 'Bram ORG'),
     );
-    expect(result.authors.missing).toEqual(['Tripp']);
+    expect(result.authors.missing).toEqual(['Bram']);
     expect(result.status).toBe('mismatch');
   });
 

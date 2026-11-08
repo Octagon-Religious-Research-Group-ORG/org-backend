@@ -126,9 +126,9 @@ describe('buildProfileReport', () => {
 
   it('is ok when every check ran and passed, listing unplaced comments', () => {
     expect(
-      buildProfileReport('tripp', docx(), check(), plan, cross('ok')),
+      buildProfileReport('bram', docx(), check(), plan, cross('ok')),
     ).toEqual({
-      slug: 'tripp',
+      slug: 'bram',
       status: 'ok',
       reasons: [],
       counts: {
@@ -182,7 +182,7 @@ describe('buildProfileReport', () => {
 
   it('is a mismatch for proposal errors, reader warnings or a cross-check miss', () => {
     const report = buildProfileReport(
-      'tripp',
+      'bram',
       docx(['w']),
       check(['e1', 'e2']),
       undefined,

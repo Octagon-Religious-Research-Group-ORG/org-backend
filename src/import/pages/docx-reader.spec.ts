@@ -327,17 +327,17 @@ describe('readDocx', () => {
       const doc = readDocx(
         buildDocx({
           comments:
-            comment('1', 'Tripp ORG', 'Double letter', 'AAA') +
-            comment('2', 'Emily', 'I agree', 'BBB') +
+            comment('1', 'Bram ORG', 'Double letter', 'AAA') +
+            comment('2', 'Wren', 'I agree', 'BBB') +
             '<w:comment w:id="3"><w:p><w:r><w:t>first</w:t></w:r><w:r><w:br/><w:delText>x</w:delText><w:instrText>y</w:instrText></w:r></w:p>' +
             '<w:p w14:paraId="CCC"><w:r><w:t>second</w:t></w:r></w:p></w:comment>' +
-            comment('4', 'Leo', 'never placed', 'DDD'),
+            comment('4', 'Odo', 'never placed', 'DDD'),
           commentsExtended:
             '<w15:commentEx w15:paraId="BBB" w15:paraIdParent="AAA"/>' +
             '<w15:commentEx w15:paraId="AAA"/>' +
             '<w15:commentEx w15:paraId="CCC" w15:paraIdParent="AAA"/>',
           body:
-            '<w:p><w:r><w:t xml:space="preserve">I. </w:t></w:r><w:commentRangeStart w:id="1"/><w:commentRangeStart w:id="2"/><w:r><w:t>God is</w:t></w:r></w:p>' +
+            '<w:p><w:r><w:t xml:space="preserve">I. </w:t></w:r><w:commentRangeStart w:id="1"/><w:commentRangeStart w:id="2"/><w:r><w:t>Sample is</w:t></w:r></w:p>' +
             '<w:p><w:r><w:t>one</w:t></w:r><w:commentRangeEnd w:id="1"/><w:commentRangeEnd w:id="2"/></w:p>' +
             '<w:p><w:commentRangeStart w:id="3"/><w:commentRangeEnd w:id="3"/></w:p>',
         }),
@@ -346,17 +346,17 @@ describe('readDocx', () => {
       expect(doc.comments).toEqual([
         {
           id: '1',
-          author: 'Tripp ORG',
+          author: 'Bram ORG',
           date: '2026-07-26T13:19:54Z',
           text: 'Double letter\t!',
-          anchorText: 'God is\none',
+          anchorText: 'Sample is\none',
           paragraphIndices: [0, 1],
           anchored: true,
         },
         expect.objectContaining({
           id: '2',
           parentId: '1',
-          anchorText: 'God is\none',
+          anchorText: 'Sample is\none',
         }),
         expect.objectContaining({
           id: '3',

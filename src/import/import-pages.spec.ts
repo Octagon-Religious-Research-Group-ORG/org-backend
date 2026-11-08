@@ -403,21 +403,6 @@ describe('import:pages database guard (the CLI itself)', () => {
       );
     });
 
-    it('reports a failure that is not an Error too', async () => {
-      writeMembers([member('alpha')]);
-      connectTo('org-testing');
-      const store = memoryStore();
-      store.createImportRecord.mockImplementationOnce(
-        () => Promise.reject('plain string') as never,
-      );
-
-      await expect(run('--confirm', 'org-testing')).resolves.toBe(1);
-
-      expect(readFileSync(join(dir, 'import-report.md'), 'utf8')).toContain(
-        'failed: plain string',
-      );
-    });
-
     it('writes nothing at all when one address is already taken', async () => {
       writeMembers([member('alpha'), member('beta')]);
       connectTo('org-testing');

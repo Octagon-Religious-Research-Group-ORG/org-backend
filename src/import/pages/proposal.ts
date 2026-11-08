@@ -68,7 +68,7 @@ export interface ProposalSection {
 
 export interface ProposalTab {
   title: string;
-  /** The member's category heading (Tripp's "Theology", …), if any. */
+  /** The member's category heading (e.g. "Theology"), if any. */
   group?: string;
   paragraphs: number[];
 }
@@ -109,7 +109,7 @@ const LOWER_ROMAN_LABEL = /^\s*([ivxlc]+)[.)]\s+/;
 /** A typed single capital ("H."), which is a lettered sub-point or a numeral. */
 const LETTER_LABEL = /^\s*([A-Z])[.)]\s+/;
 
-/** Another label inside a paragraph: "…the true God.A. Some…", or after a line break. */
+/** Another label inside a paragraph: "…one belief.A. Another…", or after a line break. */
 const RUN_TOGETHER = /(?:[.!?]["”’)]*|\n\s*)(?:[A-Z]|[IVXLC]{2,})[.)]\s+\S/;
 
 /** A bullet character starting a paragraph ("•I believe…"). Not "-": members use "---" as separators. */
@@ -119,13 +119,13 @@ const BULLET = /^\s*[•●▪◦‣]\s*/;
 const SEPARATOR = /^\s*([-*_=~]\s*){3,}$/;
 
 /**
- * Tripp's onboarding template wraps its instructions in parentheses ("(Add any
+ * The founder's onboarding template wraps its instructions in parentheses ("(Add any
  * beliefs/ideas you want…)"). A paragraph that is ONLY a parenthesis is an
  * unfilled hint, not the member's words. Always flagged for review.
  */
 const PLACEHOLDER = /^\s*\([\s\S]*\)\s*$/;
 
-/** First line of Tripp's onboarding template, copied to the top of new pages. */
+/** First line of The founder's onboarding template, copied to the top of new pages. */
 const ONBOARDING_TEMPLATE = /^public membership:?$/i;
 
 /** Image formats the converter cannot read (sharp ships without HEVC). */
@@ -134,8 +134,9 @@ export const UNREADABLE_IMAGE = /.(heic|heif)$/i;
 export const PLACEHOLDER_REASON =
   'Unfilled template placeholder (instructions in parentheses)';
 export const ONBOARDING_REASON =
-  "Onboarding template copied into the page (Tripp's membership instructions), not the member's own text";
-export const LEGAL_REASON = 'Legal section: not migrated (Tripp, plan §2b)';
+  "Onboarding template copied into the page (the founder's membership instructions), not the member's own text";
+export const LEGAL_REASON =
+  'Legal section: not migrated (owner decision, plan §2b)';
 
 /** Whether a drop is the Legal section (kept out of the import record too). */
 export function isLegalDrop(drop: { reason: string }): boolean {
@@ -220,7 +221,7 @@ interface BeliefEntry {
  * Splits one run of belief paragraphs (one category) into tabs:
  *
  * - a category written as a single short numbered item with lettered
- *   sub-points ("I. Christian beliefs", A., B., …) names the group, and each
+ *   sub-points ("I. Sample category", A., B., …) names the group, and each
  *   sub-point is a tab;
  * - otherwise a tab starts at Word numbering level 0, at a typed label that is
  *   NEXT in sequence ("C." after "III." is a sub-point, not Roman 100), or at
@@ -337,7 +338,7 @@ function splitBeliefs(
  *   Beliefs" section, bullet paragraphs are beliefs (one tab each) and the
  *   rest is the bio.
  * - Dropped, each with its reason: everything before the first section (or
- *   the onboarding template, named as such), Legal (Tripp, §2b), unfilled
+ *   the onboarding template, named as such), Legal (owner decision, §2b), unfilled
  *   template placeholders, separator lines.
  * - Images: Pages' full-size photos, excluding template art (the same file in
  *   several members' pages: navigation tiles, the example picture), HEIC and
@@ -476,7 +477,7 @@ function analyseStructure(
   drop(separators, 'Separator lines');
 
   // Never a template asset (the same file in several members' pages, e.g. the
-  // example picture in Tripp's onboarding template) and never a format the
+  // example picture in The founder's onboarding template) and never a format the
   // converter cannot read (HEIC: the .docx export holds a JPEG copy instead).
   const photos = (pages?.dataFiles ?? []).filter(
     (file) =>

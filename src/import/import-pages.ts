@@ -206,7 +206,7 @@ export async function main(): Promise<number> {
 
   if (args.includes('--propose')) {
     // A picture whose exact bytes appear in more than one member's package is
-    // template art (Tripp's onboarding template ships an example picture).
+    // template art (The founder's onboarding template ships an example picture).
     const seen = new Map<string, Set<string>>();
     for (const entry of manifest) {
       for (const file of load(dir, entry).pages?.dataFiles ?? []) {

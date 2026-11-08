@@ -37,8 +37,8 @@ const num = (text: string, level: number): Spec => ({
 });
 
 const INPUT = {
-  slug: 'tripp',
-  displayName: 'Tripp',
+  slug: 'bram',
+  displayName: 'Bram',
   pagesUrl: 'https://www.icloud.com/pages/abc',
   visibility: 'public' as const,
 };
@@ -77,7 +77,7 @@ describe('romanValue', () => {
 describe('proposeStructure', () => {
   it('splits sections, belief tabs and categories, dropping title and Legal', () => {
     const doc = docx([
-      { text: 'Tripp', headingLevel: 0 },
+      { text: 'Bram', headingLevel: 0 },
       { text: '', images: ['word/media/image1.png'] },
       { text: '   ' },
       h('Bio'),
@@ -86,16 +86,16 @@ describe('proposeStructure', () => {
       { text: 'More bio' },
       h('Beliefs'),
       { text: 'Preface to my beliefs' },
-      num('God exists.', 0),
+      num('A plain statement.', 0),
       num('Detail', 1),
       h('Theology', 3),
       h('', 3),
       { text: 'Intro to theology' },
       num('Grace\nsecond line', 0),
-      h('Theophanies'),
+      h('Reflections'),
       { text: 'A vision' },
       h('Contact Info'),
-      { text: 'tripp@example.test' },
+      { text: 'bram@example.test' },
       h('Legal'),
       { text: 'I certify…' },
     ]);
@@ -104,12 +104,12 @@ describe('proposeStructure', () => {
       doc,
       pages([
         dataFile('Data/pasted-image-24.tiff', 900),
-        dataFile('Data/IMG_4970-55.jpeg', 500),
+        dataFile('Data/IMG_0001-55.jpeg', 500),
         {
           ...dataFile('Data/pasted-movie-32.png', 2000),
           sha256: 'n'.repeat(64),
         },
-        dataFile('Data/IMG_4970-small-56.jpeg', 50),
+        dataFile('Data/IMG_0001-small-56.jpeg', 50),
         dataFile('Data/notes.plist', 9999),
       ]),
       // The navigation tile is in every member's page: template art.
@@ -121,12 +121,12 @@ describe('proposeStructure', () => {
       ...INPUT,
       sections: [
         { section: 'bio', paragraphs: [4, 5, 6] },
-        { section: 'other', heading: 'Theophanies', paragraphs: [16] },
+        { section: 'other', heading: 'Reflections', paragraphs: [16] },
         { section: 'contact', paragraphs: [18] },
       ],
       tabs: [
         { title: 'Beliefs (introduction)', paragraphs: [8] },
-        { title: 'I. God exists.', paragraphs: [9, 10] },
+        { title: 'I. A plain statement.', paragraphs: [9, 10] },
         {
           title: 'Theology (introduction)',
           group: 'Theology',
@@ -142,17 +142,17 @@ describe('proposeStructure', () => {
         },
         {
           paragraphs: [20],
-          reason: 'Legal section: not migrated (Tripp, plan §2b)',
+          reason: 'Legal section: not migrated (owner decision, plan §2b)',
         },
       ],
       images: {
         picture: 'Data/pasted-image-24.tiff',
-        gallery: ['Data/IMG_4970-55.jpeg'],
+        gallery: ['Data/IMG_0001-55.jpeg'],
       },
     });
     expect(checkProposal(proposal, doc).errors).toEqual([
       'Image Data/pasted-image-24.tiff is not in the files.',
-      'Image Data/IMG_4970-55.jpeg is not in the files.',
+      'Image Data/IMG_0001-55.jpeg is not in the files.',
     ]);
   });
 
@@ -161,11 +161,11 @@ describe('proposeStructure', () => {
       INPUT,
       docx([
         h('Beliefs'),
-        num('No god offered by any religion is the true God.', 0),
-        num('And yet I do believe.', 0),
+        num('The first sample statement is here.', 0),
+        num('A second sample statement.', 0),
         { text: 'III. The evidence.' },
         { text: 'A. First point.' },
-        { text: 'C. The simulation.' },
+        { text: 'C. A later point.' },
         {
           text: 'IV. My conclusion, which is a very long sentence that goes on well past the eighty character limit for titles.',
         },
@@ -178,8 +178,8 @@ describe('proposeStructure', () => {
     );
 
     expect(proposal.tabs.map((tab) => [tab.title, tab.paragraphs])).toEqual([
-      ['I. No god offered by any religion is the true God.', [1]],
-      ['I. And yet I do believe.', [2]],
+      ['I. The first sample statement is here.', [1]],
+      ['I. A second sample statement.', [2]],
       ['III. The evidence.', [3, 4, 5]],
       [expect.stringMatching(/^IV. My conclusion.*…$/), [6, 7, 8, 9]],
       ['V. Five, the next number after IV.', [10]],
@@ -467,18 +467,22 @@ describe('proposeStructure', () => {
       INPUT,
       docx([
         h('Beliefs'),
-        num('Christian beliefs', 0),
-        lettered('Monotheism'),
-        lettered('God is omniscient'),
+        num('Sample category', 0),
+        lettered('A first lettered point'),
+        lettered('A second lettered point'),
         { text: 'continued', numbering: { numId: '1', level: 2, label: '1.' } },
       ]),
     );
 
     expect(proposal.tabs).toEqual([
-      { title: 'A. Monotheism', group: 'Christian beliefs', paragraphs: [2] },
       {
-        title: 'A. God is omniscient',
-        group: 'Christian beliefs',
+        title: 'A. A first lettered point',
+        group: 'Sample category',
+        paragraphs: [2],
+      },
+      {
+        title: 'A. A second lettered point',
+        group: 'Sample category',
         paragraphs: [3, 4],
       },
     ]);
@@ -494,13 +498,13 @@ describe('proposeStructure', () => {
       INPUT,
       docx([
         h('Beliefs'),
-        num('God is love.', 0),
+        num('A short claim.', 0),
         lettered('Point one'),
         lettered('Point two'),
       ]),
     );
     expect(proposal.tabs).toEqual([
-      { title: 'I. God is love.', paragraphs: [1, 2, 3] },
+      { title: 'I. A short claim.', paragraphs: [1, 2, 3] },
     ]);
   });
 
@@ -520,17 +524,17 @@ describe('proposeStructure', () => {
       INPUT,
       docx([
         h('Bio & Beliefs', 3),
-        { text: 'I was raised to seek knowledge.' },
-        { text: '•I believe there was a flood.' },
+        { text: 'A sample childhood line.' },
+        { text: '•A sample story from the past.' },
         { text: '---' },
         { text: 'More of my story.' },
-        { text: '● Bodily autonomy is tantamount.' },
+        { text: '● Another bullet belief.' },
       ]),
     );
     expect(proposal.sections).toEqual([{ section: 'bio', paragraphs: [1, 4] }]);
     expect(proposal.tabs).toEqual([
-      { title: 'I believe there was a flood.', paragraphs: [2] },
-      { title: 'Bodily autonomy is tantamount.', paragraphs: [5] },
+      { title: 'A sample story from the past.', paragraphs: [2] },
+      { title: 'Another bullet belief.', paragraphs: [5] },
     ]);
     expect(proposal.dropped).toEqual([
       { paragraphs: [3], reason: 'Separator lines' },
@@ -553,7 +557,7 @@ describe('proposeStructure', () => {
       {
         paragraphs: [0, 1],
         reason:
-          "Onboarding template copied into the page (Tripp's membership instructions), not the member's own text",
+          "Onboarding template copied into the page (the founder's membership instructions), not the member's own text",
       },
       {
         paragraphs: [3, 6],
@@ -784,7 +788,7 @@ describe('checkProposal', () => {
 
   it('never proposes a template picture or a HEIC photo', () => {
     const template = {
-      ...dataFile('Data/IMG_3087-49.jpeg', 900),
+      ...dataFile('Data/IMG_0002-49.jpeg', 900),
       sha256: 'a'.repeat(64),
     };
     const proposal = proposeStructure(
@@ -792,7 +796,7 @@ describe('checkProposal', () => {
       doc,
       pages([
         template,
-        dataFile('Data/IMG_4500-56.heic', 800),
+        dataFile('Data/IMG_0003-56.heic', 800),
         dataFile('Data/me.jpeg', 10),
       ]),
       { templateSha256: new Set(['a'.repeat(64)]) },

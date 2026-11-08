@@ -20,11 +20,11 @@ function sequentialIds(): IdFactory {
   return (prefix) => `${prefix}_${++next}`;
 }
 
-const SLUGS = new Map([['0080pSrnZRMtMf8XV8DAZ-7Lg', 'renan']]);
+const SLUGS = new Map([['SampleDocKey0000000000-1a', 'quill']]);
 
 describe('pagesKey', () => {
   it.each([
-    ['https://www.icloud.com/pages/0080pSrnZ-7Lg#Renan', '0080pSrnZ-7Lg'],
+    ['https://www.icloud.com/pages/SampleKey-1a#Quill', 'SampleKey-1a'],
     [' http://icloud.com/pages/ABC_def?x=1 ', 'ABC_def'],
     ['https://example.test/pages/ABC', undefined],
   ])('reads %p', (url, key) => {
@@ -44,12 +44,12 @@ describe('paragraphMarkdown', () => {
     const unmapped: string[] = [];
     const text = paragraphMarkdown(
       paragraph(0, {
-        text: 'See Renan and the [ORG] page, or Elsewhere.',
+        text: 'See Quill and the [ORG] page, or Elsewhere.',
         links: [
           {
-            text: 'Renan',
+            text: 'Quill',
             start: 4,
-            url: 'https://www.icloud.com/pages/0080pSrnZRMtMf8XV8DAZ-7Lg#Renan',
+            url: 'https://www.icloud.com/pages/SampleDocKey0000000000-1a#Quill',
           },
           {
             text: 'Elsewhere',
@@ -65,7 +65,7 @@ describe('paragraphMarkdown', () => {
     );
 
     expect(text).toBe(
-      'See [Renan](/renan) and the \\[ORG\\] page, or [Elsewhere](https://www.icloud.com/pages/OTHER). [Not in text](https://example.test/a_(b%29)',
+      'See [Quill](/quill) and the \\[ORG\\] page, or [Elsewhere](https://www.icloud.com/pages/OTHER). [Not in text](https://example.test/a_(b%29)',
     );
     expect(unmapped).toEqual(['https://www.icloud.com/pages/OTHER']);
   });
@@ -174,7 +174,7 @@ describe('paragraphMarkdown link positions', () => {
           },
           {
             text: 'mapped',
-            url: 'https://www.icloud.com/pages/0080pSrnZRMtMf8XV8DAZ-7Lg',
+            url: 'https://www.icloud.com/pages/SampleDocKey0000000000-1a',
             start: 58,
           },
         ],
@@ -200,7 +200,7 @@ describe('buildImportPlan', () => {
       }),
       paragraph(3, { text: 'Sub', headingLevel: 3 }),
       paragraph(4, {
-        text: 'God exists.',
+        text: 'A plain statement.',
         numbering: { numId: '1', level: 0, label: 'I.' },
       }),
       paragraph(5, { text: 'A. Typed sub-point' }),
@@ -209,10 +209,10 @@ describe('buildImportPlan', () => {
     comments: [
       {
         id: '1',
-        author: 'Tripp ORG',
+        author: 'Bram ORG',
         date: '2026-07-26T13:19:54Z',
         text: 'Double letter',
-        anchorText: 'God exists.',
+        anchorText: 'A plain statement.',
         paragraphIndices: [4],
         anchored: true,
       },
@@ -228,7 +228,7 @@ describe('buildImportPlan', () => {
       },
       {
         id: '3',
-        author: 'Leo',
+        author: 'Odo',
         text: 'Orphan reply',
         parentId: '99',
         anchorText: 'grew',
@@ -242,15 +242,17 @@ describe('buildImportPlan', () => {
 
   const proposal: ProfileProposal = {
     version: 1,
-    slug: 'tripp',
-    displayName: 'Tripp',
+    slug: 'bram',
+    displayName: 'Bram',
     pagesUrl: 'https://www.icloud.com/pages/T',
     visibility: 'public',
     sections: [
       { section: 'bio', paragraphs: [1, 2, 3] },
-      { section: 'other', heading: 'Theophanies [1]', paragraphs: [6] },
+      { section: 'other', heading: 'Reflections [1]', paragraphs: [6] },
     ],
-    tabs: [{ title: 'I. God exists.', group: 'Theology', paragraphs: [4, 5] }],
+    tabs: [
+      { title: 'I. A plain statement.', group: 'Theology', paragraphs: [4, 5] },
+    ],
     structure: [0],
     dropped: [],
     images: { picture: 'Data/p.jpeg', gallery: ['Data/g.jpeg'] },
@@ -269,15 +271,15 @@ describe('buildImportPlan', () => {
     );
 
     expect(plan).toEqual({
-      slug: 'tripp',
-      displayName: 'Tripp',
+      slug: 'bram',
+      displayName: 'Bram',
       pagesUrl: 'https://www.icloud.com/pages/T',
       visibility: 'public',
       anonymous: false,
       tabs: [
         {
           tabId: 'tab_7',
-          title: 'I. God exists.',
+          title: 'I. A plain statement.',
           group: 'Theology',
           order: 0,
         },
@@ -325,7 +327,7 @@ describe('buildImportPlan', () => {
           kind: 'heading',
           label: '',
           order: 0,
-          text: 'Theophanies \\[1\\]',
+          text: 'Reflections \\[1\\]',
           paragraph: -1,
         },
         {
@@ -344,7 +346,7 @@ describe('buildImportPlan', () => {
           label: 'I.',
           order: 0,
           tabId: 'tab_7',
-          text: 'God exists.',
+          text: 'A plain statement.',
           paragraph: 4,
         },
         {
@@ -363,8 +365,8 @@ describe('buildImportPlan', () => {
           commentId: 'cmt_10',
           tabId: 'tab_7',
           anchorBlockId: 'blk_8',
-          anchorText: 'God exists.',
-          legacyAuthorName: 'Tripp ORG',
+          anchorText: 'A plain statement.',
+          legacyAuthorName: 'Bram ORG',
           legacyCreatedAt: new Date('2026-07-26T13:19:54Z'),
           body: 'Double letter',
           placement: { commentId: '1', tab: 0, paragraph: 4 },
@@ -380,7 +382,7 @@ describe('buildImportPlan', () => {
           commentId: 'cmt_12',
           anchorBlockId: 'blk_1',
           anchorText: 'grew',
-          legacyAuthorName: 'Leo',
+          legacyAuthorName: 'Odo',
           body: 'Orphan reply',
           placement: { commentId: '3', paragraph: 1 },
         },

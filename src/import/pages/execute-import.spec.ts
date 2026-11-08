@@ -41,13 +41,13 @@ const processed: ProcessedImage = {
 const processImage = jest.fn(() => Promise.resolve(processed));
 
 const plan: ImportPlan = {
-  slug: 'tripp',
-  displayName: 'Tripp',
+  slug: 'bram',
+  displayName: 'Bram',
   pagesUrl: 'https://www.icloud.com/pages/T',
   visibility: 'public',
   anonymous: true,
   tabs: [
-    { tabId: 'tab_1', title: 'I. God', group: 'Theology', order: 0 },
+    { tabId: 'tab_1', title: 'I. Sample', group: 'Theology', order: 0 },
     { tabId: 'tab_2', title: 'II. Soul', order: 1 },
   ],
   blocks: [
@@ -85,7 +85,7 @@ const plan: ImportPlan = {
       label: 'I.',
       order: 0,
       tabId: 'tab_1',
-      text: 'God',
+      text: 'Sample',
       paragraph: 4,
     },
   ],
@@ -95,7 +95,7 @@ const plan: ImportPlan = {
       tabId: 'tab_1',
       anchorBlockId: 'blk_4',
       anchorText: 'x'.repeat(20_001),
-      legacyAuthorName: 'Tripp ORG',
+      legacyAuthorName: 'Bram ORG',
       legacyCreatedAt: new Date('2026-07-26T13:19:54Z'),
       body: 'Double letter',
       placement: { commentId: '1', tab: 0, paragraph: 4 },
@@ -103,7 +103,7 @@ const plan: ImportPlan = {
     {
       commentId: 'cmt_2',
       parentCommentId: 'cmt_1',
-      legacyAuthorName: 'Emily',
+      legacyAuthorName: 'Wren',
       body: 'I agree',
       placement: { commentId: '2', unplaced: 'not-anchored' },
     },
@@ -172,7 +172,7 @@ describe('executeImport', () => {
     expect(rows.tab4).toEqual({
       profileId,
       tabId: 'tab_1',
-      title: 'I. God',
+      title: 'I. Sample',
       group: 'Theology',
       order: 0,
       reviewStatus: 'imported-review',
@@ -205,7 +205,7 @@ describe('executeImport', () => {
       tabId: 'tab_1',
       anchorBlockId: 'blk_4',
       anchorText: `${'x'.repeat(19_999)}…`,
-      legacyAuthorName: 'Tripp ORG',
+      legacyAuthorName: 'Bram ORG',
       legacyCreatedAt: new Date('2026-07-26T13:19:54Z'),
       body: 'Double letter',
       source: 'migrated',
@@ -214,19 +214,19 @@ describe('executeImport', () => {
       commentId: 'cmt_2',
       profileId,
       parentCommentId: 'cmt_1',
-      legacyAuthorName: 'Emily',
+      legacyAuthorName: 'Wren',
       body: 'I agree',
       source: 'migrated',
     });
     expect(rows.image1).toEqual({
-      profileSlug: 'tripp',
+      profileSlug: 'bram',
       source: 'Data/p.jpeg',
       role: 'picture',
       bytes: 4,
     });
     expect(rows.record3).toEqual({
       profileId,
-      slug: 'tripp',
+      slug: 'bram',
       pagesUrl: 'https://www.icloud.com/pages/T',
       sources: inputs.sources,
       extractedText: 'full text',
@@ -236,8 +236,8 @@ describe('executeImport', () => {
     });
     expect(rows.profile16).toEqual({
       _id: profileId,
-      slug: 'tripp',
-      displayName: 'Tripp',
+      slug: 'bram',
+      displayName: 'Bram',
       imageIds: ['img2', 'img3'],
       visibility: 'public',
       anonymous: true,
@@ -254,27 +254,28 @@ describe('executeImport', () => {
       comments: 2,
       imageIds: ['img2', 'img3'],
       truncatedAnchors: 1,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       written: expect.objectContaining({
         profile: rows.profile16,
         importRecord: rows.record3,
         images: [
           {
             id: 'img1',
-            profileSlug: 'tripp',
+            profileSlug: 'bram',
             source: 'word/media/a.png',
             role: 'inline',
             bytes: 4,
           },
           {
             id: 'img2',
-            profileSlug: 'tripp',
+            profileSlug: 'bram',
             source: 'Data/p.jpeg',
             role: 'picture',
             bytes: 4,
           },
           {
             id: 'img3',
-            profileSlug: 'tripp',
+            profileSlug: 'bram',
             source: 'Data/g.jpeg',
             role: 'gallery',
             bytes: 4,
@@ -305,7 +306,7 @@ describe('executeImport', () => {
 
     await expect(
       executeImport(plan, inputs, store, processImage),
-    ).rejects.toThrow('A profile with the address "tripp" already exists.');
+    ).rejects.toThrow('A profile with the address "bram" already exists.');
     expect(calls).toEqual([]);
   });
 
