@@ -15,6 +15,9 @@ const schema = BlockVersionSchema.clone();
 schema.pre('save', function () {
   throw new PassedGuard();
 });
+schema.pre('aggregate', function () {
+  throw new PassedGuard();
+});
 const connection = mongoose.createConnection();
 const Versions = connection.model('BlockVersionAppendOnlyTest', schema);
 
@@ -101,6 +104,21 @@ describe('blockversions append-only guard', () => {
         { updateOne: { filter: { blockId: 'blk-1' }, update: { text: 'x' } } },
       ]),
     ).rejects.toBeInstanceOf(AppendOnlyViolationError);
+  });
+
+  it.each([
+    ['$merge', [{ $merge: { into: 'blockversions' } }]],
+    ['$out', [{ $match: {} }, { $out: 'blockversions' }]],
+  ])('rejects an aggregation that writes with %s', async (_stage, pipeline) => {
+    await expect(Versions.aggregate(pipeline).exec()).rejects.toBeInstanceOf(
+      AppendOnlyViolationError,
+    );
+  });
+
+  it('lets a read-only aggregation through the guard', async () => {
+    await expect(
+      Versions.aggregate([{ $match: { blockId: 'blk-1' } }]).exec(),
+    ).rejects.toBeInstanceOf(PassedGuard);
   });
 
   it('lets save() of a NEW version through the guard', async () => {

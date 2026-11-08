@@ -31,11 +31,20 @@ export const BLOCKED_QUERY_OPERATIONS = [
  * inserted, never updated or deleted, through Mongoose.
  *
  * Covers query middleware (`updateOne`, `deleteMany`, …), document `save()` on
- * an existing document, document `deleteOne()`, and `bulkWrite`. It cannot
- * stop a caller that bypasses Mongoose (`Model.collection.*` or a database
- * shell); a database role without update/remove rights is the only control for
- * that, and the free Atlas tier has no custom roles. The hash chain is what
- * makes such a bypass detectable.
+ * an existing document, document `deleteOne()`, `bulkWrite`, and `aggregate`
+ * with `$merge` or `$out` on this model.
+ *
+ * These hooks catch mistakes in our own code; they are not a security
+ * boundary. They cannot stop a query run with `{ middleware: false }`,
+ * `Model.collection.*`, a database shell, or an aggregation on ANOTHER model
+ * whose `$merge`/`$out` targets this collection. A database role without
+ * update/remove rights is the only control for those, and the free Atlas tier
+ * has no custom roles.
+ *
+ * The hash chain does not make such a write detectable today: it is unkeyed,
+ * so a writer can recompute the hashes, and the external anchor (plan §6) that
+ * would expose that does not exist yet. It only shows accidental or partial
+ * edits.
  *
  * @param schema - the schema to protect; must be called before the model is compiled
  * @param collection - a readable name used in the error message
@@ -55,5 +64,14 @@ export function makeAppendOnly(schema: Schema, collection: string): void {
 
   schema.pre('bulkWrite', function () {
     throw new AppendOnlyViolationError(collection, 'bulkWrite');
+  });
+
+  schema.pre('aggregate', function () {
+    if (this.pipeline().some((stage) => '$merge' in stage || '$out' in stage)) {
+      throw new AppendOnlyViolationError(
+        collection,
+        'aggregate with $merge or $out',
+      );
+    }
   });
 }
