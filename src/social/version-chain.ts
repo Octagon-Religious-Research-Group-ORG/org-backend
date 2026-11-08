@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { types } from 'node:util';
 
 /** `prevHash` of the first version of every block. */
 export const GENESIS_HASH = '0'.repeat(64);
@@ -64,16 +65,36 @@ export type ChainVerdict =
   | {
       valid: false;
       seq: number;
-      reason: 'sequence-gap' | 'wrong-block' | 'broken-link' | 'hash-mismatch';
+      reason:
+        | 'sequence-gap'
+        | 'wrong-block'
+        | 'broken-link'
+        | 'hash-mismatch'
+        | 'invalid-field'
+        // From verifyBlock, which also compares the chain with its block row:
+        | 'no-versions'
+        | 'missing-block'
+        | 'truncated'
+        | 'pointer-behind';
     };
+
+/** A real, valid Date; a raw write can leave a string or nothing here. */
+function isValidDate(value: unknown): value is Date {
+  return types.isDate(value) && !Number.isNaN(value.getTime());
+}
 
 /**
  * Checks one block's version history end to end.
  *
  * Detects an edited version (its hash no longer matches), a removed or
- * inserted version (sequence gap or broken `prevHash` link) and a version
- * moved from another block. Removing only the NEWEST version leaves a valid
- * shorter chain; the daily anchor (plan §6) is what detects that.
+ * inserted version (sequence gap or broken `prevHash` link), a version moved
+ * from another block, and a row whose types were tampered with. Removing only
+ * the NEWEST version leaves a valid shorter chain; `verifyBlock` catches that
+ * by comparing the head with the block's `currentVersionSeq`.
+ *
+ * The hash is unkeyed and no external anchor exists yet (plan §6), so this
+ * finds accidents and partial edits only: someone able to write the database
+ * can recompute every hash and the pointer, and nothing here would notice.
  *
  * @param blockId - the block the versions must belong to
  * @param versions - every stored version of the block, in any order
@@ -98,6 +119,9 @@ export function verifyChain(
     }
     if (version.prevHash !== prevHash) {
       return { valid: false, seq: version.seq, reason: 'broken-link' };
+    }
+    if (!isValidDate(version.createdAt)) {
+      return { valid: false, seq: version.seq, reason: 'invalid-field' };
     }
     if (computeVersionHash(version) !== version.hash) {
       return { valid: false, seq: version.seq, reason: 'hash-mismatch' };

@@ -44,6 +44,7 @@ function setup(heads: Array<{ seq: number; hash: string } | null>) {
     versionModel.findOne.mockReturnValueOnce(query(head));
   const blockModel = {
     updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) })),
+    findOne: jest.fn(),
   };
   const service = new BlockVersionsService(
     versionModel as never,
@@ -145,25 +146,89 @@ describe('BlockVersionsService.appendVersion', () => {
 });
 
 describe('BlockVersionsService.verifyBlock', () => {
-  it('verifies the stored chain', async () => {
-    const fields = {
-      blockId: 'blk-1',
-      seq: 1,
-      text: 't',
-      authorUserId: 'user_a',
-      createdAt: new Date('2026-10-11T05:00:00.000Z'),
-      prevHash: GENESIS_HASH,
-    };
-    const stored = [{ ...fields, hash: computeVersionHash(fields) }];
-    const { service, versionModel } = setup([]);
-    versionModel.find.mockReturnValueOnce(query(stored));
+  function stored(count: number) {
+    let prevHash = GENESIS_HASH;
+    return Array.from({ length: count }, (_, index) => {
+      const fields = {
+        blockId: 'blk-1',
+        seq: index + 1,
+        text: 't',
+        authorUserId: 'user_a',
+        createdAt: new Date('2026-10-11T05:00:00.000Z'),
+        prevHash,
+      };
+      const version = { ...fields, hash: computeVersionHash(fields) };
+      prevHash = version.hash;
+      return version;
+    });
+  }
 
-    await expect(service.verifyBlock('blk-1')).resolves.toEqual({
+  function verify(
+    versions: ReturnType<typeof stored>,
+    block: { currentVersionSeq: number } | null,
+  ) {
+    const { service, versionModel, blockModel } = setup([]);
+    versionModel.find.mockReturnValueOnce(query(versions));
+    blockModel.findOne.mockReturnValueOnce(query(block));
+    return { result: service.verifyBlock('blk-1'), versionModel, blockModel };
+  }
+
+  it('verifies the stored chain when the head matches the block', async () => {
+    const versions = stored(2);
+    const { result, versionModel, blockModel } = verify(versions, {
+      currentVersionSeq: 2,
+    });
+    await expect(result).resolves.toEqual({
       valid: true,
-      length: 1,
-      headHash: stored[0].hash,
+      length: 2,
+      headHash: versions[1].hash,
     });
     expect(versionModel.find).toHaveBeenCalledWith({ blockId: 'blk-1' });
+    expect(blockModel.findOne).toHaveBeenCalledWith({ blockId: 'blk-1' });
+  });
+
+  it('reads the block before the versions', async () => {
+    const { result, versionModel, blockModel } = verify(stored(1), {
+      currentVersionSeq: 1,
+    });
+    await result;
+    expect(blockModel.findOne.mock.invocationCallOrder[0]).toBeLessThan(
+      versionModel.find.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('catches a removed newest version', async () => {
+    await expect(
+      verify(stored(2), { currentVersionSeq: 3 }).result,
+    ).resolves.toEqual({ valid: false, seq: 3, reason: 'truncated' });
+  });
+
+  it('fails a block with no versions', async () => {
+    await expect(
+      verify([], { currentVersionSeq: 3 }).result,
+    ).resolves.toEqual({ valid: false, seq: 0, reason: 'no-versions' });
+  });
+
+  it('names versions whose block row is gone', async () => {
+    await expect(verify(stored(1), null).result).resolves.toEqual({
+      valid: false,
+      seq: 1,
+      reason: 'missing-block',
+    });
+  });
+
+  it('names a pointer that lags behind the chain', async () => {
+    await expect(
+      verify(stored(2), { currentVersionSeq: 1 }).result,
+    ).resolves.toEqual({ valid: false, seq: 2, reason: 'pointer-behind' });
+  });
+
+  it('returns the chain failure first', async () => {
+    const versions = stored(2);
+    versions[0] = { ...versions[0], text: 'edited' };
+    await expect(
+      verify(versions, { currentVersionSeq: 2 }).result,
+    ).resolves.toEqual({ valid: false, seq: 1, reason: 'hash-mismatch' });
   });
 });
 

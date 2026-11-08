@@ -149,3 +149,34 @@ describe('verifyChain', () => {
     });
   });
 });
+
+describe('verifyChain on a row whose types were tampered with', () => {
+  it.each([
+    ['a string', '2026-10-11T05:00:00.000Z'],
+    ['missing', undefined],
+    ['an invalid date', new Date('not a date')],
+    ['a number', 1760158800000],
+  ])('names the row when createdAt is %s', (_label, createdAt) => {
+    const chain = buildChain(['one', 'two']);
+    const tampered = [
+      chain[0],
+      { ...chain[1], createdAt } as unknown as StoredVersion,
+    ];
+    expect(verifyChain(BLOCK, tampered)).toEqual({
+      valid: false,
+      seq: 2,
+      reason: 'invalid-field',
+    });
+  });
+
+  it('does not crash on a missing or string sequence number', () => {
+    const chain = buildChain(['one']);
+    for (const seq of [undefined, '1']) {
+      const tampered = [{ ...chain[0], seq } as unknown as StoredVersion];
+      expect(verifyChain(BLOCK, tampered)).toMatchObject({
+        valid: false,
+        reason: 'sequence-gap',
+      });
+    }
+  });
+});

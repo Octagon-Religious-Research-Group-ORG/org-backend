@@ -123,15 +123,46 @@ export class BlockVersionsService {
   }
 
   /**
-   * Recomputes a block's whole hash chain from the stored versions.
+   * Recomputes a block's whole hash chain and compares its head with the
+   * block's `currentVersionSeq`, which is what catches removed newest versions.
    * Read-only; see {@link verifyChain} for what it can and cannot detect.
+   *
+   * The block is read before the versions on purpose: a save landing between
+   * the two reads can then only look like `pointer-behind`, never `truncated`.
+   *
+   * @returns a failure for a block with no versions, since every block is
+   *   written with its first version.
    */
   async verifyBlock(blockId: string): Promise<ChainVerdict> {
+    const block = await this.blockModel
+      .findOne({ blockId })
+      .select({ currentVersionSeq: 1 })
+      .lean()
+      .exec();
     const versions = await this.versionModel
       .find({ blockId })
       .sort({ seq: 1 })
       .lean()
       .exec();
-    return verifyChain(blockId, versions);
+
+    const verdict = verifyChain(blockId, versions);
+    if (!verdict.valid) return verdict;
+    if (verdict.length === 0) {
+      return { valid: false, seq: 0, reason: 'no-versions' };
+    }
+    if (!block) {
+      return { valid: false, seq: verdict.length, reason: 'missing-block' };
+    }
+    if (block.currentVersionSeq > verdict.length) {
+      return {
+        valid: false,
+        seq: block.currentVersionSeq,
+        reason: 'truncated',
+      };
+    }
+    if (block.currentVersionSeq !== verdict.length) {
+      return { valid: false, seq: verdict.length, reason: 'pointer-behind' };
+    }
+    return verdict;
   }
 }
