@@ -79,11 +79,12 @@ describe('CartsService', () => {
       { guestTokenHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     ],
   ])(
-    'gets or creates the current %s cart',
+    'reads the current %s cart without writing',
     async (_name, ownerRequest, owner) => {
       const current = cart();
       const model = {
-        findOneAndUpdate: jest.fn<unknown, any[]>(() => query(current)),
+        findOne: jest.fn<unknown, any[]>(() => query(current)),
+        findOneAndUpdate: jest.fn(),
       };
       const service = new CartsService(model as never, products() as never);
 
@@ -91,16 +92,31 @@ describe('CartsService', () => {
         id: 'cart-1',
       });
 
-      expect(model.findOneAndUpdate.mock.calls[0][0]).toEqual(owner);
-      const insert = model.findOneAndUpdate.mock.calls[0][1].$setOnInsert;
-      expect(insert).toMatchObject({ ...owner, items: [] });
-      if ('guestTokenHash' in owner) {
-        expect(insert.expiresAt).toBeInstanceOf(Date);
-      } else {
-        expect(insert).not.toHaveProperty('expiresAt');
-      }
+      expect(model.findOne.mock.calls[0][0]).toEqual(owner);
+      expect(model.findOneAndUpdate).not.toHaveBeenCalled();
     },
   );
+
+  it('answers an unknown token with an empty cart and writes nothing', async () => {
+    const model = {
+      findOne: jest.fn<unknown, any[]>(() => query(null)),
+      findOneAndUpdate: jest.fn(),
+      create: jest.fn(),
+    };
+    const service = new CartsService(model as never, products() as never);
+
+    await expect(
+      service.getCurrent(request({ guestToken: 'made-up' })),
+    ).resolves.toEqual({
+      id: '',
+      items: [],
+      suggestedItemsCents: 0,
+      suggestedShippingCents: 0,
+      suggestedTotalCents: 0,
+    });
+    expect(model.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(model.create).not.toHaveBeenCalled();
+  });
 
   it('requires a guest token or authenticated subject', async () => {
     const service = new CartsService({} as never, products() as never);

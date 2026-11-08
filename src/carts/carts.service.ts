@@ -13,6 +13,15 @@ import { SetCartItemDto } from './carts.dto';
 
 const GUEST_CART_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** What the shop shows before a cart row exists; it has no id yet. */
+const EMPTY_CART = {
+  id: '',
+  items: [],
+  suggestedItemsCents: 0,
+  suggestedShippingCents: 0,
+  suggestedTotalCents: 0,
+};
+
 @Injectable()
 export class CartsService {
   constructor(
@@ -53,30 +62,16 @@ export class CartsService {
     };
   }
 
+  /**
+   * The visitor's cart, or an empty one when none exists. A read never writes:
+   * the row is created by the first item added, so a made-up token sent here
+   * can't fill the collection.
+   */
   async getCurrent(request: AuthenticatedRequest) {
-    const owner = this.requestOwner(request);
     const cart = await this.cartModel
-      .findOneAndUpdate(
-        owner,
-        {
-          $setOnInsert: {
-            ...owner,
-            items: [],
-            ...('guestTokenHash' in owner
-              ? {
-                  expiresAt: new Date(Date.now() + GUEST_CART_LIFETIME_MS),
-                }
-              : {}),
-          },
-        },
-        {
-          upsert: true,
-          returnDocument: 'after',
-          setDefaultsOnInsert: true,
-        },
-      )
+      .findOne(this.requestOwner(request))
       .exec();
-    return this.toResponse(cart);
+    return cart ? this.toResponse(cart) : EMPTY_CART;
   }
 
   async getUserDocument(ownerSub: string) {
