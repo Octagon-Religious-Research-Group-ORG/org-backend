@@ -158,6 +158,40 @@ describe('buildProfileReport accepted warnings', () => {
     expect(accepted.reasons).toEqual([]);
   });
 
+  it('keeps blocking a second author when only the first is accepted', () => {
+    const other = 'Comment author "C" is not in the .pages author table.';
+    const report = buildProfileReport(
+      'a',
+      docx(),
+      check(),
+      plan,
+      authorsMismatch(['B', 'C']),
+      true,
+      { acceptedWarnings: [authorWarning] },
+    );
+    expect(report.status).toBe('mismatch');
+    expect(report.reasons).toEqual(['.pages cross-check found differences']);
+    expect(report.acceptableWarnings).toEqual([authorWarning, other]);
+  });
+
+  it('never accepts a duplicate comment id, and does not offer to', () => {
+    const duplicate = 'Comment 1 appears more than once in comments.xml.';
+    const report = buildProfileReport(
+      'a',
+      docx([duplicate]),
+      check(),
+      plan,
+      cross('ok'),
+      true,
+      { binding, acceptedWarnings: [duplicate] },
+    );
+    expect(report.status).toBe('mismatch');
+    expect(report.reasons).toEqual([
+      '1 duplicate comment id(s): two comments cannot be stored under one id, so a review cannot accept this; correct the export.',
+    ]);
+    expect(report.acceptableWarnings).toEqual([]);
+  });
+
   it('never accepts a comment missing from the .pages', () => {
     const missing: CrossCheck = {
       ...authorsMismatch(['B']),

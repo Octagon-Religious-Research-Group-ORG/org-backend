@@ -75,6 +75,16 @@ interface FieldState {
 
 const HYPERLINK_INSTR = /^\s*HYPERLINK\s+(?:\\l\s+)?"([^"]*)"/;
 
+const DUPLICATE_COMMENT = 'appears more than once in comments.xml.';
+
+/**
+ * Two comments with one id cannot both be written (the id is unique in the
+ * database), so unlike other warnings a reviewer cannot accept this one.
+ */
+export function isDuplicateCommentWarning(warning: string): boolean {
+  return warning.endsWith(DUPLICATE_COMMENT);
+}
+
 /** The paragraph a warning is about, or undefined for a whole-document one. */
 export function warningParagraph(warning: string): number | undefined {
   const match = /^Paragraph (\d+):/.exec(warning);
@@ -501,7 +511,7 @@ function readComments(
     : []) {
     const id = attr(element, 'w:id') ?? '';
     if (seenIds.has(id)) {
-      warnings.push(`Comment ${id} appears more than once in comments.xml.`);
+      warnings.push(`Comment ${id} ${DUPLICATE_COMMENT}`);
     }
     seenIds.add(id);
     const date = attr(element, 'w:date');

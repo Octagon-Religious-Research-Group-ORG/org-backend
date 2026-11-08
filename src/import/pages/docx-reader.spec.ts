@@ -1,7 +1,12 @@
 import { strToU8, zipSync } from 'fflate';
 import { buildDocx, numbered, p } from './docx-fixture';
 import { formatNumber } from './docx-numbering';
-import { legacyDate, readDocx, warningParagraph } from './docx-reader';
+import {
+  isDuplicateCommentWarning,
+  legacyDate,
+  readDocx,
+  warningParagraph,
+} from './docx-reader';
 
 const STYLES =
   '<w:style w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>' +
@@ -434,6 +439,8 @@ describe('readDocx', () => {
       expect(doc.warnings).toEqual([
         'Comment 1 appears more than once in comments.xml.',
       ]);
+      expect(isDuplicateCommentWarning(doc.warnings[0])).toBe(true);
+      expect(isDuplicateCommentWarning('Comment 1: other')).toBe(false);
     });
 
     it('places a highlight on the paragraphs whose text it covers', () => {

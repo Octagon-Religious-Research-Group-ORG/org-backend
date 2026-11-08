@@ -1,4 +1,8 @@
-import { type DocxDocument, warningParagraph } from './docx-reader';
+import {
+  type DocxDocument,
+  isDuplicateCommentWarning,
+  warningParagraph,
+} from './docx-reader';
 import type { ImportPlan } from './import-plan';
 import type { CheckStatus, CrossCheck } from './pages-reader';
 import {
@@ -117,9 +121,16 @@ export function buildProfileReport(
   const warningsInLegal = docx.warnings.filter((warning) =>
     legal.has(warningParagraph(warning) ?? -1),
   );
-  const warnings = docx.warnings.filter(
+  const located = docx.warnings.filter(
     (warning) => !warningsInLegal.includes(warning),
   );
+  const duplicates = located.filter(isDuplicateCommentWarning);
+  if (duplicates.length > 0) {
+    reasons.push(
+      `${duplicates.length} duplicate comment id(s): two comments cannot be stored under one id, so a review cannot accept this; correct the export.`,
+    );
+  }
+  const warnings = located.filter((w) => !isDuplicateCommentWarning(w));
   const accepted = new Set(reviewed ? (options.acceptedWarnings ?? []) : []);
   const pendingWarnings = warnings.filter((w) => !accepted.has(w));
   if (pendingWarnings.length > 0) {
