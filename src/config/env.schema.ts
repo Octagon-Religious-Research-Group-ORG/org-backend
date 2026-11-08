@@ -1,5 +1,36 @@
 import * as Joi from 'joi';
+import { IMPORT_TEST_DATABASES } from '../import/import-guard';
 import { SITE_ENVS } from './site-env';
+
+/** The database a MongoDB connection string names, or undefined. */
+function databaseOf(uri: string): string | undefined {
+  return /^mongodb(?:\+srv)?:\/\/[^/?]+\/([^/?]+)/.exec(uri)?.[1];
+}
+
+/**
+ * Refuses to start on a known test database unless SITE_ENV says test.
+ *
+ * SITE_ENV fails open: removing it from the test server would quietly restore
+ * real payment links. The database name is the one signal a backend has, and
+ * production is unaffected because its database is not on the exact list. The
+ * message never repeats the connection string.
+ */
+const requireTestSiteOnTestDatabase: Joi.CustomValidator<{
+  MONGODB_URI: string;
+  SITE_ENV: string;
+}> = (env, helpers) => {
+  const database = databaseOf(env.MONGODB_URI);
+  if (
+    database !== undefined &&
+    IMPORT_TEST_DATABASES.includes(database) &&
+    env.SITE_ENV !== 'test'
+  ) {
+    return helpers.message({
+      custom: `Database "${database}" is a test database: set SITE_ENV=test.`,
+    });
+  }
+  return env;
+};
 
 /**
  * Environment the app starts with. Its own module so the safety defaults can
@@ -27,4 +58,4 @@ export const envValidationSchema = Joi.object({
   RESEND_API_KEY: Joi.string().allow('').optional(),
   ORDER_FROM_EMAIL: Joi.string().email().allow('').optional(),
   ORDER_NOTIFICATION_EMAIL: Joi.string().email().allow('').optional(),
-});
+}).custom(requireTestSiteOnTestDatabase);

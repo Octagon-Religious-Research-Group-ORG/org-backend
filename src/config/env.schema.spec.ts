@@ -16,6 +16,36 @@ function validate(env: Record<string, string>) {
   };
 }
 
+describe('a known test database', () => {
+  const TEST_URI = 'mongodb+srv://user:pw@cluster.example/org-testing?w=majority';
+
+  it.each([
+    ['missing', {}],
+    ['production', { SITE_ENV: 'production' }],
+  ])('refuses to start when SITE_ENV is %s', (_case, env) => {
+    const { error } = validate({ ...required, MONGODB_URI: TEST_URI, ...env });
+    expect(error?.message).toContain('set SITE_ENV=test');
+    expect(error?.message).not.toContain('pw@');
+  });
+
+  it('starts when SITE_ENV is test', () => {
+    expect(
+      validate({ ...required, MONGODB_URI: TEST_URI, SITE_ENV: 'test' }).error,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['production database', 'mongodb+srv://u:p@cluster.example/test?w=1'],
+    ['no database named', 'mongodb+srv://u:p@cluster.example/?w=1'],
+    ['bare host', 'mongodb://localhost'],
+    ['a longer name', 'mongodb://localhost/org-testing-old'],
+  ])('leaves production behaviour alone: %s', (_case, MONGODB_URI) => {
+    const { error, value } = validate({ ...required, MONGODB_URI });
+    expect(error).toBeUndefined();
+    expect(value.SITE_ENV).toBe('production');
+  });
+});
+
 describe('environment safety defaults', () => {
   it('treats an unset site as production, so nothing test-only can show', () => {
     expect(validate(required).value.SITE_ENV).toBe('production');
