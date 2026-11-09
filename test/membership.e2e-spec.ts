@@ -87,6 +87,16 @@ describe('Membership API (e2e)', () => {
     );
   });
 
+  it.each([
+    '/api/v1/me/membership',
+    '/api/v1/membership/slug-availability?slug=quiet-fern',
+  ])('stores no signed-in answer from %s in any cache', async (path) => {
+    const { headers } = await request(app.getHttpServer())
+      .get(path)
+      .expect(200);
+    expect(headers['cache-control']).toBe('private, no-store');
+  });
+
   it('accepts a complete membership for the signed-in member', async () => {
     await request(app.getHttpServer())
       .post('/api/v1/me/membership')

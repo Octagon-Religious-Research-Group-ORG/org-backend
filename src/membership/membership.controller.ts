@@ -7,6 +7,7 @@ import {
   Query,
   Req,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
@@ -14,6 +15,7 @@ import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { SLUG_CHECK_THROTTLE, WriteThrottle } from '../config/throttle';
+import { NoStoreWhenSignedInInterceptor } from '../members/no-store.interceptor';
 import { AccountThrottleGuard } from './account-throttle.guard';
 import { JoinMembershipDto } from './membership.dto';
 import { MembershipService, type RequestOrigin } from './membership.service';
@@ -43,6 +45,7 @@ export class MembershipController {
    */
   @Get('slug-availability')
   @UseGuards(ClerkAuthGuard, AccountThrottleGuard)
+  @UseInterceptors(NoStoreWhenSignedInInterceptor)
   @Throttle({ default: SLUG_CHECK_THROTTLE })
   slugAvailability(
     @Req() request: AuthenticatedRequest,
@@ -65,6 +68,7 @@ export class MembershipController {
 /** Signed-in members: their membership status, and joining. */
 @Controller('me/membership')
 @UseGuards(ClerkAuthGuard)
+@UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyMembershipController {
   constructor(private readonly membership: MembershipService) {}
 
