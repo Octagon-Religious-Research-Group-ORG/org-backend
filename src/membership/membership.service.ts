@@ -110,7 +110,7 @@ function isDuplicateKey(error: unknown): boolean {
  * Nest logs any error that is not an HttpException, so these never leave the
  * service as they are: what a member wrote must not reach a 500 or a log.
  */
-function withoutMemberText(error: unknown): unknown {
+export function withoutMemberText(error: unknown): unknown {
   if (
     error instanceof MongooseError.ValidationError ||
     error instanceof MongooseError.CastError

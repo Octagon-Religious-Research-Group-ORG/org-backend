@@ -147,7 +147,16 @@
       "membership/reserved-slugs.ts",
       "membership/member-text.ts",
       "membership/utf16-length.ts",
-      "membership/account-throttle.guard.ts"
+      "membership/account-throttle.guard.ts",
+      "members/profile-access.ts",
+      "members/profile-serializers.ts",
+      "members/members.service.ts",
+      "members/my-member-page.service.ts",
+      "members/org-settings.service.ts",
+      "members/picture-processing.ts",
+      "members/picture-store.service.ts",
+      "members/member-write-throttle.guard.ts",
+      "members/members.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

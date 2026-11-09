@@ -17,6 +17,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { configureDnsServers } from './config/dns';
 import { ContentModule } from './content/content.module';
 import { MembershipModule } from './membership/membership.module';
+import { MembersModule } from './members/members.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { MembershipModule } from './membership/membership.module';
     ContentModule,
     SocialModule,
     MembershipModule,
+    MembersModule,
     DbModule,
   ],
   controllers: [AppController],

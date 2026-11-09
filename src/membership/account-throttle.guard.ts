@@ -32,10 +32,22 @@ export class AccountThrottleGuard implements CanActivate {
   private readonly checks = new Map<string, number[]>();
   private lastSweep = Date.now();
 
+  /** Which ration this guard enforces, and how a refusal is worded. */
+  protected readonly ration: {
+    ttl: number;
+    limit: number;
+    code: string;
+    message: string;
+  } = {
+    ...SLUG_CHECK_ACCOUNT_THROTTLE,
+    code: SLUG_CHECK_DAILY_LIMIT_CODE,
+    message: "You've used today's address checks for this account.",
+  };
+
   canActivate(context: ExecutionContext): boolean {
     const http = context.switchToHttp();
     const account = getUserSub(http.getRequest<AuthenticatedRequest>());
-    const { ttl, limit } = SLUG_CHECK_ACCOUNT_THROTTLE;
+    const { ttl, limit, code, message } = this.ration;
     const now = Date.now();
     this.sweep(now, ttl);
 
@@ -54,8 +66,8 @@ export class AccountThrottleGuard implements CanActivate {
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
-          code: SLUG_CHECK_DAILY_LIMIT_CODE,
-          message: "You've used today's address checks for this account.",
+          code,
+          message,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
