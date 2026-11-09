@@ -270,11 +270,15 @@ describe('replacePicture', () => {
   });
 
   it('copes with a row that has no picture list', async () => {
-    const { service, order } = setup({
+    const { service, order, profileModel } = setup({
       page: { _id: profileId, slug: 'quiet-fern' },
     });
     await service.replacePicture('u1', Buffer.from('x'));
     expect(order).toEqual(['store', 'update']);
+    expect(profileModel.updateOne).toHaveBeenCalledWith(
+      { ...OWNED, imageIds: { $exists: false } },
+      { $set: { imageIds: ['new-id'] } },
+    );
   });
 
   it('removes its own new file and leaves the old one when it loses a race', async () => {

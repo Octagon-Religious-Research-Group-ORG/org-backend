@@ -168,7 +168,11 @@ export class MyMemberPageService {
     const newId = await this.pictures.store(image, page.slug);
     const saved = await this.profileModel
       .updateOne(
-        { ...this.ownedFilter(userId), imageIds: previous },
+        // A row older than the list has no field to match an empty array.
+        {
+          ...this.ownedFilter(userId),
+          imageIds: page.imageIds ?? { $exists: false },
+        },
         { $set: { imageIds: [newId, ...(replaces ? rest : previous)] } },
       )
       .exec();
