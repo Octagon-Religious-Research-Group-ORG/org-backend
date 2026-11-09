@@ -166,16 +166,13 @@ export class AdminAccessService {
     }
     const lookup = {
       startedAt: Date.now(),
-      answer: this.lookUpAdminForRead(authProviderId, tokenHash),
+      answer: this.lookUpAdminForRead(authProviderId),
     };
     this.shareReadLookup(tokenHash, lookup);
     return lookup.answer;
   }
 
-  private async lookUpAdminForRead(
-    authProviderId: string,
-    tokenHash?: string,
-  ): Promise<boolean> {
+  private async lookUpAdminForRead(authProviderId: string): Promise<boolean> {
     const identity = await this.clerkUserInfo.getIdentity(authProviderId);
     const isAdmin = this.decideAdmin(
       authProviderId,
@@ -183,7 +180,6 @@ export class AdminAccessService {
       identity.emailVerified === true,
       identity.email?.trim().toLowerCase(),
     );
-    if (tokenHash) this.rememberReadAnswer(tokenHash, isAdmin);
     return isAdmin;
   }
 
@@ -197,13 +193,19 @@ export class AdminAccessService {
       this.readLookups.delete(oldest);
     }
     this.readLookups.set(tokenHash, lookup);
-    const forget = () => {
-      // Only its own entry: a newer lookup may have replaced a hung one.
-      if (this.readLookups.get(tokenHash) === lookup) {
+    // Only while it is still the current lookup: one that hung and was replaced
+    // must neither remove its successor nor overwrite a newer answer.
+    const isCurrent = () => this.readLookups.get(tokenHash) === lookup;
+    lookup.answer.then(
+      (isAdmin) => {
+        if (!isCurrent()) return;
         this.readLookups.delete(tokenHash);
-      }
-    };
-    lookup.answer.then(forget, forget);
+        this.rememberReadAnswer(tokenHash, isAdmin);
+      },
+      () => {
+        if (isCurrent()) this.readLookups.delete(tokenHash);
+      },
+    );
   }
 
   private rememberReadAnswer(tokenHash: string, isAdmin: boolean) {

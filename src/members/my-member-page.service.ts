@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
@@ -48,8 +49,23 @@ export const MAX_TABS_PER_PAGE = 300;
  * far longer than an add takes.
  */
 export const TAB_PLACE_SETTLE_MS = 10 * 60_000;
+/**
+ * An add still running after this stops before showing anything, so it is over
+ * long before a recount could stop counting its place.
+ */
+export const TAB_ADD_MAX_MS = 5 * 60_000;
 
 const NO_PAGE = "You don't have a member page yet.";
+const TOO_MANY_TABS = `A page can have at most ${MAX_TABS_PER_PAGE} belief tabs.`;
+const TRY_AGAIN_SOON =
+  'Your page is still being updated. Please try again in a few minutes.';
+const ADD_TOO_SLOW = 'Adding this belief took too long. Please try again.';
+
+interface TabPlace {
+  order: number;
+  /** The page's repair count when this place was taken. */
+  repairs?: number;
+}
 
 interface OwnedPageRow {
   _id: Types.ObjectId;
@@ -141,11 +157,18 @@ export class MyMemberPageService {
     }
 
     const profileId = page._id;
-    const order = await this.takeTabPlace(userId, page);
+    const place = await this.takeTabPlace(userId, page);
+    const placeTakenAt = Date.now();
+    const stopIfTooSlow = () => {
+      if (Date.now() - placeTakenAt > TAB_ADD_MAX_MS) {
+        throw new ServiceUnavailableException(ADD_TOO_SLOW);
+      }
+    };
     const tabId = `tab_${randomUUID()}`;
 
     try {
       for (const [index, text] of paragraphs.entries()) {
+        stopIfTooSlow();
         const blockId = `blk_${randomUUID()}`;
         await this.blockModel.create({
           profileId,
@@ -161,15 +184,16 @@ export class MyMemberPageService {
           authorUserId: userId,
         });
       }
+      stopIfTooSlow();
       await this.tabModel.create({
         profileId,
         tabId,
         title,
-        order,
+        order: place.order,
         reviewStatus: 'confirmed',
       });
     } catch (error) {
-      await this.releaseTabPlace(userId);
+      await this.releaseTabPlace(userId, place);
       throw withoutMemberText(error);
     }
     return { tabId, title };
@@ -179,27 +203,24 @@ export class MyMemberPageService {
    * Takes one place on the page and the next order in a single atomic update,
    * so concurrent adds can neither share an order nor pass the cap.
    *
-   * @returns the new tab's order
-   * @throws ConflictException when the page is full
+   * @returns the new tab's order, and the repair count it was taken under
+   * @throws ConflictException when the page is full, or being updated
    */
   private async takeTabPlace(userId: string, page: OwnedPageRow) {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }
-    let order = await this.claimTabPlace(userId);
-    if (order === undefined && (await this.repairTabCount(userId, page._id))) {
-      order = await this.claimTabPlace(userId);
-    }
-    if (order === undefined) {
-      throw new ConflictException(
-        `A page can have at most ${MAX_TABS_PER_PAGE} belief tabs.`,
-      );
-    }
-    return order;
+    let place = await this.claimTabPlace(userId);
+    if (place) return place;
+    const room = await this.repairTabCount(userId, page._id);
+    if (room === 'settling') throw new ConflictException(TRY_AGAIN_SOON);
+    if (room === 'room') place = await this.claimTabPlace(userId);
+    if (!place) throw new ConflictException(TOO_MANY_TABS);
+    return place;
   }
 
-  /** @returns the new tab's order, or undefined when the counter is at the cap */
-  private async claimTabPlace(userId: string) {
+  /** @returns the place taken, or undefined when the counter is at the cap */
+  private async claimTabPlace(userId: string): Promise<TabPlace | undefined> {
     const taken = await this.profileModel
       .findOneAndUpdate(
         {
@@ -212,10 +233,11 @@ export class MyMemberPageService {
         },
         { returnDocument: 'before' },
       )
-      .select({ nextTabOrder: 1 })
+      .select({ nextTabOrder: 1, tabCountRepairs: 1 })
       .lean()
       .exec();
-    return taken?.nextTabOrder;
+    if (taken?.nextTabOrder === undefined) return undefined;
+    return { order: taken.nextTabOrder, repairs: taken.tabCountRepairs };
   }
 
   /**
@@ -224,7 +246,8 @@ export class MyMemberPageService {
    * The write is conditional on the values read: any add in between makes it
    * do nothing, so a concurrent add can never be overwritten.
    *
-   * @returns true when the real tabs leave room on the page
+   * @returns whether the real tabs leave room; 'settling' when they do but an
+   *   add may still be running, so the counter cannot be corrected yet
    */
   private async repairTabCount(userId: string, profileId: Types.ObjectId) {
     const owned = { ...this.ownedFilter(userId), _id: profileId };
@@ -233,19 +256,19 @@ export class MyMemberPageService {
       .select({ liveTabCount: 1, lastTabPlaceAt: 1 })
       .lean()
       .exec();
-    if (seen?.liveTabCount === undefined) return false;
+    if (seen?.liveTabCount === undefined) return 'full';
     // Another add repaired it first; the atomic claim decides from here.
-    if (seen.liveTabCount < MAX_TABS_PER_PAGE) return true;
+    if (seen.liveTabCount < MAX_TABS_PER_PAGE) return 'room';
+    const liveTabs = await this.tabModel
+      .countDocuments({ profileId, removedAt: { $exists: false } })
+      .exec();
     const placeTakenAt = seen.lastTabPlaceAt?.getTime();
     if (
       placeTakenAt !== undefined &&
       Date.now() - placeTakenAt < TAB_PLACE_SETTLE_MS
     ) {
-      return false;
+      return liveTabs < MAX_TABS_PER_PAGE ? 'settling' : 'full';
     }
-    const liveTabs = await this.tabModel
-      .countDocuments({ profileId, removedAt: { $exists: false } })
-      .exec();
     if (liveTabs !== seen.liveTabCount) {
       await this.profileModel
         .updateOne(
@@ -254,14 +277,14 @@ export class MyMemberPageService {
             liveTabCount: seen.liveTabCount,
             lastTabPlaceAt: seen.lastTabPlaceAt ?? { $exists: false },
           },
-          { $set: { liveTabCount: liveTabs } },
+          { $set: { liveTabCount: liveTabs }, $inc: { tabCountRepairs: 1 } },
         )
         .exec();
       this.logger.warn(
         `Repaired a tab count on page ${profileId.toString()}: ${seen.liveTabCount} to ${liveTabs}`,
       );
     }
-    return liveTabs < MAX_TABS_PER_PAGE;
+    return liveTabs < MAX_TABS_PER_PAGE ? 'room' : 'full';
   }
 
   /**
@@ -293,11 +316,21 @@ export class MyMemberPageService {
       .exec();
   }
 
-  /** A failed add gives its place back. Its order number is not reused. */
-  private async releaseTabPlace(userId: string) {
+  /**
+   * A failed add gives its place back. Its order number is not reused. If the
+   * count was repaired since this place was taken, the repair already left it
+   * out, and taking it off again would let the page pass the cap.
+   */
+  private async releaseTabPlace(userId: string, place: TabPlace) {
     try {
       await this.profileModel
-        .updateOne(this.ownedFilter(userId), { $inc: { liveTabCount: -1 } })
+        .updateOne(
+          {
+            ...this.ownedFilter(userId),
+            tabCountRepairs: place.repairs ?? { $exists: false },
+          },
+          { $inc: { liveTabCount: -1 } },
+        )
         .exec();
     } catch (error) {
       this.logger.warn(

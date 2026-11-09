@@ -4,6 +4,7 @@ import {
   ConflictException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Error as MongooseError, Types } from 'mongoose';
 import { MAX_TAB_TITLE_LENGTH } from '../social/schemas/belief-tab.schema';
@@ -12,6 +13,7 @@ import {
   MAX_NEW_TAB_PARAGRAPHS,
   MAX_TABS_PER_PAGE,
   MyMemberPageService,
+  TAB_ADD_MAX_MS,
   TAB_PLACE_SETTLE_MS,
 } from './my-member-page.service';
 import { preparePicture } from './picture-processing';
@@ -314,7 +316,7 @@ describe('addBeliefTab', () => {
           liveTabCount: MAX_TABS_PER_PAGE,
           lastTabPlaceAt: LONG_AGO,
         }),
-        { $set: { liveTabCount: 5 } },
+        { $set: { liveTabCount: 5 }, $inc: { tabCountRepairs: 1 } },
       );
       expect(ctx.tabModel.create).toHaveBeenCalledTimes(1);
     });
@@ -341,8 +343,32 @@ describe('addBeliefTab', () => {
       await expect(
         ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
       ).rejects.toBeInstanceOf(ConflictException);
-      expect(ctx.tabModel.countDocuments).not.toHaveBeenCalled();
       expect(ctx.profileModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('says to try again when the real tabs are under the cap', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage({ lastTabPlaceAt: new Date() }),
+        liveTabs: 299,
+      });
+      const error = await ctx.service
+        .addBeliefTab('u1', { title: 'T', text: 'x' })
+        .catch((e: unknown) => e as ConflictException);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).message).toMatch(/few minutes/);
+      expect((error as ConflictException).message).not.toMatch(/at most/);
+    });
+
+    it('states the limit when the real tabs have reached it', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage({ lastTabPlaceAt: new Date() }),
+        liveTabs: MAX_TABS_PER_PAGE,
+      });
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toThrow(`at most ${MAX_TABS_PER_PAGE}`);
     });
 
     it('recounts once a place is older than the settling time', async () => {
@@ -479,8 +505,62 @@ describe('addBeliefTab', () => {
       service.addBeliefTab('u1', { title: 'T', text: 'private words' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(tabModel.create).not.toHaveBeenCalled();
-    expect(profileModel.updateOne).toHaveBeenCalledWith(OWNED, {
-      $inc: { liveTabCount: -1 },
+    expect(profileModel.updateOne).toHaveBeenCalledWith(
+      { ...OWNED, tabCountRepairs: { $exists: false } },
+      { $inc: { liveTabCount: -1 } },
+    );
+  });
+
+  describe('an add that runs too long', () => {
+    afterEach(() => jest.restoreAllMocks());
+    const pastDeadline = () =>
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + TAB_ADD_MAX_MS + 1);
+
+    it('gives its place back and writes no tab', async () => {
+      const { service, versions, tabModel, profileModel } = setup();
+      versions.appendVersion.mockImplementationOnce(() => {
+        pastDeadline();
+        return Promise.resolve({});
+      });
+      await expect(
+        service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(tabModel.create).not.toHaveBeenCalled();
+      expect(profileModel.updateOne).toHaveBeenCalledWith(
+        { ...OWNED, tabCountRepairs: { $exists: false } },
+        { $inc: { liveTabCount: -1 } },
+      );
+    });
+
+    it('stops before the next paragraph as well', async () => {
+      const { service, versions, tabModel, blockModel } = setup();
+      versions.appendVersion.mockImplementationOnce(() => {
+        pastDeadline();
+        return Promise.resolve({});
+      });
+      await expect(
+        service.addBeliefTab('u1', { title: 'T', text: 'one\n\ntwo' }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(blockModel.create).toHaveBeenCalledTimes(1);
+      expect(tabModel.create).not.toHaveBeenCalled();
+    });
+
+    it('releases only against the count it took its place from', async () => {
+      const { service, versions, profileModel } = setup({
+        taken: { nextTabOrder: 5, tabCountRepairs: 2 },
+      });
+      versions.appendVersion.mockRejectedValueOnce(new Error('db'));
+      await expect(
+        service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toThrow('db');
+      expect(profileModel.updateOne).toHaveBeenCalledWith(
+        { ...OWNED, tabCountRepairs: 2 },
+        { $inc: { liveTabCount: -1 } },
+      );
+    });
+
+    it('allows far less time than the recount waits', () => {
+      expect(TAB_ADD_MAX_MS * 2).toBeLessThanOrEqual(TAB_PLACE_SETTLE_MS);
     });
   });
 

@@ -565,6 +565,24 @@ describe('isAdminForRead', () => {
       expect(clerk.getIdentity).toHaveBeenCalledTimes(calls + 1);
     });
 
+    it('a late result cannot replace a newer answer', async () => {
+      jest.useFakeTimers();
+      const { service, clerk } = setup(admin);
+      const stale = deferred<unknown>();
+      clerk.getIdentity
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValueOnce({ emailVerified: true });
+      const old = service.isAdminForRead(request());
+      jest.advanceTimersByTime(MAX_SHARED_READ_LOOKUP_MS + 1);
+      await expect(service.isAdminForRead(request())).resolves.toBe(false);
+
+      stale.resolve(admin);
+      await expect(old).resolves.toBe(true);
+
+      await expect(service.isAdminForRead(request())).resolves.toBe(false);
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+    });
+
     it('a stale lookup finishing cannot remove the one that replaced it', async () => {
       jest.useFakeTimers();
       const { service, clerk } = setup(admin);

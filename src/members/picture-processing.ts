@@ -28,12 +28,29 @@ export const MAX_JPEG_PICTURE_PIXELS = 110_000_000;
  */
 export const MAX_DECODED_BYTES = MAX_PICTURE_PIXELS * 4;
 
+/** Most pixels of a progressive JPEG with four components or fewer. */
+export const MAX_PROGRESSIVE_JPEG_PIXELS = MAX_DECODED_BYTES / (4 * 2);
+
 /**
  * Most seconds one picture may spend being decoded and converted. A picture at
  * the cap takes about a second, so this only stops one that has stuck, which
  * would otherwise hold the only slot for good.
  */
 export const PICTURE_DECODE_TIMEOUT_SECONDS = 30;
+
+/**
+ * The whole job, header included, in case native code stalls where sharp's own
+ * timeout cannot reach. A little longer than that timeout, so sharp's clean
+ * stop comes first whenever it can.
+ */
+export const PICTURE_DEADLINE_MS = (PICTURE_DECODE_TIMEOUT_SECONDS + 5) * 1000;
+
+/**
+ * Abandoned native work cannot be cancelled and keeps a libuv thread (there are
+ * four, shared with file and crypto work) and its memory. Past this many,
+ * pictures are refused until they finish or the process restarts.
+ */
+export const MAX_STALLED_PICTURES = 2;
 
 /** Pictures allowed to wait for their turn; a third is told to try again. */
 export const MAX_WAITING_PICTURES = 2;
@@ -48,8 +65,7 @@ const PICTURE_FORMATS: ReadonlySet<string> = new Set([
 const NOT_A_PICTURE =
   'That file is not a picture we can read. Please use a JPEG, PNG, WebP or GIF.';
 const TOO_MANY_PIXELS = `That picture is too large to process. Please use a JPEG of at most ${MAX_JPEG_PICTURE_PIXELS / 1_000_000} megapixels, or another picture of at most ${MAX_PICTURE_PIXELS / 1_000_000} megapixels.`;
-const PROGRESSIVE_TOO_LARGE =
-  'That JPEG is saved in progressive form, which is too large to process at this size. Please save it as a standard JPEG, or use a smaller picture.';
+const PROGRESSIVE_TOO_LARGE = `That JPEG is saved in progressive form, which is too large to process at this size. Please save it as a standard JPEG, or use one of at most ${MAX_PROGRESSIVE_JPEG_PIXELS / 1_000_000} megapixels.`;
 const TOOK_TOO_LONG =
   'That picture took too long to process. Please try a smaller one.';
 const BUSY =
@@ -100,27 +116,43 @@ export class SerialGate {
 }
 
 const gate = new SerialGate(MAX_WAITING_PICTURES);
+let stalledPictures = 0;
 
-/** Stored colour samples per pixel of a JPEG; an unknown layout counts as the most. */
-const JPEG_SAMPLES_PER_PIXEL: Readonly<Record<string, number>> = {
-  '4:2:0': 1.5,
-  '4:1:1': 1.5,
-  '4:2:2': 2,
-  '4:4:0': 2,
-  '4:4:4': 3,
-  '4:4:4:4': 4,
-};
+/** Answers at the deadline even if the work never does, and counts it as stuck. */
+function withDeadline(work: Promise<ProcessedImage>) {
+  let expired = false;
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      stalledPictures += 1;
+      reject(new BadRequestException(TOOK_TOO_LONG));
+    }, PICTURE_DEADLINE_MS);
+  });
+  const finished = () => {
+    clearTimeout(timer);
+    if (expired) stalledPictures -= 1;
+  };
+  work.then(finished, finished);
+  return Promise.race([work, deadline]);
+}
 
 /**
- * A progressive JPEG cannot be shrunk while it is read: every coefficient (two
- * bytes per sample) is held until the last scan. Measured at 48 MP: 231 MB for
- * 4:2:0, 366 MB for 4:4:4; at 108 MP, 404 MB for 4:2:0.
+ * A progressive JPEG cannot be shrunk while it is read: every coefficient, two
+ * bytes per sample, is held until the last scan. How many samples it really
+ * stores cannot be told from the header sharp gives us (every layout with a
+ * subsampled luma is labelled 4:2:0, and all components at full size measured
+ * 361 MB at 48 MP under that label), so each component counts as full size.
  */
+const PROGRESSIVE_BYTES_PER_SAMPLE = 2;
+const USUAL_JPEG_COMPONENTS = 4;
 function progressiveJpegBytes(header: sharp.Metadata) {
-  const samples =
-    JPEG_SAMPLES_PER_PIXEL[header.chromaSubsampling ?? ''] ??
-    JPEG_SAMPLES_PER_PIXEL['4:4:4:4'];
-  return header.width * header.height * samples * 2;
+  return (
+    header.width *
+    header.height *
+    Math.max(header.channels, USUAL_JPEG_COMPONENTS) *
+    PROGRESSIVE_BYTES_PER_SAMPLE
+  );
 }
 
 function decodedBytes(header: sharp.Metadata) {
@@ -174,8 +206,15 @@ async function convert(input: Buffer): Promise<ProcessedImage> {
  *
  * @throws BadRequestException when the bytes are not an accepted picture, or
  *   have more than {@link MAX_PICTURE_PIXELS} pixels
- * @throws ServiceUnavailableException when too many pictures are waiting
+ * @throws BadRequestException as above, or when the work passes its deadline;
+ *   native work that stalled carries on in the background until it returns
+ * @throws ServiceUnavailableException when too many pictures are waiting or stuck
  */
 export function preparePicture(input: Buffer): Promise<ProcessedImage> {
-  return gate.run(() => convert(input));
+  return gate.run(() => {
+    if (stalledPictures >= MAX_STALLED_PICTURES) {
+      throw new ServiceUnavailableException(BUSY);
+    }
+    return withDeadline(convert(input));
+  });
 }

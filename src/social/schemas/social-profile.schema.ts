@@ -164,6 +164,10 @@ export class SocialProfile {
   @Prop({ type: Date })
   lastTabPlaceAt?: Date;
 
+  /** Counter corrections so far: a place taken before one is no longer counted. */
+  @Prop({ type: Number, min: 0 })
+  tabCountRepairs?: number;
+
   /** The next tab's `order`. Only ever rises, so an order is never reused. */
   @Prop({ type: Number, min: 0 })
   nextTabOrder?: number;

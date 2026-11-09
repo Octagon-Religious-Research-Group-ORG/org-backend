@@ -7,7 +7,10 @@ import * as imageModule from '../import/pages/image';
 import {
   MAX_JPEG_PICTURE_PIXELS,
   MAX_PICTURE_PIXELS,
+  MAX_PROGRESSIVE_JPEG_PIXELS,
+  MAX_STALLED_PICTURES,
   MAX_WAITING_PICTURES,
+  PICTURE_DEADLINE_MS,
   PICTURE_DECODE_TIMEOUT_SECONDS,
   preparePicture,
   SerialGate,
@@ -272,30 +275,55 @@ describe('the JPEG cap', () => {
   );
 
   describe('progressive', () => {
-    it('allows 4:2:0 up to the same memory as the other formats', async () => {
-      const decode = withHeader({
-        format: 'jpeg',
-        width: 8000,
-        height: 6000,
-        isProgressive: true,
-      });
-      await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
-      expect(decode).toHaveBeenCalled();
-    });
-
-    it.each([
-      ['48 MP 4:4:4', 8000, 6000, '4:4:4'],
-      ['108 MP 4:2:0', 12000, 9000, '4:2:0'],
-      ['18.1 MP CMYK', 4300, 4210, '4:4:4:4'],
-      ['an unknown layout, counted as the largest', 4300, 4210, undefined],
-    ])('refuses %s before decoding', async (_n, width, height, layout) => {
-      const decode = withHeader({
+    const progressive = (
+      width: number,
+      height: number,
+      chromaSubsampling?: string,
+      channels = 3,
+    ) =>
+      withHeader({
         format: 'jpeg',
         width,
         height,
         isProgressive: true,
-        chromaSubsampling: layout,
+        chromaSubsampling,
+        channels: channels as sharp.Metadata['channels'],
       });
+
+    it.each([
+      ['4:2:0', 3],
+      ['4:4:4', 3],
+      ['4:4:4:4', 4],
+      [undefined, 4],
+    ])('accepts %s up to the limit', async (layout, channels) => {
+      const decode = progressive(4242, 4242, layout, channels);
+      await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
+      expect(decode).toHaveBeenCalled();
+    });
+
+    // sharp labels every layout with a subsampled luma "4:2:0", so the label
+    // says nothing about what the file really stores.
+    it.each([
+      ['48 MP labelled 4:2:0', 8000, 6000, '4:2:0', 3],
+      ['just over the limit labelled 4:2:0', 4243, 4243, '4:2:0', 3],
+      ['just over the limit labelled 4:4:4', 4243, 4243, '4:4:4', 3],
+      ['CMYK just over the limit', 4243, 4243, '4:4:4:4', 4],
+      ['108 MP', 12000, 9000, '4:2:0', 3],
+    ])(
+      'refuses %s before decoding',
+      async (_n, width, height, layout, channels) => {
+        const decode = progressive(width, height, layout, channels);
+        const error = await refusal();
+        expect(error?.message).toMatch(/progressive/);
+        expect(error?.message).toMatch(
+          new RegExp(`${MAX_PROGRESSIVE_JPEG_PIXELS / 1_000_000} megapixels`),
+        );
+        expect(decode).not.toHaveBeenCalled();
+      },
+    );
+
+    it('counts more components than the usual four', async () => {
+      const decode = progressive(4242, 4242, '4:4:4:4', 5);
       expect((await refusal())?.message).toMatch(/progressive/);
       expect(decode).not.toHaveBeenCalled();
     });
@@ -310,6 +338,98 @@ describe('the JPEG cap', () => {
       await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
       expect(decode).toHaveBeenCalled();
     });
+  });
+});
+
+describe('the overall deadline', () => {
+  function hang() {
+    let finish: () => void = () => undefined;
+    const promise = new Promise<sharp.Metadata>((_resolve, reject) => {
+      finish = () => reject(new Error('finally finished'));
+    });
+    jest.spyOn(sharp.prototype, 'metadata').mockReturnValueOnce(promise);
+    return finish;
+  }
+  const outcome = (run: Promise<unknown>) =>
+    run.then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+
+  afterEach(() => jest.useRealTimers());
+
+  it('answers cleanly when the header read never returns, and frees the slot', async () => {
+    jest.useFakeTimers();
+    const finish = hang();
+    const stuck = outcome(preparePicture(Buffer.from('x')));
+    await jest.advanceTimersByTimeAsync(PICTURE_DEADLINE_MS + 1);
+    const error = await stuck;
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect(error?.message).toMatch(/too long/);
+
+    jest.useRealTimers();
+    await expect(preparePicture(await png())).resolves.toMatchObject({
+      contentType: 'image/webp',
+    });
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it('answers cleanly when a decode never returns', async () => {
+    jest.useFakeTimers();
+    let finish: () => void = () => undefined;
+    jest.spyOn(imageModule, 'processImage').mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        finish = () => reject(new Error('finally finished'));
+      }),
+    );
+    const stuck = outcome(preparePicture(await png()));
+    await jest.advanceTimersByTimeAsync(PICTURE_DEADLINE_MS + 1);
+    expect((await stuck)?.message).toMatch(/too long/);
+    jest.useRealTimers();
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it('allows more time than sharp has for the decode', () => {
+    expect(PICTURE_DEADLINE_MS).toBeGreaterThan(
+      PICTURE_DECODE_TIMEOUT_SECONDS * 1000,
+    );
+  });
+
+  it('stops taking pictures while too many are stuck, then recovers', async () => {
+    jest.useFakeTimers();
+    const finishes: Array<() => void> = [];
+    for (let i = 0; i < MAX_STALLED_PICTURES; i++) {
+      finishes.push(hang());
+      const stuck = outcome(preparePicture(Buffer.from('x')));
+      await jest.advanceTimersByTimeAsync(PICTURE_DEADLINE_MS + 1);
+      await stuck;
+    }
+    jest.useRealTimers();
+    const input = await png();
+    await expect(preparePicture(input)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+
+    finishes.forEach((finish) => finish());
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(preparePicture(input)).resolves.toMatchObject({
+      contentType: 'image/webp',
+    });
+  });
+
+  it('does not count a picture that finished in time', async () => {
+    jest.useFakeTimers();
+    const clear = jest.spyOn(global, 'clearTimeout');
+    jest
+      .spyOn(sharp.prototype, 'metadata')
+      .mockRejectedValueOnce(new Error('unreadable'));
+    await expect(preparePicture(Buffer.from('x'))).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(clear).toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 });
 
