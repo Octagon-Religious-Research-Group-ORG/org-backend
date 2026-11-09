@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-floating-promises */
 import type { Response } from 'express';
 import type { AuthenticatedRequest } from '../auth/auth.types';
+import { MemberJsonCacheInterceptor } from './no-store.interceptor';
 import {
   AdminSettingsController,
   MembersController,
@@ -148,5 +149,25 @@ describe('AdminSettingsController', () => {
       'done',
     );
     expect(settings.setVotingInvite).toHaveBeenCalledWith('u', 'u1');
+  });
+});
+
+describe('cache headers on the member reads', () => {
+  const interceptorsOf = (name: keyof MembersController) =>
+    (Reflect.getMetadata(
+      '__interceptors__',
+      Object.getOwnPropertyDescriptor(MembersController.prototype, name)!
+        .value as object,
+    ) ?? []) as unknown[];
+
+  it.each(['directory', 'chats', 'profile'] as const)(
+    '%s is explicit for guests too',
+    (name) => {
+      expect(interceptorsOf(name)).toContain(MemberJsonCacheInterceptor);
+    },
+  );
+
+  it('the picture route keeps its own caching', () => {
+    expect(interceptorsOf('picture')).not.toContain(MemberJsonCacheInterceptor);
   });
 });

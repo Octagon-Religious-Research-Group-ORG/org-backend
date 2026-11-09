@@ -12,6 +12,7 @@ import {
   MAX_NEW_TAB_PARAGRAPHS,
   MAX_TABS_PER_PAGE,
   MyMemberPageService,
+  TAB_PLACE_SETTLE_MS,
 } from './my-member-page.service';
 import { preparePicture } from './picture-processing';
 
@@ -39,6 +40,7 @@ interface Options {
   tabs?: unknown[];
   matched?: number;
   taken?: unknown;
+  liveTabs?: number;
 }
 
 function setup(options: Options = {}) {
@@ -72,6 +74,9 @@ function setup(options: Options = {}) {
   };
   const tabModel = {
     find: jest.fn(() => chain(options.tabs ?? [])),
+    countDocuments: jest.fn(() => ({
+      exec: () => Promise.resolve(options.liveTabs ?? 0),
+    })),
     create: jest.fn(() => {
       order.push('tab');
       return Promise.resolve({});
@@ -125,6 +130,17 @@ function setup(options: Options = {}) {
   };
 }
 
+const LONG_AGO = new Date(0);
+const fullPage = (overrides: Record<string, unknown> = {}) => ({
+  _id: profileId,
+  slug: 'quiet-fern',
+  imageIds: [],
+  liveTabCount: MAX_TABS_PER_PAGE,
+  nextTabOrder: 300,
+  lastTabPlaceAt: LONG_AGO,
+  ...overrides,
+});
+
 const OWNED = {
   ownerUserId: 'u1',
   deletedAt: { $exists: false },
@@ -176,7 +192,10 @@ describe('addBeliefTab', () => {
     ]);
     expect(profileModel.findOneAndUpdate).toHaveBeenCalledWith(
       { ...OWNED, liveTabCount: { $lt: MAX_TABS_PER_PAGE } },
-      { $inc: { liveTabCount: 1, nextTabOrder: 1 } },
+      {
+        $inc: { liveTabCount: 1, nextTabOrder: 1 },
+        $set: { lastTabPlaceAt: expect.any(Date) as Date },
+      },
       { returnDocument: 'before' },
     );
     expect(versions.appendVersion).toHaveBeenCalledTimes(2);
@@ -261,12 +280,135 @@ describe('addBeliefTab', () => {
   });
 
   it('writes nothing when the page is full', async () => {
-    const { service, order, blockModel } = setup({ taken: null });
+    const { service, order, blockModel, profileModel } = setup({
+      taken: null,
+      page: fullPage(),
+      liveTabs: MAX_TABS_PER_PAGE,
+    });
     await expect(
       service.addBeliefTab('u1', { title: 'T', text: 'x' }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(order).toEqual(['take']);
     expect(blockModel.create).not.toHaveBeenCalled();
+    expect(profileModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  describe('a counter that says the page is full', () => {
+    it('recounts, repairs the counter, and adds the tab', async () => {
+      const ctx = setup({ page: fullPage(), liveTabs: 5 });
+      ctx.profileModel.findOneAndUpdate
+        .mockReturnValueOnce(chain(null))
+        .mockReturnValueOnce(chain({ nextTabOrder: 300 }));
+
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).resolves.toMatchObject({ title: 'T' });
+
+      expect(ctx.tabModel.countDocuments).toHaveBeenCalledWith({
+        profileId,
+        removedAt: { $exists: false },
+      });
+      expect(ctx.profileModel.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _id: profileId,
+          liveTabCount: MAX_TABS_PER_PAGE,
+          lastTabPlaceAt: LONG_AGO,
+        }),
+        { $set: { liveTabCount: 5 } },
+      );
+      expect(ctx.tabModel.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('still refuses when the page really is full, and writes nothing', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage(),
+        liveTabs: MAX_TABS_PER_PAGE,
+      });
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.profileModel.updateOne).not.toHaveBeenCalled();
+      expect(ctx.tabModel.create).not.toHaveBeenCalled();
+    });
+
+    it('leaves it alone while a place was just taken: that add has no row yet', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage({ lastTabPlaceAt: new Date() }),
+        liveTabs: 299,
+      });
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.tabModel.countDocuments).not.toHaveBeenCalled();
+      expect(ctx.profileModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('recounts once a place is older than the settling time', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage({
+          lastTabPlaceAt: new Date(Date.now() - TAB_PLACE_SETTLE_MS - 1000),
+        }),
+        liveTabs: 300,
+      });
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.tabModel.countDocuments).toHaveBeenCalled();
+    });
+
+    it('a repair conditional on what it read, so a concurrent add wins', async () => {
+      const ctx = setup({ page: fullPage(), liveTabs: 2 });
+      ctx.profileModel.findOneAndUpdate
+        .mockReturnValueOnce(chain(null))
+        .mockReturnValueOnce(chain(null));
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      const [filter] = ctx.profileModel.updateOne.mock.calls[0] as unknown as [
+        Record<string, unknown>,
+      ];
+      expect(filter.liveTabCount).toBe(MAX_TABS_PER_PAGE);
+      expect(filter.lastTabPlaceAt).toBe(LONG_AGO);
+    });
+
+    it('does not repair a page whose counter another add already lowered', async () => {
+      const ctx = setup({ page: fullPage({ liveTabCount: 20 }) });
+      ctx.profileModel.findOneAndUpdate
+        .mockReturnValueOnce(chain(null))
+        .mockReturnValueOnce(chain({ nextTabOrder: 21 }));
+      await ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' });
+      expect(ctx.tabModel.countDocuments).not.toHaveBeenCalled();
+      expect(ctx.tabModel.create).toHaveBeenCalled();
+    });
+
+    it('refuses when the page row has disappeared', async () => {
+      const ctx = setup({ taken: null });
+      ctx.profileModel.findOne
+        .mockReturnValueOnce(chain(fullPage()))
+        .mockReturnValueOnce(chain(null));
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ctx.tabModel.countDocuments).not.toHaveBeenCalled();
+    });
+
+    it('a page with no record of a place being taken may be recounted', async () => {
+      const ctx = setup({
+        taken: null,
+        page: fullPage({ lastTabPlaceAt: undefined }),
+        liveTabs: 3,
+      });
+      await expect(
+        ctx.service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      const [filter] = ctx.profileModel.updateOne.mock.calls[0] as unknown as [
+        Record<string, unknown>,
+      ];
+      expect(filter.lastTabPlaceAt).toEqual({ $exists: false });
+    });
   });
 
   it('treats a row with no counter value as full, never as order zero', async () => {

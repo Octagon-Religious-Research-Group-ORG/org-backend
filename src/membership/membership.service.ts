@@ -34,7 +34,12 @@ import {
   MAX_JOIN_TEXT_CHARS,
 } from './membership.dto';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
-import { hasVisibleText, isNearDuplicateName } from './member-text';
+import {
+  cleanMemberParagraphs,
+  cleanMemberTitle,
+  hasVisibleText,
+  isNearDuplicateName,
+} from './member-text';
 import { type SlugProblem, slugProblem } from './reserved-slugs';
 import {
   ConsentRecord,
@@ -135,7 +140,7 @@ export function splitParagraphs(text: string): string[] {
 
 function cleanContacts(contacts: ContactEntryDto[]) {
   return contacts
-    .map(({ method, value }) => ({ method, value: value.trim() }))
+    .map(({ method, value }) => ({ method, value: cleanMemberTitle(value) }))
     .filter(({ value }) => hasVisibleText(value));
 }
 
@@ -261,11 +266,11 @@ export class MembershipService {
       );
     }
 
-    const displayName = input.displayName.trim();
-    const bio = splitParagraphs(input.bio);
+    const displayName = cleanMemberTitle(input.displayName);
+    const bio = splitParagraphs(cleanMemberParagraphs(input.bio));
     const beliefs = input.beliefs.map((belief) => ({
-      title: belief.title.trim(),
-      paragraphs: splitParagraphs(belief.text),
+      title: cleanMemberTitle(belief.title),
+      paragraphs: splitParagraphs(cleanMemberParagraphs(belief.text)),
     }));
     if (
       !hasVisibleText(displayName) ||

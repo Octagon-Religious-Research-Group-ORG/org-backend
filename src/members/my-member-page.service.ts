@@ -41,6 +41,13 @@ import { PictureStore } from './picture-store.service';
 export const MAX_NEW_TAB_PARAGRAPHS = 50;
 /** Well above the largest migrated page. */
 export const MAX_TABS_PER_PAGE = 300;
+/**
+ * How long after a place is taken the tab counter is left alone. Until an add
+ * writes its tab row it counts in the counter but not in the rows, so a recount
+ * inside this window could undercount and let a full page past the cap. It is
+ * far longer than an add takes.
+ */
+export const TAB_PLACE_SETTLE_MS = 10 * 60_000;
 
 const NO_PAGE = "You don't have a member page yet.";
 
@@ -179,24 +186,82 @@ export class MyMemberPageService {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }
+    let order = await this.claimTabPlace(userId);
+    if (order === undefined && (await this.repairTabCount(userId, page._id))) {
+      order = await this.claimTabPlace(userId);
+    }
+    if (order === undefined) {
+      throw new ConflictException(
+        `A page can have at most ${MAX_TABS_PER_PAGE} belief tabs.`,
+      );
+    }
+    return order;
+  }
+
+  /** @returns the new tab's order, or undefined when the counter is at the cap */
+  private async claimTabPlace(userId: string) {
     const taken = await this.profileModel
       .findOneAndUpdate(
         {
           ...this.ownedFilter(userId),
           liveTabCount: { $lt: MAX_TABS_PER_PAGE },
         },
-        { $inc: { liveTabCount: 1, nextTabOrder: 1 } },
+        {
+          $inc: { liveTabCount: 1, nextTabOrder: 1 },
+          $set: { lastTabPlaceAt: new Date() },
+        },
         { returnDocument: 'before' },
       )
       .select({ nextTabOrder: 1 })
       .lean()
       .exec();
-    if (taken?.nextTabOrder === undefined) {
-      throw new ConflictException(
-        `A page can have at most ${MAX_TABS_PER_PAGE} belief tabs.`,
+    return taken?.nextTabOrder;
+  }
+
+  /**
+   * The counter can only drift upward (a failed add that could not give its
+   * place back), so a page that looks full is recounted before it is refused.
+   * The write is conditional on the values read: any add in between makes it
+   * do nothing, so a concurrent add can never be overwritten.
+   *
+   * @returns true when the real tabs leave room on the page
+   */
+  private async repairTabCount(userId: string, profileId: Types.ObjectId) {
+    const owned = { ...this.ownedFilter(userId), _id: profileId };
+    const seen = await this.profileModel
+      .findOne(owned)
+      .select({ liveTabCount: 1, lastTabPlaceAt: 1 })
+      .lean()
+      .exec();
+    if (seen?.liveTabCount === undefined) return false;
+    // Another add repaired it first; the atomic claim decides from here.
+    if (seen.liveTabCount < MAX_TABS_PER_PAGE) return true;
+    const placeTakenAt = seen.lastTabPlaceAt?.getTime();
+    if (
+      placeTakenAt !== undefined &&
+      Date.now() - placeTakenAt < TAB_PLACE_SETTLE_MS
+    ) {
+      return false;
+    }
+    const liveTabs = await this.tabModel
+      .countDocuments({ profileId, removedAt: { $exists: false } })
+      .exec();
+    if (liveTabs !== seen.liveTabCount) {
+      await this.profileModel
+        .updateOne(
+          {
+            ...owned,
+            liveTabCount: seen.liveTabCount,
+            lastTabPlaceAt: seen.lastTabPlaceAt ?? { $exists: false },
+          },
+          { $set: { liveTabCount: liveTabs } },
+        )
+        .exec();
+      this.logger.warn(
+        `Repaired a tab count on page ${profileId.toString()}: ${seen.liveTabCount} to ${liveTabs}`,
       );
     }
-    return taken.nextTabOrder;
+    return liveTabs < MAX_TABS_PER_PAGE;
   }
 
   /**

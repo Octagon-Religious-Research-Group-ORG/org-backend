@@ -11,9 +11,15 @@ export const MAX_PICTURE_BYTES = 10 * 1024 * 1024;
 /**
  * Most pixels a picture may have, read from its header before anything is
  * decoded. A few hundred kilobytes of PNG can claim a hundred megapixels and
- * take far more memory than the host has; a 36 MP phone photo still fits.
+ * take far more memory than the host has. JPEG has its own cap below.
  */
 export const MAX_PICTURE_PIXELS = 36_000_000;
+
+/**
+ * JPEG cap. A JPEG is read at 1/4 or 1/8 scale here, so a 108 MP phone photo
+ * needs about 90 MB (measured), far less than a 36 MP PNG (about 260 MB).
+ */
+export const MAX_JPEG_PICTURE_PIXELS = 110_000_000;
 
 /**
  * Most memory a decoded picture may take: the cap in 8-bit colour with
@@ -21,6 +27,13 @@ export const MAX_PICTURE_PIXELS = 36_000_000;
  * 36 MP against 201 MB for 8-bit), so it is refused at half the pixels.
  */
 export const MAX_DECODED_BYTES = MAX_PICTURE_PIXELS * 4;
+
+/**
+ * Most seconds one picture may spend being decoded and converted. A picture at
+ * the cap takes about a second, so this only stops one that has stuck, which
+ * would otherwise hold the only slot for good.
+ */
+export const PICTURE_DECODE_TIMEOUT_SECONDS = 30;
 
 /** Pictures allowed to wait for their turn; a third is told to try again. */
 export const MAX_WAITING_PICTURES = 2;
@@ -34,7 +47,11 @@ const PICTURE_FORMATS: ReadonlySet<string> = new Set([
 
 const NOT_A_PICTURE =
   'That file is not a picture we can read. Please use a JPEG, PNG, WebP or GIF.';
-const TOO_MANY_PIXELS = `That picture is too large to process. Please use one of at most ${MAX_PICTURE_PIXELS / 1_000_000} megapixels, for example 6000 by 6000.`;
+const TOO_MANY_PIXELS = `That picture is too large to process. Please use a JPEG of at most ${MAX_JPEG_PICTURE_PIXELS / 1_000_000} megapixels, or another picture of at most ${MAX_PICTURE_PIXELS / 1_000_000} megapixels.`;
+const PROGRESSIVE_TOO_LARGE =
+  'That JPEG is saved in progressive form, which is too large to process at this size. Please save it as a standard JPEG, or use a smaller picture.';
+const TOOK_TOO_LONG =
+  'That picture took too long to process. Please try a smaller one.';
 const BUSY =
   'We are processing other pictures right now. Please try again in a moment.';
 
@@ -84,6 +101,28 @@ export class SerialGate {
 
 const gate = new SerialGate(MAX_WAITING_PICTURES);
 
+/** Stored colour samples per pixel of a JPEG; an unknown layout counts as the most. */
+const JPEG_SAMPLES_PER_PIXEL: Readonly<Record<string, number>> = {
+  '4:2:0': 1.5,
+  '4:1:1': 1.5,
+  '4:2:2': 2,
+  '4:4:0': 2,
+  '4:4:4': 3,
+  '4:4:4:4': 4,
+};
+
+/**
+ * A progressive JPEG cannot be shrunk while it is read: every coefficient (two
+ * bytes per sample) is held until the last scan. Measured at 48 MP: 231 MB for
+ * 4:2:0, 366 MB for 4:4:4; at 108 MP, 404 MB for 4:2:0.
+ */
+function progressiveJpegBytes(header: sharp.Metadata) {
+  const samples =
+    JPEG_SAMPLES_PER_PIXEL[header.chromaSubsampling ?? ''] ??
+    JPEG_SAMPLES_PER_PIXEL['4:4:4:4'];
+  return header.width * header.height * samples * 2;
+}
+
 function decodedBytes(header: sharp.Metadata) {
   const bytesPerSample = header.depth === 'uchar' ? 1 : 2;
   return header.width * header.height * header.channels * bytesPerSample;
@@ -100,16 +139,30 @@ async function convert(input: Buffer): Promise<ProcessedImage> {
   if (!PICTURE_FORMATS.has(header.format)) {
     throw new BadRequestException(NOT_A_PICTURE);
   }
+  const isJpeg = header.format === 'jpeg';
+  const maxPixels = isJpeg ? MAX_JPEG_PICTURE_PIXELS : MAX_PICTURE_PIXELS;
   if (
-    header.width * header.height > MAX_PICTURE_PIXELS ||
-    decodedBytes(header) > MAX_DECODED_BYTES
+    header.width * header.height > maxPixels ||
+    (!isJpeg && decodedBytes(header) > MAX_DECODED_BYTES)
   ) {
     throw new BadRequestException(TOO_MANY_PIXELS);
   }
+  if (
+    isJpeg &&
+    header.isProgressive &&
+    progressiveJpegBytes(header) > MAX_DECODED_BYTES
+  ) {
+    throw new BadRequestException(PROGRESSIVE_TOO_LARGE);
+  }
   try {
-    return await processImage(input, MAX_PICTURE_PIXELS);
-  } catch {
-    throw new BadRequestException(NOT_A_PICTURE);
+    return await processImage(input, maxPixels, PICTURE_DECODE_TIMEOUT_SECONDS);
+  } catch (error) {
+    // sharp's documented way to tell a timeout: its message says so.
+    throw new BadRequestException(
+      error instanceof Error && error.message.includes('timeout')
+        ? TOOK_TOO_LONG
+        : NOT_A_PICTURE,
+    );
   }
 }
 

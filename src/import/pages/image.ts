@@ -19,11 +19,14 @@ export interface ProcessedImage {
  * it), at most 1600 px on the longest side, WebP. Metadata (EXIF, GPS) is not
  * copied to the output.
  *
- * @throws Error when the bytes are not an image sharp can read
+ * @param timeoutSeconds stops the work after this long; 0 means no limit
+ * @throws Error when the bytes are not an image sharp can read, or the time
+ *   limit passed (its message then contains "timeout")
  */
 export async function processImage(
   input: Uint8Array,
   limitInputPixels: number = IMPORT_MAX_INPUT_PIXELS,
+  timeoutSeconds = 0,
 ): Promise<ProcessedImage> {
   const { data, info } = await sharp(input, { limitInputPixels })
     .rotate()
@@ -34,6 +37,7 @@ export async function processImage(
       withoutEnlargement: true,
     })
     .webp({ quality: 80 })
+    .timeout({ seconds: timeoutSeconds })
     .toBuffer({ resolveWithObject: true });
   return {
     data,

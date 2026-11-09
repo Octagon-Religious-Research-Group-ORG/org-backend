@@ -494,7 +494,7 @@ describe('Members API (e2e)', () => {
       expect(pictures.store).not.toHaveBeenCalled();
     });
 
-    it('keeps a signed-in answer out of every cache, and a guest one alone', async () => {
+    it('keeps a signed-in answer out of every cache, and a guest one out of shared caches', async () => {
       const signedIn = await get('/members/chats', 'user_anon').expect(200);
       expect(signedIn.headers['cache-control']).toBe('private, no-store');
       const owner = await write('patch', '/me/member-page/visibility')
@@ -502,7 +502,8 @@ describe('Members API (e2e)', () => {
         .expect(200);
       expect(owner.headers['cache-control']).toBe('private, no-store');
       const guest = await get('/members/chats').expect(200);
-      expect(guest.headers['cache-control']).toBeUndefined();
+      expect(guest.headers['cache-control']).toBe('no-store');
+      expect(guest.headers.vary).toContain('Authorization');
     });
 
     it('lets a public picture stay cacheable for a signed-in viewer', async () => {

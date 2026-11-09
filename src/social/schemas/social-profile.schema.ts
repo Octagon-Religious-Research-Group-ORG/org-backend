@@ -160,6 +160,10 @@ export class SocialProfile {
   @Prop({ type: Number, min: 0 })
   liveTabCount?: number;
 
+  /** When a tab place was last taken: a recount must wait for adds to finish. */
+  @Prop({ type: Date })
+  lastTabPlaceAt?: Date;
+
   /** The next tab's `order`. Only ever rises, so an order is never reused. */
   @Prop({ type: Number, min: 0 })
   nextTabOrder?: number;

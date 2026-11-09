@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import {
   AdminAccessService,
   MAX_REMEMBERED_READ_ANSWERS,
+  MAX_SHARED_READ_LOOKUP_MS,
   ROLE_CACHE_MAX_AGE_MS,
 } from './admin-access.service';
 import type { AuthenticatedRequest } from './auth.types';
@@ -466,6 +467,124 @@ describe('isAdminForRead', () => {
     await service.isAdminForRead(request(false));
     await service.isAdminForRead(request(false));
     expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  describe('a lookup already on its way', () => {
+    function deferred<T>() {
+      let resolve: (value: T) => void = () => undefined;
+      let reject: (error: unknown) => void = () => undefined;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+    const admin = { emailVerified: true, role: 'admin' };
+
+    it('is shared by everyone asking with the same token', async () => {
+      const { service, clerk } = setup(admin);
+      const first = deferred<unknown>();
+      clerk.getIdentity.mockReturnValueOnce(first.promise);
+
+      const asked = Array.from({ length: 5 }, () =>
+        service.isAdminForRead(request()),
+      );
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(1);
+      first.resolve(admin);
+      await expect(Promise.all(asked)).resolves.toEqual(Array(5).fill(true));
+
+      await service.isAdminForRead(request());
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(1);
+    });
+
+    it('is not shared between different tokens', async () => {
+      const { service, clerk } = setup(admin);
+      const forToken = (token: string) =>
+        ({
+          auth: { payload: { sub: 'u1' } },
+          headers: { authorization: `Bearer ${token}` },
+        }) as AuthenticatedRequest;
+      await Promise.all([
+        service.isAdminForRead(forToken('a')),
+        service.isAdminForRead(forToken('b')),
+      ]);
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails for those who shared it, and is forgotten', async () => {
+      const { service, clerk } = setup(admin);
+      const first = deferred<unknown>();
+      clerk.getIdentity.mockReturnValueOnce(first.promise);
+      const asked = [
+        service.isAdminForRead(request()),
+        service.isAdminForRead(request()),
+      ];
+      first.reject(new Error('clerk down'));
+      await expect(Promise.all(asked)).rejects.toThrow('clerk down');
+
+      await expect(service.isAdminForRead(request())).resolves.toBe(true);
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+    });
+
+    it('never remembers a failure as an answer', async () => {
+      const { service, clerk } = setup(admin);
+      clerk.getIdentity.mockRejectedValueOnce(new Error('clerk down'));
+      await expect(service.isAdminForRead(request())).rejects.toThrow();
+      await expect(service.isAdminForRead(request())).resolves.toBe(true);
+    });
+
+    it('stops being shared once it has hung too long', async () => {
+      jest.useFakeTimers();
+      const { service, clerk } = setup(admin);
+      clerk.getIdentity.mockReturnValueOnce(new Promise(() => undefined));
+      void service.isAdminForRead(request());
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(MAX_SHARED_READ_LOOKUP_MS + 1);
+      await expect(service.isAdminForRead(request())).resolves.toBe(true);
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+    });
+
+    it('holds a bounded number of hung lookups, dropping the oldest', () => {
+      const { service, clerk } = setup(admin);
+      clerk.getIdentity.mockReturnValue(new Promise(() => undefined));
+      const forToken = (token: string) =>
+        ({
+          auth: { payload: { sub: 'u1' } },
+          headers: { authorization: `Bearer ${token}` },
+        }) as AuthenticatedRequest;
+      for (let i = 0; i <= MAX_REMEMBERED_READ_ANSWERS; i++) {
+        void service.isAdminForRead(forToken(String(i)));
+      }
+      const calls = clerk.getIdentity.mock.calls.length;
+      void service.isAdminForRead(
+        forToken(String(MAX_REMEMBERED_READ_ANSWERS)),
+      );
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(calls);
+      void service.isAdminForRead(forToken('0'));
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(calls + 1);
+    });
+
+    it('a stale lookup finishing cannot remove the one that replaced it', async () => {
+      jest.useFakeTimers();
+      const { service, clerk } = setup(admin);
+      const stale = deferred<unknown>();
+      const current = deferred<unknown>();
+      clerk.getIdentity
+        .mockReturnValueOnce(stale.promise)
+        .mockReturnValueOnce(current.promise);
+      const old = service.isAdminForRead(request());
+      jest.advanceTimersByTime(MAX_SHARED_READ_LOOKUP_MS + 1);
+      const replacement = service.isAdminForRead(request());
+      stale.reject(new Error('late'));
+      await expect(old).rejects.toThrow('late');
+
+      const third = service.isAdminForRead(request());
+      expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+      current.resolve(admin);
+      await expect(replacement).resolves.toBe(true);
+      await expect(third).resolves.toBe(true);
+    });
   });
 
   it('holds a bounded number of answers, dropping the oldest', async () => {

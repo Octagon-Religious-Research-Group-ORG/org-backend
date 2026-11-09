@@ -865,6 +865,79 @@ describe('MembershipService', () => {
       );
     });
 
+    describe('control characters', () => {
+      // eslint-disable-next-line no-control-regex -- matching them is the point
+      const bad = /[\u0000\u0007\u202e]/u;
+      it('stores none of them, in any field the form sends', async () => {
+        const ctx = setup();
+        await ctx.service.join(
+          'u',
+          input({
+            displayName: 'Na\u202eme',
+            bio: 'bi\u0007o\u202e\n\nnext',
+            beliefs: [
+              { title: 'Ti\u202etle\u0000', text: 'be\u0007lie\u202ef\u0000' },
+            ],
+            contacts: [{ method: 'telegram', value: '@me\u202e\u0000' }],
+            backupContacts: [{ method: 'phone', value: '555\u202e\u0007' }],
+          }),
+          origin,
+        );
+        expect(ctx.tabModel.create).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Title' }),
+        );
+        expect(
+          ctx.versions.appendVersion.mock.calls.map(([v]) => v.text),
+        ).toEqual(['bio', 'next', 'belief']);
+        expect(ctx.contactsModel.updateOne).toHaveBeenCalledWith(
+          { userId: 'u' },
+          { $set: { backup: [{ method: 'phone', value: '555' }] } },
+          { upsert: true },
+        );
+        const stored = JSON.stringify([
+          ctx.profileModel.updateOne.mock.calls,
+          ctx.profileModel.create.mock.calls,
+        ]);
+        expect(stored).not.toMatch(bad);
+        expect(stored).toContain('Name');
+        expect(stored).toContain('@me');
+      });
+
+      it('keeps joiners, direction marks, emoji and other scripts', async () => {
+        const ctx = setup();
+        const name =
+          'Ana\u200d\u200c \u0634\u0639\u0631\u200f\u200e\u061c\ufe0f';
+        const text =
+          'a\u200db \uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67 \u2764\uFE0F \u0928\u092E\u0938\n\nsecond';
+        await ctx.service.join(
+          'u',
+          input({
+            displayName: name,
+            bio: text,
+            beliefs: [{ title: name, text }],
+          }),
+          origin,
+        );
+        expect(ctx.tabModel.create).toHaveBeenCalledWith(
+          expect.objectContaining({ title: name }),
+        );
+        expect(
+          ctx.versions.appendVersion.mock.calls.map(([v]) => v.text),
+        ).toEqual(text.split('\n\n').concat(text.split('\n\n')));
+        expect(JSON.stringify(ctx.profileModel.updateOne.mock.calls)).toContain(
+          name,
+        );
+      });
+
+      it('refuses a name that is only control characters', async () => {
+        const ctx = setup();
+        await expect(
+          ctx.service.join('u', input({ displayName: '\u0000\u202e' }), origin),
+        ).rejects.toThrow('need some text');
+        expect(ctx.writes).toEqual([]);
+      });
+    });
+
     describe('invisible text', () => {
       const z = '\u200b';
       it.each([

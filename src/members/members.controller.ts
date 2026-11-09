@@ -21,7 +21,10 @@ import type { AuthenticatedRequest } from '../auth/auth.types';
 import { AdminRoleGuard } from '../auth/admin-role.guard';
 import { PICTURE_THROTTLE, WriteThrottle } from '../config/throttle';
 import { MemberWriteThrottleGuard } from './member-write-throttle.guard';
-import { NoStoreWhenSignedInInterceptor } from './no-store.interceptor';
+import {
+  MemberJsonCacheInterceptor,
+  NoStoreWhenSignedInInterceptor,
+} from './no-store.interceptor';
 import {
   AddBeliefTabDto,
   ChangeVisibilityDto,
@@ -49,16 +52,19 @@ export class MembersController {
   constructor(private readonly members: MembersService) {}
 
   @Get('directory')
+  @UseInterceptors(MemberJsonCacheInterceptor)
   async directory(@Req() request: AuthenticatedRequest) {
     return this.members.directory(await this.members.resolveViewer(request));
   }
 
   @Get('chats')
+  @UseInterceptors(MemberJsonCacheInterceptor)
   async chats(@Req() request: AuthenticatedRequest) {
     return this.members.chats(await this.members.resolveViewer(request));
   }
 
   @Get('profiles/:slug')
+  @UseInterceptors(MemberJsonCacheInterceptor)
   async profile(
     @Req() request: AuthenticatedRequest,
     @Param('slug') slug: string,

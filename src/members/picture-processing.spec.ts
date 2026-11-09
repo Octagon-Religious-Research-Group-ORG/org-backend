@@ -5,8 +5,10 @@ import {
 import sharp from 'sharp';
 import * as imageModule from '../import/pages/image';
 import {
+  MAX_JPEG_PICTURE_PIXELS,
   MAX_PICTURE_PIXELS,
   MAX_WAITING_PICTURES,
+  PICTURE_DECODE_TIMEOUT_SECONDS,
   preparePicture,
   SerialGate,
 } from './picture-processing';
@@ -101,7 +103,11 @@ describe('preparePicture', () => {
       width: 1600,
       height: 1600,
     });
-    expect(decode).toHaveBeenCalledWith(expect.anything(), MAX_PICTURE_PIXELS);
+    expect(decode).toHaveBeenCalledWith(
+      expect.anything(),
+      MAX_PICTURE_PIXELS,
+      expect.any(Number),
+    );
   });
 
   it('refuses a 16-bit picture that would decode past the memory limit', async () => {
@@ -119,6 +125,34 @@ describe('preparePicture', () => {
       .toBuffer();
     await expect(preparePicture(input)).rejects.toThrow(/too large/);
     expect(decode).not.toHaveBeenCalled();
+  });
+
+  it('gives every decode a time limit', async () => {
+    const decode = jest.spyOn(imageModule, 'processImage');
+    await preparePicture(await png());
+    expect(decode).toHaveBeenCalledWith(
+      expect.anything(),
+      MAX_PICTURE_PIXELS,
+      PICTURE_DECODE_TIMEOUT_SECONDS,
+    );
+  });
+
+  it('answers a timed-out decode cleanly and frees the slot', async () => {
+    const input = await png();
+    jest
+      .spyOn(imageModule, 'processImage')
+      .mockRejectedValueOnce(new Error('timeout: 42% complete'));
+    const error = await preparePicture(input).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).message).toMatch(/too long/);
+    expect((error as BadRequestException).message).not.toMatch(/timeout|%/);
+
+    await expect(preparePicture(input)).resolves.toMatchObject({
+      contentType: 'image/webp',
+    });
   });
 
   it('keeps sharp working in one thread with no cache', () => {
@@ -158,6 +192,124 @@ describe('preparePicture', () => {
     release();
     await expect(Promise.all(running)).resolves.toHaveLength(accepted);
     expect(highest).toBe(1);
+  });
+});
+
+describe('the JPEG cap', () => {
+  function withHeader(header: Partial<sharp.Metadata>) {
+    jest.spyOn(sharp.prototype, 'metadata').mockResolvedValueOnce({
+      channels: 3,
+      depth: 'uchar',
+      isProgressive: false,
+      chromaSubsampling: '4:2:0',
+      ...header,
+    });
+    return jest.spyOn(imageModule, 'processImage').mockResolvedValueOnce({
+      data: Buffer.from('x'),
+      width: 1600,
+      height: 1200,
+      contentType: 'image/webp',
+    });
+  }
+  const refusal = async () =>
+    preparePicture(Buffer.from('bytes')).then(
+      () => undefined,
+      (e: unknown) => e as BadRequestException,
+    );
+
+  it('accepts a real 48 MP JPEG through the real pipeline', async () => {
+    const input = await sharp({
+      create: { width: 8000, height: 6000, channels: 3, background: '#223344' },
+      limitInputPixels: false,
+    })
+      .jpeg()
+      .toBuffer();
+    await expect(preparePicture(input)).resolves.toMatchObject({
+      width: 1600,
+      height: 1200,
+    });
+  });
+
+  it.each([
+    ['48 MP', 8000, 6000],
+    ['108 MP', 12000, 9000],
+  ])(
+    'takes a standard %s JPEG and decodes it under the JPEG limit',
+    async (_n, width, height) => {
+      const decode = withHeader({ format: 'jpeg', width, height });
+      await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
+      expect(decode).toHaveBeenCalledWith(
+        expect.anything(),
+        MAX_JPEG_PICTURE_PIXELS,
+        PICTURE_DECODE_TIMEOUT_SECONDS,
+      );
+    },
+  );
+
+  it('refuses a JPEG past its cap, from the header', async () => {
+    const decode = withHeader({
+      format: 'jpeg',
+      width: MAX_JPEG_PICTURE_PIXELS / 1000 + 1,
+      height: 1000,
+    });
+    const error = await refusal();
+    expect(error?.message).toMatch(/110 megapixels/);
+    expect(error?.message).toMatch(/36 megapixels/);
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it.each(['png', 'webp', 'gif'])(
+    'keeps the lower cap for %s, whatever else the upload claimed',
+    async (format) => {
+      const decode = withHeader({
+        format: format as keyof sharp.FormatEnum,
+        width: 8000,
+        height: 6000,
+      });
+      expect((await refusal())?.message).toMatch(/too large/);
+      expect(decode).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('progressive', () => {
+    it('allows 4:2:0 up to the same memory as the other formats', async () => {
+      const decode = withHeader({
+        format: 'jpeg',
+        width: 8000,
+        height: 6000,
+        isProgressive: true,
+      });
+      await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
+      expect(decode).toHaveBeenCalled();
+    });
+
+    it.each([
+      ['48 MP 4:4:4', 8000, 6000, '4:4:4'],
+      ['108 MP 4:2:0', 12000, 9000, '4:2:0'],
+      ['18.1 MP CMYK', 4300, 4210, '4:4:4:4'],
+      ['an unknown layout, counted as the largest', 4300, 4210, undefined],
+    ])('refuses %s before decoding', async (_n, width, height, layout) => {
+      const decode = withHeader({
+        format: 'jpeg',
+        width,
+        height,
+        isProgressive: true,
+        chromaSubsampling: layout,
+      });
+      expect((await refusal())?.message).toMatch(/progressive/);
+      expect(decode).not.toHaveBeenCalled();
+    });
+
+    it('does not apply to a standard JPEG of the same size', async () => {
+      const decode = withHeader({
+        format: 'jpeg',
+        width: 8000,
+        height: 6000,
+        chromaSubsampling: '4:4:4',
+      });
+      await expect(preparePicture(Buffer.from('x'))).resolves.toBeDefined();
+      expect(decode).toHaveBeenCalled();
+    });
   });
 });
 

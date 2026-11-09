@@ -23,6 +23,13 @@ export const ROLE_CACHE_MAX_AGE_MS = 60_000;
 export const MAX_REMEMBERED_READ_ANSWERS = 2_000;
 
 /**
+ * How long a lookup still under way is shared with later callers. Clerk's
+ * client has no timeout, so without this a hung request would hold everyone
+ * using that token.
+ */
+export const MAX_SHARED_READ_LOOKUP_MS = 10_000;
+
+/**
  * Decides who has website-admin access.
  *
  * The source of truth is the Clerk role `publicMetadata.role = "admin"`. The
@@ -39,6 +46,10 @@ export class AdminAccessService {
   private readonly readAnswers = new Map<
     string,
     { isAdmin: boolean; expires: number }
+  >();
+  private readonly readLookups = new Map<
+    string,
+    { startedAt: number; answer: Promise<boolean> }
   >();
 
   constructor(
@@ -135,7 +146,9 @@ export class AdminAccessService {
   /**
    * The same decision as {@link hasAdminAccess} without writing anything, for
    * read paths: looking at a page must not create an account row. The answer
-   * is remembered per token for as long as a cached role may be trusted.
+   * is remembered per token for as long as a cached role may be trusted, and
+   * callers arriving while it is being looked up share that one lookup. A
+   * failure is passed to them and forgotten, so the next caller asks again.
    */
   async isAdminForRead(request: AuthenticatedRequest): Promise<boolean> {
     const authProviderId = getUserSub(request);
@@ -145,6 +158,24 @@ export class AdminAccessService {
       return remembered.isAdmin;
     }
 
+    if (!tokenHash) return this.lookUpAdminForRead(authProviderId);
+
+    const shared = this.readLookups.get(tokenHash);
+    if (shared && Date.now() - shared.startedAt < MAX_SHARED_READ_LOOKUP_MS) {
+      return shared.answer;
+    }
+    const lookup = {
+      startedAt: Date.now(),
+      answer: this.lookUpAdminForRead(authProviderId, tokenHash),
+    };
+    this.shareReadLookup(tokenHash, lookup);
+    return lookup.answer;
+  }
+
+  private async lookUpAdminForRead(
+    authProviderId: string,
+    tokenHash?: string,
+  ): Promise<boolean> {
     const identity = await this.clerkUserInfo.getIdentity(authProviderId);
     const isAdmin = this.decideAdmin(
       authProviderId,
@@ -154,6 +185,25 @@ export class AdminAccessService {
     );
     if (tokenHash) this.rememberReadAnswer(tokenHash, isAdmin);
     return isAdmin;
+  }
+
+  private shareReadLookup(
+    tokenHash: string,
+    lookup: { startedAt: number; answer: Promise<boolean> },
+  ) {
+    // A hung lookup never settles, so the list needs its own bound.
+    if (this.readLookups.size >= MAX_REMEMBERED_READ_ANSWERS) {
+      const [oldest] = this.readLookups.keys();
+      this.readLookups.delete(oldest);
+    }
+    this.readLookups.set(tokenHash, lookup);
+    const forget = () => {
+      // Only its own entry: a newer lookup may have replaced a hung one.
+      if (this.readLookups.get(tokenHash) === lookup) {
+        this.readLookups.delete(tokenHash);
+      }
+    };
+    lookup.answer.then(forget, forget);
   }
 
   private rememberReadAnswer(tokenHash: string, isAdmin: boolean) {
