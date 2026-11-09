@@ -1,8 +1,52 @@
 import {
+  cleanMemberParagraphs,
+  cleanMemberTitle,
   hasVisibleText,
   isNearDuplicateName,
   nameSkeleton,
 } from './member-text';
+
+describe('cleanMemberTitle', () => {
+  it('makes one clean line', () => {
+    expect(cleanMemberTitle(' A\u0000\u0007B\u202Ec\nd\tE\r\nF ')).toBe(
+      'ABc d E F',
+    );
+  });
+
+  it('removes every bidirectional override and isolate', () => {
+    expect(
+      cleanMemberTitle(
+        'a\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069b',
+      ),
+    ).toBe('ab');
+  });
+
+  it('replaces a lone surrogate, as the version store does', () => {
+    expect(cleanMemberTitle('a\uD800b')).toBe('a\uFFFDb');
+  });
+
+  it('leaves ordinary text and joined emoji alone', () => {
+    expect(cleanMemberTitle('Theology 🧑‍🚀 é')).toBe('Theology 🧑‍🚀 é');
+  });
+});
+
+describe('cleanMemberParagraphs', () => {
+  it('keeps line breaks and strips the rest', () => {
+    expect(cleanMemberParagraphs('a\u0000\nb\u0007\n\nc\u202E')).toBe(
+      'a\nb\n\nc',
+    );
+  });
+
+  it('reads unusual line separators as line breaks', () => {
+    expect(cleanMemberParagraphs('a\u2028b\u2029c\vd\fe')).toBe(
+      'a\nb\nc\nd\ne',
+    );
+  });
+
+  it('replaces a lone surrogate', () => {
+    expect(cleanMemberParagraphs('a\uDC00')).toBe('a\uFFFD');
+  });
+});
 
 describe('hasVisibleText', () => {
   it.each([

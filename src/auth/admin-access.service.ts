@@ -19,6 +19,9 @@ import type { MemberRole } from './roles';
  */
 export const ROLE_CACHE_MAX_AGE_MS = 60_000;
 
+/** Bound on the read-only answers held in memory; the oldest goes first. */
+export const MAX_REMEMBERED_READ_ANSWERS = 2_000;
+
 /**
  * Decides who has website-admin access.
  *
@@ -33,6 +36,10 @@ export class AdminAccessService {
   private readonly logger = new Logger(AdminAccessService.name);
   private readonly allowlistOnlyWarned = new Set<string>();
   private readonly allowlistedEmails: Set<string>;
+  private readonly readAnswers = new Map<
+    string,
+    { isAdmin: boolean; expires: number }
+  >();
 
   constructor(
     config: ConfigService,
@@ -123,6 +130,42 @@ export class AdminAccessService {
 
     const profile = await this.synchronizeProfile(request);
     return profile?.isAdmin === true;
+  }
+
+  /**
+   * The same decision as {@link hasAdminAccess} without writing anything, for
+   * read paths: looking at a page must not create an account row. The answer
+   * is remembered per token for as long as a cached role may be trusted.
+   */
+  async isAdminForRead(request: AuthenticatedRequest): Promise<boolean> {
+    const authProviderId = getUserSub(request);
+    const tokenHash = this.getAccessTokenHash(request);
+    const remembered = tokenHash ? this.readAnswers.get(tokenHash) : undefined;
+    if (remembered && Date.now() < remembered.expires) {
+      return remembered.isAdmin;
+    }
+
+    const identity = await this.clerkUserInfo.getIdentity(authProviderId);
+    const isAdmin = this.decideAdmin(
+      authProviderId,
+      identity.role,
+      identity.emailVerified === true,
+      identity.email?.trim().toLowerCase(),
+    );
+    if (tokenHash) this.rememberReadAnswer(tokenHash, isAdmin);
+    return isAdmin;
+  }
+
+  private rememberReadAnswer(tokenHash: string, isAdmin: boolean) {
+    this.readAnswers.delete(tokenHash);
+    if (this.readAnswers.size >= MAX_REMEMBERED_READ_ANSWERS) {
+      const [oldest] = this.readAnswers.keys();
+      this.readAnswers.delete(oldest);
+    }
+    this.readAnswers.set(tokenHash, {
+      isAdmin,
+      expires: Date.now() + ROLE_CACHE_MAX_AGE_MS,
+    });
   }
 
   private roleIsFresh(checkedAt: Date | undefined): boolean {

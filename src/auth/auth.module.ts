@@ -5,6 +5,7 @@ import {
   MemberProfileSchema,
 } from '../profiles/schemas/member-profile.schema';
 import { AdminAccessService } from './admin-access.service';
+import { AdminRoleGuard } from './admin-role.guard';
 import { ClerkUserInfoService } from './clerk-user-info.service';
 import { ClerkAuthGuard, OptionalClerkAuthGuard } from './auth.guard';
 import { PermissionsGuard } from './permissions.guard';
@@ -24,6 +25,7 @@ import { ModerationModule } from '../moderation/moderation.module';
   ],
   providers: [
     AdminAccessService,
+    AdminRoleGuard,
     ClerkAuthGuard,
     ClerkUserInfoService,
     OptionalClerkAuthGuard,
@@ -32,6 +34,7 @@ import { ModerationModule } from '../moderation/moderation.module';
   ],
   exports: [
     AdminAccessService,
+    AdminRoleGuard,
     ClerkAuthGuard,
     ClerkUserInfoService,
     OptionalClerkAuthGuard,

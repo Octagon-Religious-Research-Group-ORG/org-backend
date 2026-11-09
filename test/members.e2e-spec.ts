@@ -16,7 +16,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AdminAccessService } from '../src/auth/admin-access.service';
 import { ClerkAuthGuard, OptionalClerkAuthGuard } from '../src/auth/auth.guard';
-import { PermissionsGuard } from '../src/auth/permissions.guard';
+import { AdminRoleGuard } from '../src/auth/admin-role.guard';
 import { configureHttpApp } from '../src/config/http-app';
 import { DEFAULT_THROTTLE } from '../src/config/throttle';
 import { MemberWriteThrottleGuard } from '../src/members/member-write-throttle.guard';
@@ -99,13 +99,16 @@ const profiles = {
   updateOne: jest.fn(() => ({
     exec: () => Promise.resolve({ matchedCount: 1 }),
   })),
+  findOneAndUpdate: jest.fn(() => chain({ nextTabOrder: 3 })),
 };
 
 const pictures = {
   read: jest.fn(() =>
     Promise.resolve({ data: Buffer.from('webp-bytes'), fileId: 'file1' }),
   ),
-  roleOf: jest.fn(() => Promise.resolve('picture')),
+  livePictures: jest.fn((ids: string[]) => Promise.resolve(new Set(ids))),
+  currentPicture: jest.fn((ids: string[]) => Promise.resolve(ids[0])),
+  retire: jest.fn(() => Promise.resolve()),
   store: jest.fn(() => Promise.resolve('new-file')),
   remove: jest.fn(() => Promise.resolve()),
 };
@@ -119,14 +122,24 @@ const settings = {
 const moderationLog = { record: jest.fn(() => Promise.resolve({})) };
 const adminAccess = {
   hasAdminAccess: jest.fn((req: { auth: { payload: { sub: string } } }) =>
-    Promise.resolve(req.auth.payload.sub === 'user_admin'),
+    Promise.resolve(req.auth.payload.sub.startsWith('user_admin')),
+  ),
+  isAdminForRead: jest.fn((req: { auth: { payload: { sub: string } } }) =>
+    Promise.resolve(req.auth.payload.sub.startsWith('user_admin')),
   ),
 };
 
 function tokenUser(context: ExecutionContext) {
   const req = context.switchToHttp().getRequest();
   const header: string | undefined = req.headers.authorization;
-  if (header) req.auth = { payload: { sub: header.replace('Bearer ', '') } };
+  if (header) {
+    req.auth = {
+      payload: {
+        sub: header.replace('Bearer ', ''),
+        permissions: req.headers['x-test-permissions']?.split(','),
+      },
+    };
+  }
   return Boolean(header);
 }
 
@@ -165,7 +178,7 @@ describe('Members API (e2e)', () => {
         OrgSettingsService,
         MemberWriteThrottleGuard,
         Reflector,
-        PermissionsGuard,
+        AdminRoleGuard,
         { provide: PictureStore, useValue: pictures },
         { provide: ModerationLogService, useValue: moderationLog },
         { provide: AdminAccessService, useValue: adminAccess },
@@ -461,6 +474,44 @@ describe('Members API (e2e)', () => {
     it('refuses an upload with no file', async () => {
       await write('put', '/me/member-page/picture').send({}).expect(400);
     });
+
+    it('refuses more than one file, by the file limit', async () => {
+      const png = Buffer.from('x');
+      const { body } = await write('put', '/me/member-page/picture')
+        .attach('picture', png, 'a.png')
+        .attach('picture', png, 'b.png')
+        .expect(400);
+      expect(body.message).toMatch(/Too many files/);
+    });
+
+    it('refuses an extra form field, by the field limit', async () => {
+      pictures.store.mockClear();
+      const { body } = await write('put', '/me/member-page/picture')
+        .field('note', 'x')
+        .attach('picture', Buffer.from('x'), 'a.png')
+        .expect(400);
+      expect(body.message).toMatch(/Too many fields/);
+      expect(pictures.store).not.toHaveBeenCalled();
+    });
+
+    it('keeps a signed-in answer out of every cache, and a guest one alone', async () => {
+      const signedIn = await get('/members/chats', 'user_anon').expect(200);
+      expect(signedIn.headers['cache-control']).toBe('private, no-store');
+      const owner = await write('patch', '/me/member-page/visibility')
+        .send({ visibility: 'public' })
+        .expect(200);
+      expect(owner.headers['cache-control']).toBe('private, no-store');
+      const guest = await get('/members/chats').expect(200);
+      expect(guest.headers['cache-control']).toBeUndefined();
+    });
+
+    it('lets a public picture stay cacheable for a signed-in viewer', async () => {
+      const { headers } = await get(
+        '/members/profiles/open-page/picture',
+        'user_anon',
+      ).expect(200);
+      expect(headers['cache-control']).toBe('public, no-cache');
+    });
   });
 
   describe('the voting invite setting', () => {
@@ -476,6 +527,25 @@ describe('Members API (e2e)', () => {
       expect(moderationLog.record).not.toHaveBeenCalled();
     });
 
+    it('ignores a permission claim on the token', async () => {
+      await put('user_named', 'https://t.me/+abc')
+        .set('X-Test-Permissions', 'manage:settings')
+        .expect(403);
+    });
+
+    it('counts against the account ration', async () => {
+      const send = (attempt: number) =>
+        put('user_admin_ration', 'https://t.me/+abc').set(
+          'X-Forwarded-For',
+          `203.0.113.${Math.floor(attempt / 8)}`,
+        );
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await send(attempt).expect(200);
+      }
+      const { body } = await send(100).expect(429);
+      expect(body.code).toBe('MEMBER_WRITE_DAILY_LIMIT');
+    });
+
     it('lets an admin set it, audited', async () => {
       moderationLog.record.mockClear();
       await put('user_admin', 'https://t.me/+abc')
@@ -483,6 +553,18 @@ describe('Members API (e2e)', () => {
         .expect({ set: true });
       expect(moderationLog.record).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it('applies the write limit to adding a tab', async () => {
+    const send = () =>
+      request(app.getHttpServer())
+        .post('/api/v1/me/member-page/tabs')
+        .set('Authorization', 'Bearer user_tablimit')
+        .set('X-Forwarded-For', '203.0.113.51')
+        .send({ title: 'T', text: 'x' });
+    OWN_PAGES.user_tablimit = OWN_PAGES.user_owner;
+    for (let attempt = 0; attempt < 10; attempt++) await send().expect(201);
+    await send().expect(429);
   });
 
   it('applies the write limit to owner tools', async () => {

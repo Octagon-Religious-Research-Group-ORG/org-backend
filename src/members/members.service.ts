@@ -62,6 +62,7 @@ const PROFILE_FIELDS = {
   ownerUserId: 1,
   deletedAt: 1,
   contacts: 1,
+  source: 1,
 };
 
 /**
@@ -133,10 +134,13 @@ export class MembersService {
     };
   }
 
-  /** If the role cannot be read the viewer is simply not treated as an admin. */
+  /**
+   * Only a read: looking at a page must not create an account row. If the
+   * role cannot be read the viewer is simply not treated as an admin.
+   */
   private async isAdmin(request: AuthenticatedRequest) {
     try {
-      return await this.adminAccess.hasAdminAccess(request);
+      return await this.adminAccess.isAdminForRead(request);
     } catch (error) {
       this.logger.warn(
         `Could not read a viewer's role: ${error instanceof Error ? error.message : String(error)}`,
@@ -160,13 +164,26 @@ export class MembersService {
       .lean()
       .exec()) as unknown as ProfileRow[];
 
-    const members = rows
-      .slice(0, MAX_DIRECTORY_CARDS)
-      .flatMap((row): DirectoryCard[] => {
-        const access = decideProfileAccess(viewer, row);
-        if (!access.listed || access.level === 'none') return [];
-        return [directoryCard(row, access.level, this.guestCanSee(row))];
-      })
+    const shown = rows.slice(0, MAX_DIRECTORY_CARDS).flatMap((row) => {
+      const access = decideProfileAccess(viewer, row);
+      return access.listed && access.level !== 'none'
+        ? [{ row, level: access.level }]
+        : [];
+    });
+    const live = await this.pictures.livePictures(
+      shown.flatMap(({ row, level }) =>
+        level === 'full' ? (row.imageIds ?? []) : [],
+      ),
+    );
+    const members = shown
+      .map(({ row, level }) =>
+        directoryCard(
+          row,
+          level,
+          this.guestCanSee(row),
+          (row.imageIds ?? []).some((id) => live.has(id)),
+        ),
+      )
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
     return { members, hasMore: rows.length > MAX_DIRECTORY_CARDS };
   }
@@ -207,6 +224,7 @@ export class MembersService {
       viewer.isAdmin,
       this.guestCanSee(profile),
       await this.content(profile._id),
+      await this.pictures.currentPicture(profile.imageIds ?? []),
     );
   }
 
@@ -216,11 +234,11 @@ export class MembersService {
    */
   async picture(slug: string, viewer: Viewer): Promise<PictureResponse> {
     const { profile, access } = await this.findVisible(slug, viewer);
-    const [imageId] = profile.imageIds ?? [];
-    const picture =
-      access.level === 'full' && imageId
-        ? await this.pictures.read(imageId)
+    const imageId =
+      access.level === 'full'
+        ? await this.pictures.currentPicture(profile.imageIds ?? [])
         : undefined;
+    const picture = imageId ? await this.pictures.read(imageId) : undefined;
     if (!picture) throw new NotFoundException(PROFILE_NOT_FOUND);
     return { picture, isPublic: this.guestCanSee(profile) };
   }

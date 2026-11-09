@@ -118,8 +118,14 @@ const owner: Viewer = {
 const admin: Viewer = { kind: 'signed-in', userId: 'user_x', isAdmin: true };
 
 function setup(
-  options: { one?: unknown; many?: unknown[]; own?: unknown } = {},
+  options: {
+    one?: unknown;
+    many?: unknown[];
+    own?: unknown;
+    live?: string[];
+  } = {},
 ) {
+  const live = new Set(options.live ?? ['img1']);
   const directoryQuery = chain(options.many ?? []);
   const profileModel = {
     findOne: jest.fn((filter: Record<string, unknown>) =>
@@ -136,9 +142,15 @@ function setup(
     read: jest.fn(() =>
       Promise.resolve({ data: Buffer.from('webp'), fileId: 'img1' }),
     ),
+    livePictures: jest.fn((ids: string[]) =>
+      Promise.resolve(new Set(ids.filter((id) => live.has(id)))),
+    ),
+    currentPicture: jest.fn((ids: string[]) =>
+      Promise.resolve(ids.find((id) => live.has(id))),
+    ),
   };
   const settings = { votingInvite: jest.fn(() => Promise.resolve(undefined)) };
-  const adminAccess = { hasAdminAccess: jest.fn(() => Promise.resolve(false)) };
+  const adminAccess = { isAdminForRead: jest.fn(() => Promise.resolve(false)) };
   const service = new MembersService(
     profileModel as never,
     tabModel as never,
@@ -214,7 +226,7 @@ describe('MembersService.resolveViewer', () => {
 
   it('takes the admin flag from the admin check', async () => {
     const { service, adminAccess } = setup();
-    adminAccess.hasAdminAccess.mockResolvedValueOnce(true);
+    adminAccess.isAdminForRead.mockResolvedValueOnce(true);
     expect((await service.resolveViewer(request('u1'))).isAdmin).toBe(true);
   });
 
@@ -222,7 +234,7 @@ describe('MembersService.resolveViewer', () => {
     'is not an admin when the role cannot be read (%s)',
     async (failure) => {
       const { service, adminAccess } = setup();
-      adminAccess.hasAdminAccess.mockRejectedValueOnce(failure);
+      adminAccess.isAdminForRead.mockRejectedValueOnce(failure);
       expect((await service.resolveViewer(request('u1'))).isAdmin).toBe(false);
     },
   );
@@ -287,6 +299,20 @@ describe('MembersService.directory', () => {
     const { service } = setup({ many: [page()] });
     const json = JSON.stringify(await service.directory(admin));
     expect(json).not.toMatch(/secret|user_owner|ownerUserId/i);
+  });
+
+  it('shows no picture on a card whose files are all gallery photos', async () => {
+    const { service } = setup({ many: [page({ imageIds: ['gallery-1'] })] });
+    const [card] = (await service.directory(GUEST_VIEWER)).members;
+    expect(card.hasPicture).toBe(false);
+  });
+
+  it('never looks up the picture of a name-only card', async () => {
+    const { service, pictures } = setup({
+      many: [page({ visibility: 'members' })],
+    });
+    await service.directory(GUEST_VIEWER);
+    expect(pictures.livePictures).toHaveBeenCalledWith([]);
   });
 
   it('sorts by name and says when the list was cut', async () => {
@@ -363,6 +389,45 @@ describe('MembersService.profile', () => {
     expect(json).not.toMatch(/SECRET|image:abc/);
   });
 
+  it('never asks the database for a removed block', async () => {
+    const { service, blockModel } = setup({ one: page() });
+    await service.profile('quiet-fern', GUEST_VIEWER);
+    expect(blockModel.find).toHaveBeenCalledWith(
+      expect.objectContaining({ removedAt: { $exists: false } }),
+    );
+  });
+
+  it('sends the owner the page source, and nobody else', async () => {
+    const row = page({ source: 'native' });
+    const own = await setup({ one: row }).service.profile('quiet-fern', owner);
+    expect(own).toMatchObject({ manage: { source: 'native' } });
+    const other = await setup({ one: row }).service.profile(
+      'quiet-fern',
+      member,
+    );
+    expect(JSON.stringify(other)).not.toContain('native');
+  });
+
+  it('has no picture when the page lists only gallery photos', async () => {
+    const { service } = setup({
+      one: page({ imageIds: ['gallery-1'] }),
+    });
+    await expect(
+      service.profile('quiet-fern', GUEST_VIEWER),
+    ).resolves.toMatchObject({ hasPicture: false });
+  });
+
+  it('gives the file a version only when there is a picture', async () => {
+    const { service } = setup({ one: page() });
+    await expect(
+      service.profile('quiet-fern', GUEST_VIEWER),
+    ).resolves.toMatchObject({ hasPicture: true, pictureVersion: 'img1' });
+    const none = await setup({
+      one: page({ imageIds: ['gallery-1'] }),
+    }).service.profile('quiet-fern', GUEST_VIEWER);
+    expect(none).not.toHaveProperty('pictureVersion');
+  });
+
   it('only ever asks the database for the shown sections', async () => {
     const { service, blockModel } = setup({ one: page() });
     await service.profile('quiet-fern', GUEST_VIEWER);
@@ -387,6 +452,7 @@ describe('MembersService.profile', () => {
       displayName: 'Quiet Fern',
       isOwner: false,
       hasPicture: true,
+      pictureVersion: 'img1',
       picturePublic: true,
       contacts: [{ method: 'signal', value: '@fern' }],
       bio: [
@@ -498,6 +564,22 @@ describe('MembersService.picture', () => {
     const { service, pictures } = setup({ one: row });
     await notFound(() => service.picture('quiet-fern', GUEST_VIEWER));
     expect(pictures.read).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 for a page with only gallery photos', async () => {
+    const { service, pictures } = setup({
+      one: page({ imageIds: ['gallery-1'] }),
+    });
+    await notFound(() => service.picture('quiet-fern', GUEST_VIEWER));
+    expect(pictures.read).not.toHaveBeenCalled();
+  });
+
+  it('serves the file that is the picture, not the first listed', async () => {
+    const { service, pictures } = setup({
+      one: page({ imageIds: ['gallery-1', 'img1'] }),
+    });
+    await service.picture('quiet-fern', GUEST_VIEWER);
+    expect(pictures.read).toHaveBeenCalledWith('img1');
   });
 
   it('answers 404 when there is no picture or the file is gone', async () => {

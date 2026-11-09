@@ -2,6 +2,7 @@
 import { Logger } from '@nestjs/common';
 import {
   AdminAccessService,
+  MAX_REMEMBERED_READ_ANSWERS,
   ROLE_CACHE_MAX_AGE_MS,
 } from './admin-access.service';
 import type { AuthenticatedRequest } from './auth.types';
@@ -390,6 +391,98 @@ describe('AdminAccessService', () => {
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('user_member'));
     });
+  });
+});
+
+describe('isAdminForRead', () => {
+  const config = { get: jest.fn(() => 'list@example.test') };
+  function setup(identity: Record<string, unknown>) {
+    const clerk = { getIdentity: jest.fn().mockResolvedValue(identity) };
+    const model = {
+      findOne: jest.fn(() => query(null)),
+      findOneAndUpdate: jest.fn(() => query(null)),
+      updateOne: jest.fn(() => ({ exec: jest.fn() })),
+    };
+    const service = new AdminAccessService(
+      config as never,
+      clerk as never,
+      model as never,
+    );
+    return { service, clerk, model };
+  }
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    jest.useRealTimers();
+  });
+
+  it('reads the Clerk role and writes no row', async () => {
+    const { service, model } = setup({ emailVerified: false, role: 'admin' });
+    await expect(service.isAdminForRead(request())).resolves.toBe(true);
+    expect(model.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(model.updateOne).not.toHaveBeenCalled();
+    expect(model.findOne).not.toHaveBeenCalled();
+  });
+
+  it('answers no for a member without the role', async () => {
+    const { service } = setup({ emailVerified: false, role: 'moderator' });
+    await expect(service.isAdminForRead(request())).resolves.toBe(false);
+  });
+
+  it('honours the verified allowlist, normalising the address', async () => {
+    const { service } = setup({
+      email: ' LIST@example.test ',
+      emailVerified: true,
+    });
+    await expect(service.isAdminForRead(request())).resolves.toBe(true);
+  });
+
+  it('treats an unknown verified flag as unverified', async () => {
+    const { service } = setup({ email: 'list@example.test' });
+    await expect(service.isAdminForRead(request())).resolves.toBe(false);
+  });
+
+  it('copes with an identity that has no address', async () => {
+    const { service } = setup({ emailVerified: true });
+    await expect(service.isAdminForRead(request())).resolves.toBe(false);
+  });
+
+  it('asks Clerk once per token until the answer is too old', async () => {
+    jest.useFakeTimers();
+    const { service, clerk } = setup({ emailVerified: true, role: 'admin' });
+    await service.isAdminForRead(request());
+    await service.isAdminForRead(request());
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(ROLE_CACHE_MAX_AGE_MS + 1);
+    await service.isAdminForRead(request());
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks Clerk every time when there is no token to key on', async () => {
+    const { service, clerk } = setup({ emailVerified: true });
+    await service.isAdminForRead(request(false));
+    await service.isAdminForRead(request(false));
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds a bounded number of answers, dropping the oldest', async () => {
+    const { service, clerk } = setup({ emailVerified: true });
+    const forToken = (token: string) =>
+      ({
+        auth: { payload: { sub: 'u1' } },
+        headers: { authorization: `Bearer ${token}` },
+      }) as AuthenticatedRequest;
+    for (let i = 0; i <= MAX_REMEMBERED_READ_ANSWERS; i++) {
+      await service.isAdminForRead(forToken(String(i)));
+    }
+    const calls = clerk.getIdentity.mock.calls.length;
+    await service.isAdminForRead(forToken(String(MAX_REMEMBERED_READ_ANSWERS)));
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(calls);
+    await service.isAdminForRead(forToken('0'));
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(calls + 1);
   });
 });
 

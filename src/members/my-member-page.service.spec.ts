@@ -2,9 +2,12 @@
 import {
   BadRequestException,
   ConflictException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Error as MongooseError, Types } from 'mongoose';
+import { MAX_TAB_TITLE_LENGTH } from '../social/schemas/belief-tab.schema';
+import { MAX_BLOCK_TEXT_LENGTH } from '../social/schemas/block-version.schema';
 import {
   MAX_NEW_TAB_PARAGRAPHS,
   MAX_TABS_PER_PAGE,
@@ -19,24 +22,38 @@ jest.mock('./picture-processing', () => ({
 const prepare = jest.mocked(preparePicture);
 const profileId = new Types.ObjectId();
 
-function chain(value: unknown) {
+function chain(value: unknown, onExec?: () => void) {
   const query = {
     select: jest.fn(() => query),
     lean: jest.fn(() => query),
-    exec: jest.fn(() => Promise.resolve(value)),
+    exec: jest.fn(() => {
+      onExec?.();
+      return Promise.resolve(value);
+    }),
   };
   return query;
 }
 
-function setup(
-  options: { page?: unknown; tabs?: unknown[]; matched?: number } = {},
-) {
+interface Options {
+  page?: unknown;
+  tabs?: unknown[];
+  matched?: number;
+  taken?: unknown;
+}
+
+function setup(options: Options = {}) {
   const order: string[] = [];
   const profileModel = {
     findOne: jest.fn(() =>
       chain(
         options.page === undefined
-          ? { _id: profileId, slug: 'quiet-fern', imageIds: [] }
+          ? {
+              _id: profileId,
+              slug: 'quiet-fern',
+              imageIds: [],
+              liveTabCount: 0,
+              nextTabOrder: 0,
+            }
           : options.page,
       ),
     ),
@@ -46,6 +63,12 @@ function setup(
         return Promise.resolve({ matchedCount: options.matched ?? 1 });
       },
     })),
+    findOneAndUpdate: jest.fn(() =>
+      chain(
+        options.taken === undefined ? { nextTabOrder: 5 } : options.taken,
+        () => order.push('take'),
+      ),
+    ),
   };
   const tabModel = {
     find: jest.fn(() => chain(options.tabs ?? [])),
@@ -67,10 +90,17 @@ function setup(
     }),
   };
   const pictures = {
-    roleOf: jest.fn(() => Promise.resolve('picture')),
+    currentPicture: jest.fn(
+      (ids: string[]): Promise<string | undefined> =>
+        Promise.resolve(ids.find((id) => id !== 'gallery-1')),
+    ),
     store: jest.fn(() => {
       order.push('store');
       return Promise.resolve('new-id');
+    }),
+    retire: jest.fn((...[id]: [string, Date]) => {
+      order.push(`retire:${id}`);
+      return Promise.resolve();
     }),
     remove: jest.fn((id: string) => {
       order.push(`remove:${id}`);
@@ -101,6 +131,14 @@ const OWNED = {
   reviewStatus: { $ne: 'claiming' },
 };
 
+let warn: jest.SpyInstance;
+
+beforeEach(() => {
+  warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+});
+
+afterEach(() => warn.mockRestore());
+
 describe('changeVisibility', () => {
   it('changes only the caller’s own live page', async () => {
     const { service, profileModel } = setup();
@@ -121,16 +159,26 @@ describe('changeVisibility', () => {
 });
 
 describe('addBeliefTab', () => {
-  it('writes every paragraph through the version path, and the tab last', async () => {
-    const { service, order, versions, tabModel } = setup({
-      tabs: [{ order: 1 }, { order: 4 }],
-    });
+  it('takes a place first, writes every paragraph, and the tab last', async () => {
+    const { service, order, versions, tabModel, profileModel } = setup();
     const result = await service.addBeliefTab('u1', {
       title: '  God ',
       text: 'One.\n\nTwo.',
     });
 
-    expect(order).toEqual(['block', 'version', 'block', 'version', 'tab']);
+    expect(order).toEqual([
+      'take',
+      'block',
+      'version',
+      'block',
+      'version',
+      'tab',
+    ]);
+    expect(profileModel.findOneAndUpdate).toHaveBeenCalledWith(
+      { ...OWNED, liveTabCount: { $lt: MAX_TABS_PER_PAGE } },
+      { $inc: { liveTabCount: 1, nextTabOrder: 1 } },
+      { returnDocument: 'before' },
+    );
     expect(versions.appendVersion).toHaveBeenCalledTimes(2);
     expect(versions.appendVersion).toHaveBeenLastCalledWith(
       expect.objectContaining({ text: 'Two.', authorUserId: 'u1' }),
@@ -146,11 +194,21 @@ describe('addBeliefTab', () => {
     expect(result).toMatchObject({ title: 'God' });
   });
 
-  it('numbers the first tab from zero', async () => {
-    const { service, tabModel } = setup();
-    await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+  it('applies the member-text rules to the title and the paragraphs', async () => {
+    const { service, versions, tabModel } = setup();
+    await service.addBeliefTab('u1', {
+      title: 'A\u0000\u0007B‮c\nd\uD800',
+      text: 'be\u0000fore\u0007\n\nafter‮',
+    });
     expect(tabModel.create).toHaveBeenCalledWith(
-      expect.objectContaining({ order: 0 }),
+      expect.objectContaining({ title: 'ABc d�' }),
+    );
+    expect(versions.appendVersion).toHaveBeenCalledTimes(2);
+    expect(versions.appendVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'before' }),
+    );
+    expect(versions.appendVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'after' }),
     );
   });
 
@@ -163,8 +221,16 @@ describe('addBeliefTab', () => {
 
   it.each([
     ['an invisible title', { title: '​', text: 'x' }],
+    [
+      'a title of only control characters',
+      { title: '\u0000\u0007', text: 'x' },
+    ],
     ['text with nothing visible', { title: 'T', text: '​\n\n ' }],
-  ])('refuses %s', async (_n, input) => {
+    [
+      'text of only control characters',
+      { title: 'T', text: '\u0000\n\n\u0007' },
+    ],
+  ])('refuses %s before taking a place', async (_n, input) => {
     const { service, order } = setup();
     await expect(service.addBeliefTab('u1', input)).rejects.toBeInstanceOf(
       BadRequestException,
@@ -183,18 +249,87 @@ describe('addBeliefTab', () => {
     expect(order).toEqual([]);
   });
 
-  it('refuses a page already at the tab limit', async () => {
-    const { service, order } = setup({
-      tabs: Array(MAX_TABS_PER_PAGE).fill({ order: 0 }),
-    });
-    await expect(
-      service.addBeliefTab('u1', { title: 'T', text: 'x' }),
-    ).rejects.toBeInstanceOf(ConflictException);
+  it.each([
+    ['title', { title: 'x'.repeat(MAX_TAB_TITLE_LENGTH + 1), text: 'x' }],
+    ['paragraph', { title: 'T', text: 'x'.repeat(MAX_BLOCK_TEXT_LENGTH + 1) }],
+  ])('refuses a %s over the limit before writing', async (_n, input) => {
+    const { service, order } = setup();
+    await expect(service.addBeliefTab('u1', input)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(order).toEqual([]);
   });
 
-  it('never creates the tab when a paragraph fails, and hides the member text', async () => {
-    const { service, versions, tabModel } = setup();
+  it('writes nothing when the page is full', async () => {
+    const { service, order, blockModel } = setup({ taken: null });
+    await expect(
+      service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(order).toEqual(['take']);
+    expect(blockModel.create).not.toHaveBeenCalled();
+  });
+
+  it('treats a row with no counter value as full, never as order zero', async () => {
+    const { service } = setup({ taken: {} });
+    await expect(
+      service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  describe('a page from before the counters', () => {
+    const old = { page: { _id: profileId, slug: 'quiet-fern', imageIds: [] } };
+
+    it('starts them from its real tabs, conditionally, before taking', async () => {
+      const { service, order, profileModel, tabModel } = setup({
+        ...old,
+        tabs: [{ order: 1 }, { order: 4 }],
+      });
+      await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+      expect(tabModel.find).toHaveBeenCalledWith({ profileId });
+      expect(profileModel.updateOne).toHaveBeenCalledWith(
+        { ...OWNED, _id: profileId, liveTabCount: { $exists: false } },
+        { $set: { liveTabCount: 2, nextTabOrder: 5 } },
+      );
+      expect(order.slice(0, 2)).toEqual(['update', 'take']);
+    });
+
+    it('counts order from removed tabs, but gives them no place', async () => {
+      const { service, profileModel } = setup({
+        ...old,
+        tabs: [{ order: 2, removedAt: new Date(0) }, { order: 1 }],
+      });
+      await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+      expect(profileModel.updateOne).toHaveBeenCalledWith(expect.anything(), {
+        $set: { liveTabCount: 1, nextTabOrder: 3 },
+      });
+    });
+
+    it('starts an empty page at zero', async () => {
+      const { service, profileModel } = setup(old);
+      await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+      expect(profileModel.updateOne).toHaveBeenCalledWith(expect.anything(), {
+        $set: { liveTabCount: 0, nextTabOrder: 0 },
+      });
+    });
+
+    it('does the same when only one counter is present', async () => {
+      const { service, profileModel } = setup({
+        page: { ...old.page, liveTabCount: 3 },
+      });
+      await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+      expect(profileModel.updateOne).toHaveBeenCalled();
+    });
+  });
+
+  it('skips the counter start on a page that already has them', async () => {
+    const { service, profileModel, tabModel } = setup();
+    await service.addBeliefTab('u1', { title: 'T', text: 'x' });
+    expect(profileModel.updateOne).not.toHaveBeenCalled();
+    expect(tabModel.find).not.toHaveBeenCalled();
+  });
+
+  it('never creates the tab when a paragraph fails, hides the member text, and gives its place back', async () => {
+    const { service, versions, tabModel, profileModel } = setup();
     versions.appendVersion.mockRejectedValueOnce(
       new MongooseError.ValidationError(),
     );
@@ -202,7 +337,27 @@ describe('addBeliefTab', () => {
       service.addBeliefTab('u1', { title: 'T', text: 'private words' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(tabModel.create).not.toHaveBeenCalled();
+    expect(profileModel.updateOne).toHaveBeenCalledWith(OWNED, {
+      $inc: { liveTabCount: -1 },
+    });
   });
+
+  it.each([[new Error('db')], ['db']])(
+    'still reports the failure when the place cannot be given back (%s)',
+    async (failure) => {
+      const { service, versions, profileModel } = setup();
+      versions.appendVersion.mockRejectedValueOnce(new Error('first'));
+      profileModel.updateOne.mockImplementationOnce(() => ({
+        // A string rejection is the branch under test.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        exec: () => Promise.reject(failure),
+      }));
+      await expect(
+        service.addBeliefTab('u1', { title: 'T', text: 'x' }),
+      ).rejects.toThrow('first');
+      expect(warn).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('replacePicture', () => {
@@ -232,38 +387,57 @@ describe('replacePicture', () => {
     expect(pictures.store).not.toHaveBeenCalled();
   });
 
-  it('refuses an account with no page', async () => {
-    const { service } = setup({ page: null });
-    await expect(
-      service.replacePicture('u1', Buffer.from('x')),
-    ).rejects.toBeInstanceOf(NotFoundException);
-  });
+  it.each([
+    ['any bytes', Buffer.from('x')],
+    ['no bytes', undefined],
+  ])(
+    'gives an account with no page one answer for %s, without decoding',
+    async (_name, upload) => {
+      const { service } = setup({ page: null });
+      await expect(service.replacePicture('u1', upload)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
 
-  it('removes the previous picture only after the new one is live', async () => {
-    const { service, order, profileModel } = setup(stored(['old', 'keep']));
+  it('retires the previous picture only after the new one is live', async () => {
+    const { service, order, profileModel, pictures } = setup(
+      stored(['old', 'keep']),
+    );
     await service.replacePicture('u1', Buffer.from('x'));
 
-    expect(order).toEqual(['store', 'update', 'remove:old']);
+    expect(order).toEqual(['store', 'update', 'retire:old']);
+    expect(pictures.remove).not.toHaveBeenCalled();
+    expect(pictures.retire).toHaveBeenCalledWith('old', expect.any(Date));
     expect(profileModel.updateOne).toHaveBeenCalledWith(
       { ...OWNED, imageIds: ['old', 'keep'] },
       { $set: { imageIds: ['new-id', 'keep'] } },
     );
   });
 
-  it('adds a first picture and removes nothing', async () => {
+  it('adds a first picture and retires nothing', async () => {
     const { service, order, pictures } = setup(stored([]));
     await service.replacePicture('u1', Buffer.from('x'));
     expect(order).toEqual(['store', 'update']);
-    expect(pictures.roleOf).not.toHaveBeenCalled();
+    expect(pictures.retire).not.toHaveBeenCalled();
   });
 
-  it('keeps a migrated gallery photo that was first in the list', async () => {
-    const { service, order, profileModel, pictures } = setup(
-      stored(['gallery-1']),
-    );
-    pictures.roleOf.mockResolvedValueOnce('gallery');
+  it('keeps a migrated gallery photo, wherever it sits in the list', async () => {
+    const { service, order, profileModel } = setup(stored(['gallery-1']));
     await service.replacePicture('u1', Buffer.from('x'));
     expect(order).toEqual(['store', 'update']);
+    expect(profileModel.updateOne).toHaveBeenCalledWith(expect.anything(), {
+      $set: { imageIds: ['new-id', 'gallery-1'] },
+    });
+  });
+
+  it('replaces only the profile picture on a mixed list', async () => {
+    const { service, profileModel, pictures } = setup(
+      stored(['gallery-1', 'pic']),
+    );
+    await service.replacePicture('u1', Buffer.from('x'));
+    expect(pictures.retire).toHaveBeenCalledWith('pic', expect.any(Date));
     expect(profileModel.updateOne).toHaveBeenCalledWith(expect.anything(), {
       $set: { imageIds: ['new-id', 'gallery-1'] },
     });
@@ -289,14 +463,42 @@ describe('replacePicture', () => {
     expect(order).toEqual(['store', 'update', 'remove:new-id']);
   });
 
+  it('removes its own new file when the pointer update fails, keeping the old picture', async () => {
+    const { service, order, profileModel, pictures } = setup(stored(['old']));
+    profileModel.updateOne.mockImplementationOnce(() => ({
+      exec: () => Promise.reject(new Error('db down')),
+    }));
+    await expect(
+      service.replacePicture('u1', Buffer.from('x')),
+    ).rejects.toThrow('db down');
+    expect(order).toEqual(['store', 'remove:new-id']);
+    expect(pictures.retire).not.toHaveBeenCalled();
+  });
+
   it.each([[new Error('gridfs')], ['gridfs']])(
-    'still succeeds if the old file cannot be removed (%s)',
+    'still reports the real failure if the unused file cannot be removed (%s)',
     async (failure) => {
-      const { service, pictures } = setup(stored(['old']));
+      const { service, profileModel, pictures } = setup(stored(['old']));
+      profileModel.updateOne.mockImplementationOnce(() => ({
+        exec: () => Promise.reject(new Error('db down')),
+      }));
       pictures.remove.mockRejectedValueOnce(failure);
       await expect(
         service.replacePicture('u1', Buffer.from('x')),
+      ).rejects.toThrow('db down');
+      expect(warn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([[new Error('gridfs')], ['gridfs']])(
+    'still succeeds if the old file cannot be retired (%s)',
+    async (failure) => {
+      const { service, pictures } = setup(stored(['old']));
+      pictures.retire.mockRejectedValueOnce(failure);
+      await expect(
+        service.replacePicture('u1', Buffer.from('x')),
       ).resolves.toEqual({ hasPicture: true });
+      expect(warn).toHaveBeenCalledTimes(1);
     },
   );
 });

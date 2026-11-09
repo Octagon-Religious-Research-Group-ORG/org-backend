@@ -5,6 +5,7 @@ import type {
 import type {
   ContactMethod,
   ProfileReviewStatus,
+  ProfileSource,
   ProfileVisibility,
 } from '../social/schemas/social-profile.schema';
 import type { ProfileAccess } from './profile-access';
@@ -25,6 +26,7 @@ export interface ProfileRow {
   ownerUserId?: string;
   deletedAt?: Date | null;
   contacts?: Array<{ method: ContactMethod; value: string }>;
+  source?: ProfileSource;
 }
 
 export interface ParagraphView {
@@ -70,6 +72,8 @@ export interface NameOnlyProfile {
 
 export interface FullProfile extends ProfileContent, PictureFacts {
   access: 'full';
+  /** Changes when the picture does, so a browser asks for the new one. */
+  pictureVersion?: string;
   slug: string;
   displayName: string;
   isOwner: boolean;
@@ -78,6 +82,7 @@ export interface FullProfile extends ProfileContent, PictureFacts {
   manage?: {
     visibility: ProfileVisibility;
     reviewStatus: ProfileReviewStatus;
+    source?: ProfileSource;
   };
 }
 
@@ -106,13 +111,15 @@ export function fullProfile(
   isAdmin: boolean,
   picturePublic: boolean,
   content: ProfileContent,
+  pictureId: string | undefined,
 ): FullProfile {
   return {
     access: 'full',
     slug: profile.slug,
     displayName: profile.displayName,
     isOwner: access.isOwner,
-    hasPicture: (profile.imageIds ?? []).length > 0,
+    hasPicture: pictureId !== undefined,
+    ...(pictureId !== undefined ? { pictureVersion: pictureId } : {}),
     picturePublic,
     contacts: (profile.contacts ?? []).map(({ method, value }) => ({
       method,
@@ -126,6 +133,7 @@ export function fullProfile(
           manage: {
             visibility: profile.visibility,
             reviewStatus: profile.reviewStatus ?? 'approved',
+            ...(profile.source ? { source: profile.source } : {}),
           },
         }
       : {}),
@@ -136,13 +144,14 @@ export function directoryCard(
   profile: ProfileRow,
   level: 'full' | 'name-only',
   picturePublic: boolean,
+  hasPicture: boolean,
 ): DirectoryCard {
   const full = level === 'full';
   return {
     slug: profile.slug,
     displayName: profile.displayName,
     access: level,
-    hasPicture: full && (profile.imageIds ?? []).length > 0,
+    hasPicture: full && hasPicture,
     picturePublic: full && picturePublic,
   };
 }

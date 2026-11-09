@@ -151,6 +151,19 @@ export class SocialProfile {
   @Prop({ type: [String], default: [] })
   similarNameOf: string[];
 
+  /**
+   * Belief tabs on this page that are not removed, counted so a new tab can
+   * take a place atomically. Absent on pages made by the import or the join
+   * form until their first new tab sets it from the real rows. Whatever
+   * removes a tab must take one off this.
+   */
+  @Prop({ type: Number, min: 0 })
+  liveTabCount?: number;
+
+  /** The next tab's `order`. Only ever rises, so an order is never reused. */
+  @Prop({ type: Number, min: 0 })
+  nextTabOrder?: number;
+
   /** Clerk user id of the member who owns the page; absent until claimed. */
   @Prop({ type: String })
   ownerUserId?: string;

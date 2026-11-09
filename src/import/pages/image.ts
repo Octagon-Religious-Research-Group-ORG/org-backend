@@ -3,6 +3,9 @@ import sharp from 'sharp';
 /** Longest side of a stored profile image, in pixels. */
 export const MAX_IMAGE_SIDE = 1600;
 
+/** The limit for the laptop-only import CLI; server uploads pass a lower one. */
+export const IMPORT_MAX_INPUT_PIXELS = 120_000_000;
+
 export interface ProcessedImage {
   data: Buffer;
   width: number;
@@ -18,8 +21,11 @@ export interface ProcessedImage {
  *
  * @throws Error when the bytes are not an image sharp can read
  */
-export async function processImage(input: Uint8Array): Promise<ProcessedImage> {
-  const { data, info } = await sharp(input, { limitInputPixels: 120_000_000 })
+export async function processImage(
+  input: Uint8Array,
+  limitInputPixels: number = IMPORT_MAX_INPUT_PIXELS,
+): Promise<ProcessedImage> {
+  const { data, info } = await sharp(input, { limitInputPixels })
     .rotate()
     .resize({
       width: MAX_IMAGE_SIDE,

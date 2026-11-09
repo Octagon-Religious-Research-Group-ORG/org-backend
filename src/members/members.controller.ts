@@ -18,10 +18,10 @@ import type { Response } from 'express';
 import { ClerkAuthGuard, OptionalClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
-import { Permissions } from '../auth/permissions.decorator';
-import { PermissionsGuard } from '../auth/permissions.guard';
+import { AdminRoleGuard } from '../auth/admin-role.guard';
 import { PICTURE_THROTTLE, WriteThrottle } from '../config/throttle';
 import { MemberWriteThrottleGuard } from './member-write-throttle.guard';
+import { NoStoreWhenSignedInInterceptor } from './no-store.interceptor';
 import {
   AddBeliefTabDto,
   ChangeVisibilityDto,
@@ -44,6 +44,7 @@ export const PRIVATE_PICTURE_CACHE = 'private, no-store';
 /** Reads about member pages; who is asking comes only from the verified token. */
 @Controller('members')
 @UseGuards(OptionalClerkAuthGuard)
+@UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MembersController {
   constructor(private readonly members: MembersService) {}
 
@@ -107,6 +108,7 @@ export class MembersController {
 /** The signed-in owner's tools for their own page. */
 @Controller('me/member-page')
 @UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyMemberPageController {
   constructor(private readonly page: MyMemberPageService) {}
 
@@ -140,14 +142,17 @@ export class MyMemberPageController {
   }
 }
 
-/** Admin-only settings. The admin screen for them is Chunk 12. */
+/**
+ * Admin-only settings: the real Clerk admin role, never a token claim. The
+ * admin screen for them is Chunk 12.
+ */
 @Controller('admin/settings')
-@UseGuards(ClerkAuthGuard, PermissionsGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AdminRoleGuard, MemberWriteThrottleGuard)
+@UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class AdminSettingsController {
   constructor(private readonly settings: OrgSettingsService) {}
 
   @Put('voting-invite')
-  @Permissions('manage:settings')
   @WriteThrottle()
   setVotingInvite(
     @Req() request: AuthenticatedRequest,

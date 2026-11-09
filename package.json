@@ -96,6 +96,7 @@
       "auth/auth.guard.ts",
       "auth/auth.helpers.ts",
       "auth/admin-access.service.ts",
+      "auth/admin-role.guard.ts",
       "auth/clerk-user-info.service.ts",
       "auth/permissions.guard.ts",
       "auth/roles.service.ts",
@@ -156,7 +157,8 @@
       "members/picture-processing.ts",
       "members/picture-store.service.ts",
       "members/member-write-throttle.guard.ts",
-      "members/members.controller.ts"
+      "members/members.controller.ts",
+      "members/no-store.interceptor.ts"
     ],
     "coverageThreshold": {
       "global": {

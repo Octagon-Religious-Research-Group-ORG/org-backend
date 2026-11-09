@@ -1,3 +1,5 @@
+import { toStorableText } from '../social/version-chain';
+
 /**
  * Characters that show nothing on screen: controls and format characters
  * (zero-width spaces and joiners), separators, combining marks with no letter
@@ -5,6 +7,36 @@
  * selectors) and the blank Braille cell.
  */
 const INVISIBLE = /[\p{C}\p{Z}\p{M}\p{Default_Ignorable_Code_Point}⠀]/gu;
+
+/**
+ * Control characters, and the bidirectional overrides that make text read
+ * differently from what it stores. Line breaks and tabs are handled apart.
+ */
+const STRIPPED_CONTROLS =
+  // eslint-disable-next-line no-control-regex -- matching them is the point
+  /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+const LINE_BREAKS_AND_TABS = /[\t\n\v\f\r\u2028\u2029]+/g;
+
+/**
+ * A title as it is stored: one line, no control characters, no lone
+ * surrogates, no bidirectional overrides.
+ */
+export function cleanMemberTitle(text: string): string {
+  return toStorableText(text)
+    .replace(STRIPPED_CONTROLS, '')
+    .replace(LINE_BREAKS_AND_TABS, ' ')
+    .trim();
+}
+
+/**
+ * Paragraph text as it is stored: the same rules as a title, except that
+ * line breaks stay, because a blank line is what separates paragraphs.
+ */
+export function cleanMemberParagraphs(text: string): string {
+  return toStorableText(text)
+    .replace(STRIPPED_CONTROLS, '')
+    .replace(/[\v\f\u2028\u2029]/g, '\n');
+}
 
 /** True when the text has at least one character a reader would see. */
 export function hasVisibleText(text: string): boolean {

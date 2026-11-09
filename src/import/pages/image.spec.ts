@@ -21,6 +21,16 @@ describe('processImage', () => {
     expect((await sharp(result.data).metadata()).format).toBe('webp');
   });
 
+  it('refuses more pixels than a caller allows, and only then', async () => {
+    const png = await sharp({
+      create: { width: 200, height: 100, channels: 3, background: '#f00' },
+    })
+      .png()
+      .toBuffer();
+    await expect(processImage(png, 200 * 100)).resolves.toBeDefined();
+    await expect(processImage(png, 200 * 100 - 1)).rejects.toThrow(/pixel/);
+  });
+
   it('applies the EXIF rotation and never enlarges', async () => {
     // Stored 40x20 with orientation 6 ("rotate 90° clockwise to view").
     const jpeg = await sharp({
