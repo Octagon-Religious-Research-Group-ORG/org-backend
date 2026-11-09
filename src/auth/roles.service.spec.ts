@@ -38,7 +38,7 @@ const entry = {
 
 describe('RolesService.setRole', () => {
   it('says the role changed when only the final audit entry fails', async () => {
-    jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     const { service, clerk, log } = setup();
     log.record
       .mockResolvedValueOnce({})
@@ -49,24 +49,20 @@ describe('RolesService.setRole', () => {
     await expect(refusal).rejects.toBeInstanceOf(InternalServerErrorException);
     await expect(refusal).rejects.toThrow(ROLE_AUDIT_INCOMPLETE_MESSAGE);
     expect(clerk.setRole).toHaveBeenCalledTimes(1);
-    expect(Logger.prototype.error).toHaveBeenCalledWith(
-      expect.stringContaining('db down'),
-    );
-    (Logger.prototype.error as jest.Mock).mockRestore();
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('db down'));
+    logged.mockRestore();
   });
 
   it('reports a non-Error audit failure the same way', async () => {
-    jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     const { service, log } = setup();
     log.record.mockResolvedValueOnce({}).mockRejectedValueOnce('down');
 
     await expect(service.setRole(change)).rejects.toThrow(
       ROLE_AUDIT_INCOMPLETE_MESSAGE,
     );
-    expect(Logger.prototype.error).toHaveBeenCalledWith(
-      expect.stringContaining('down'),
-    );
-    (Logger.prototype.error as jest.Mock).mockRestore();
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('down'));
+    logged.mockRestore();
   });
 
   it('logs the request, changes the role, then logs that it was applied', async () => {

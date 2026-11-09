@@ -47,7 +47,10 @@ export class AccountThrottleGuard implements CanActivate {
     if (recent.length >= limit) {
       http
         .getResponse<Response>()
-        .header('Retry-After', String(Math.ceil((recent[0] + ttl - now) / 1000)));
+        .header(
+          'Retry-After',
+          String(Math.ceil((recent[0] + ttl - now) / 1000)),
+        );
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,

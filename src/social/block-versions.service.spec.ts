@@ -167,7 +167,9 @@ describe('BlockVersionsService.appendVersion refusals', () => {
 
   it('writes no version for a block that does not exist', async () => {
     const { service, versionModel, blockModel } = setup([null]);
-    blockModel.exists.mockImplementationOnce(() => Promise.resolve(null as never));
+    blockModel.exists.mockImplementationOnce(() =>
+      Promise.resolve(null as never),
+    );
 
     await expect(service.appendVersion(input)).rejects.toBeInstanceOf(
       NotFoundException,
@@ -245,9 +247,11 @@ describe('BlockVersionsService.verifyBlock', () => {
   });
 
   it('fails a block with no versions', async () => {
-    await expect(
-      verify([], { currentVersionSeq: 3 }).result,
-    ).resolves.toEqual({ valid: false, seq: 0, reason: 'no-versions' });
+    await expect(verify([], { currentVersionSeq: 3 }).result).resolves.toEqual({
+      valid: false,
+      seq: 0,
+      reason: 'no-versions',
+    });
   });
 
   it('names versions whose block row is gone', async () => {

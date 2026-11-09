@@ -17,7 +17,8 @@ function validate(env: Record<string, string>) {
 }
 
 describe('a known test database', () => {
-  const TEST_URI = 'mongodb+srv://user:pw@cluster.example/org-testing?w=majority';
+  const TEST_URI =
+    'mongodb+srv://user:pw@cluster.example/org-testing?w=majority';
 
   it.each([
     ['missing', {}],

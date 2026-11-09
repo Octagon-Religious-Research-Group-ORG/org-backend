@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect.any() is typed any */
 import { Logger } from '@nestjs/common';
 import {
   AdminAccessService,
