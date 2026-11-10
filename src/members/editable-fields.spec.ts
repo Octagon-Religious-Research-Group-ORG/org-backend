@@ -38,6 +38,21 @@ describe('editable fields', () => {
     expect(normaliseTitle(' A\ttitle\n')).toBe('A title');
   });
 
+  it('changes nothing in a text it has already cleaned (the editors send cleaned text)', () => {
+    const samples = [
+      '  a\r\n\n\n\n b \u202e\n',
+      'One\u0007 line.\n\n\n\nTwo\u2066.',
+      'x\u000b\u000cy\n\n\u200b \u2800\n\nz',
+      'a\ud800b',
+      '  \u2003indented\t\n\nsecond  ',
+      'I. Sky.\n\n\n\nSea.\r\n\r\nLand.',
+    ];
+    for (const sample of samples) {
+      const once = normaliseFieldText(sample);
+      expect(normaliseFieldText(once)).toBe(once);
+    }
+  });
+
   it('labels where a version came from without naming its author', () => {
     expect(versionSource(IMPORT_AUTHOR)).toBe('imported');
     expect(versionSource(TITLE_RECORD_AUTHOR)).toBe('title-before-history');

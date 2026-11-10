@@ -61,6 +61,11 @@ describe('configureHttpApp', () => {
     const withToken = jsonRequest('Bearer token');
     await new Promise<void>((resolve) => parser(withToken, {}, resolve));
     expect(withToken.body).toEqual({ a: 1 });
+    for (const authorization of ['bearer x', 'Bearer  x', 'BEARER\tx']) {
+      const request = jsonRequest(authorization);
+      await new Promise<void>((resolve) => parser(request, {}, resolve));
+      expect(request.body).toEqual({ a: 1 });
+    }
   });
 
   it('trusts the configured proxy hops and applies the shared HTTP setup', () => {

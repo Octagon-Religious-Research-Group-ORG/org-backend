@@ -6,7 +6,8 @@ import { MAX_EDIT_BODY_BYTES } from '../members/members.dto';
 import { MAX_JOIN_BODY_BYTES } from '../membership/membership.dto';
 import { createCorsOptions } from './cors';
 
-const BEARER = /^Bearer \S/;
+/** As Clerk reads it: any case, one or more spaces, then a token. */
+const BEARER = /^bearer\s+\S/i;
 
 export interface HttpAppOptions {
   origins: string[];
