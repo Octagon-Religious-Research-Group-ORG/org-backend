@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -60,6 +61,8 @@ function isDuplicateKey(error: unknown): boolean {
  */
 @Injectable()
 export class BlockVersionsService {
+  private readonly logger = new Logger(BlockVersionsService.name);
+
   constructor(
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
@@ -136,25 +139,34 @@ export class BlockVersionsService {
       }
 
       // Only ever move the pointer forward, so a slow save that finishes
-      // after a newer one cannot make an older version current again.
-      await this.blockModel
-        .updateOne(
-          { blockId: input.blockId, currentVersionSeq: { $lt: fields.seq } },
-          {
-            $set: {
-              currentVersionId: created._id,
-              currentVersionSeq: fields.seq,
-            },
-          },
-        )
-        .exec();
-
+      // after a newer one cannot make an older version current again. The
+      // version is the record and readers follow the newest one, so a
+      // pointer left behind is logged, never reported as a failed save; the
+      // next save moves it forward, and verifyBlock reports it meanwhile.
+      await this.movePointer(input.blockId, created._id, fields.seq);
       return created;
     }
 
     throw new ConflictException(
       'This paragraph is being changed by someone else. Please try again.',
     );
+  }
+
+  private async movePointer(blockId: string, versionId: unknown, seq: number) {
+    try {
+      await this.blockModel
+        .updateOne(
+          { blockId, currentVersionSeq: { $lt: seq } },
+          { $set: { currentVersionId: versionId, currentVersionSeq: seq } },
+        )
+        .exec();
+    } catch (error) {
+      this.logger.warn(
+        `Version ${seq} of ${blockId} is saved, but its pointer was not moved: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**

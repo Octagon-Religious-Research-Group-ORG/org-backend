@@ -161,7 +161,8 @@
       "members/no-store.interceptor.ts",
       "members/editable-fields.ts",
       "members/member-page-editor.service.ts",
-      "members/member-history.service.ts"
+      "members/member-history.service.ts",
+      "social/version-heads.ts"
     ],
     "coverageThreshold": {
       "global": {

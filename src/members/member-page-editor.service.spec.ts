@@ -124,16 +124,16 @@ describe('editing text', () => {
     expect(blockModel.updateMany).not.toHaveBeenCalled();
   });
 
-  it('writes nothing when the text reads the same after cleaning', async () => {
+  it('writes nothing when the text reads the same after cleaning, and answers the real newest version', async () => {
     const { service, versions, tabModel } = setup({
       versions: [{ _id: v(1), text: 'First.\n\nSecond.' }],
     });
     await expect(
       service.editBio(OWNER, '  First.\r\n\n\n\u202eSecond.  \n', 7),
-    ).resolves.toEqual({ changed: false, seq: 7 });
+    ).resolves.toEqual({ changed: false, seq: 1 });
     await expect(
       service.editTabText(OWNER, 'tab_a', 'First.\n\nSecond.', 7),
-    ).resolves.toEqual({ changed: false, seq: 7 });
+    ).resolves.toEqual({ changed: false, seq: 1 });
     expect(versions.appendVersion).not.toHaveBeenCalled();
     // Nothing was edited, so an imported belief stays to be reviewed.
     expect(tabModel.updateOne).not.toHaveBeenCalled();
@@ -384,6 +384,19 @@ describe('editing text', () => {
           blockId: `bio_${profileId.toString()}`,
           expectedSeq: 0,
         }),
+      );
+    });
+
+    it('writes the first version of a block a save created but never filled', async () => {
+      const { service, versions } = setup({
+        blocks: [{ blockId: 'bio_x', kind: 'paragraph' }],
+      });
+      await expect(service.editBio(OWNER, 'Hello.', 0)).resolves.toEqual({
+        changed: true,
+        seq: 1,
+      });
+      expect(versions.appendVersion).toHaveBeenCalledWith(
+        expect.objectContaining({ blockId: 'bio_x', expectedSeq: 0 }),
       );
     });
 

@@ -46,22 +46,22 @@ describe('editable fields', () => {
 
   describe('what a reader sees of a text field', () => {
     const blocks = [
-      { blockId: 'a', kind: 'outline-item', label: 'I.', currentVersionSeq: 1 },
-      { blockId: 'b', kind: 'paragraph', label: '', currentVersionSeq: 1 },
+      { blockId: 'a', kind: 'outline-item', label: 'I.' },
+      { blockId: 'b', kind: 'paragraph', label: '' },
     ];
+    const heads = (first: number) => (blockId: string) =>
+      blockId === 'a' ? first : 1;
 
     it('every paragraph, as stored, until the field is edited', () => {
-      expect(visibleFieldBlocks(blocks)).toEqual(blocks);
-      expect(visibleFieldBlocks([])).toEqual([]);
-      expect(visibleFieldBlocks([{ kind: 'paragraph' }])).toEqual([
-        { kind: 'paragraph' },
-      ]);
+      expect(visibleFieldBlocks(blocks, heads(1))).toEqual(blocks);
+      expect(visibleFieldBlocks([], heads(1))).toEqual([]);
+      // A first block with no version at all is no edit either.
+      expect(visibleFieldBlocks(blocks, heads(0))).toEqual(blocks);
     });
 
-    it('only the first block, as a plain paragraph, once it shows an edit', () => {
-      const edited = [{ ...blocks[0], currentVersionSeq: 2 }, blocks[1]];
-      expect(visibleFieldBlocks(edited)).toEqual([
-        { blockId: 'a', kind: 'paragraph', label: '', currentVersionSeq: 2 },
+    it('only the first block, as a plain paragraph, once its newest version is an edit', () => {
+      expect(visibleFieldBlocks(blocks, heads(2))).toEqual([
+        { blockId: 'a', kind: 'paragraph', label: '' },
       ]);
     });
   });

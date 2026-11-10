@@ -7,9 +7,11 @@ import {
 } from '@nestjs/common';
 import {
   LAST_BELIEF_REFUSAL,
+  REMOVAL_BUSY,
   REMOVAL_TURN_STALE_MS,
 } from './member-page-editor.service';
 import {
+  chain,
   done,
   failing,
   OWNED,
@@ -18,37 +20,37 @@ import {
   setup,
 } from './member-page-editor.mocks-spec';
 
+const CLEAR_DEAD = [
+  { ...OWNED, 'removalTurns.at': { $lt: expect.any(Date) } },
+  { $pull: { removalTurns: { at: { $lt: expect.any(Date) } } } },
+];
 const TURN_FILTER = {
   ...OWNED,
   $expr: {
     $gt: [
       {
-        $subtract: ['$liveTabCount', { $ifNull: ['$pendingRemovals', 0] }],
+        $subtract: [
+          '$liveTabCount',
+          { $size: { $ifNull: ['$removalTurns', []] } },
+        ],
       },
       1,
     ],
   },
 };
-const TAKE_TURN = [
-  TURN_FILTER,
-  {
-    $inc: { pendingRemovals: 1 },
-    $set: { lastRemovalTurnAt: expect.any(Date) },
-  },
-];
-const END_REMOVED = [
-  { ...OWNED, pendingRemovals: { $gt: 0 } },
-  { $inc: { liveTabCount: -1, pendingRemovals: -1 } },
-];
-const END_NOT_REMOVED = [
-  { ...OWNED, pendingRemovals: { $gt: 0 } },
-  { $inc: { pendingRemovals: -1 } },
-];
 
-/** Every decrement of the tab counter, as `[call order, update]`. */
-function counterDecrements(
-  profileModel: ReturnType<typeof setup>['profileModel'],
-) {
+type ProfileModel = ReturnType<typeof setup>['profileModel'];
+
+/** The id of the turn the removal pushed. */
+function turnId(profileModel: ProfileModel) {
+  const update = profileModel.findOneAndUpdate.mock.calls[0][1] as {
+    $push: { removalTurns: { id: string; at: Date } };
+  };
+  return update.$push.removalTurns.id;
+}
+
+/** Every decrement of the tab counter, as its call order. */
+function counterDecrements(profileModel: ProfileModel) {
   return profileModel.updateOne.mock.calls.flatMap((call, index) => {
     const update = call[1] as { $inc?: { liveTabCount?: number } };
     return update.$inc?.liveTabCount === -1
@@ -57,24 +59,127 @@ function counterDecrements(
   });
 }
 
+const dropOnly = (id: string) => [OWNED, { $pull: { removalTurns: { id } } }];
+
 describe('removing a belief', () => {
-  it('takes a turn, hides the tab, then counts it off with the turn, in that order', async () => {
+  it('clears dead turns, takes its own turn, hides the tab, then counts it off', async () => {
     const { service, tabModel, profileModel, blockModel } = setup();
     await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
       removed: true,
     });
-    expect(profileModel.updateOne.mock.calls).toEqual([TAKE_TURN, END_REMOVED]);
+    expect(profileModel.updateOne.mock.calls[0]).toEqual(CLEAR_DEAD);
+    expect(profileModel.findOneAndUpdate).toHaveBeenCalledWith(
+      TURN_FILTER,
+      {
+        $push: {
+          removalTurns: { id: expect.any(String), at: expect.any(Date) },
+        },
+      },
+      { returnDocument: 'after' },
+    );
+    const id = turnId(profileModel);
+    expect(profileModel.updateOne.mock.calls[1]).toEqual([
+      { ...OWNED, 'removalTurns.id': id, tabCountRepairs: 2 },
+      { $inc: { liveTabCount: -1 }, $pull: { removalTurns: { id } } },
+    ]);
     expect(tabModel.updateOne).toHaveBeenCalledWith(
       { profileId, tabId: 'tab_a', removedAt: { $exists: false } },
       { $set: { removedAt: expect.any(Date) } },
     );
-    // The crash-safe order: the counter goes down only after the tab is gone.
+    // Crash-safe order: the counter goes down only after the tab is gone.
     const [decrement] = counterDecrements(profileModel);
     expect(decrement).toBeGreaterThan(
       tabModel.updateOne.mock.invocationCallOrder[0],
     );
     expect(blockModel.updateMany).not.toHaveBeenCalled();
-    expect(blockModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('clears only turns older than the limit', async () => {
+    const { service, profileModel } = setup();
+    await service.removeTab(OWNER, 'tab_a');
+    const cutoff = (
+      profileModel.updateOne.mock.calls[0][0] as {
+        'removalTurns.at': { $lt: Date };
+      }
+    )['removalTurns.at'].$lt.getTime();
+    expect(Date.now() - cutoff).toBeGreaterThanOrEqual(REMOVAL_TURN_STALE_MS);
+    expect(Date.now() - cutoff).toBeLessThan(REMOVAL_TURN_STALE_MS + 5_000);
+  });
+
+  it('a page never recounted: the counted-off update requires no recount number', async () => {
+    const { service, profileModel } = setup({ turn: {} });
+    await service.removeTab(OWNER, 'tab_a');
+    expect(profileModel.updateOne.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ tabCountRepairs: { $exists: false } }),
+    );
+  });
+
+  describe('a Chunk 7 recount between the removal and the end of its turn', () => {
+    it('drops the turn without lowering the counter again', async () => {
+      // The counted-off update finds the recount number changed.
+      const { service, profileModel } = setup({ profileUpdates: [1, 0] });
+      await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
+        removed: true,
+      });
+      const id = turnId(profileModel);
+      expect(profileModel.updateOne.mock.calls[2]).toEqual(dropOnly(id));
+      expect(profileModel.updateOne).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves the counter at the recount: 300 live tabs, counter 300, no 301st', async () => {
+      // Deterministic replay of the interleaving the review reproduced:
+      // remove sets removedAt; a recount sees 299; an add takes the 300th
+      // place; the removal's turn ends. The counter must still be 300.
+      const page = {
+        liveTabCount: 300,
+        tabCountRepairs: 0,
+        removalTurns: [] as Array<{ id: string }>,
+      };
+      const live = { count: 300 };
+      const { service, profileModel, tabModel } = setup({
+        tabs: [],
+        page: { _id: profileId, liveTabCount: 300, nextTabOrder: 300 },
+      });
+      profileModel.findOneAndUpdate.mockImplementation((() => {
+        page.removalTurns.push({ id: 'x' });
+        return {
+          select: () => ({
+            lean: () => ({
+              exec: () => Promise.resolve({ tabCountRepairs: 0 }),
+            }),
+          }),
+        };
+      }) as never);
+      tabModel.updateOne.mockImplementationOnce(() => ({
+        exec: () => {
+          live.count -= 1; // the tab is removed
+          page.liveTabCount = live.count; // a recount runs now
+          page.tabCountRepairs += 1;
+          page.liveTabCount += 1; // an add takes the freed place
+          live.count += 1;
+          return Promise.resolve({ modifiedCount: 1 });
+        },
+      }));
+      profileModel.updateOne.mockImplementation(
+        (
+          filter: Record<string, unknown>,
+          update: { $inc?: { liveTabCount: number } },
+        ) => ({
+          exec: () => {
+            const repairsOk =
+              !('tabCountRepairs' in filter) ||
+              filter.tabCountRepairs === page.tabCountRepairs;
+            if (update.$inc && repairsOk) page.liveTabCount -= 1;
+            return Promise.resolve({
+              modifiedCount: update.$inc && !repairsOk ? 0 : 1,
+            });
+          },
+        }),
+      );
+      await service.removeTab(OWNER, 'tab_a');
+      expect(live.count).toBe(300);
+      expect(page.liveTabCount).toBe(300);
+    });
   });
 
   it('never lowers the counter when the removal itself fails', async () => {
@@ -86,50 +191,45 @@ describe('removing a belief', () => {
       'connection lost',
     );
     expect(counterDecrements(profileModel)).toEqual([]);
-    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(
+      ...dropOnly(turnId(profileModel)),
+    );
   });
 
-  it('refuses the last belief when no turn is free, and writes nothing', async () => {
-    // The turn is refused; no turn left behind is old enough to clear.
-    const { service, tabModel, profileModel } = setup({
-      profileUpdates: [0, 0],
-    });
+  it('refuses the last belief when no turn is free and none is in the way', async () => {
+    const { service, tabModel } = setup({ turn: null });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
       LAST_BELIEF_REFUSAL,
     );
     expect(tabModel.updateOne).not.toHaveBeenCalled();
-    expect(profileModel.updateOne).toHaveBeenCalledTimes(2);
-    expect(profileModel.updateOne.mock.calls[1]).toEqual([
-      {
-        ...OWNED,
-        pendingRemovals: { $gt: 0 },
-        lastRemovalTurnAt: { $lt: expect.any(Date) },
-      },
-      { $set: { pendingRemovals: 0 } },
-    ]);
-    const cutoff = (
-      profileModel.updateOne.mock.calls[1][0] as {
-        lastRemovalTurnAt: { $lt: Date };
-      }
-    ).lastRemovalTurnAt.$lt.getTime();
-    expect(Date.now() - cutoff).toBeGreaterThanOrEqual(REMOVAL_TURN_STALE_MS);
-    expect(Date.now() - cutoff).toBeLessThan(REMOVAL_TURN_STALE_MS + 5_000);
   });
 
-  it('clears a turn left by a removal that died, then tries once more', async () => {
-    const cleared = setup({ profileUpdates: [0, 1, 1] });
-    await expect(cleared.service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
-      removed: true,
-    });
-    expect(cleared.profileModel.updateOne.mock.calls[2]).toEqual(TAKE_TURN);
-    const stillFull = setup({ profileUpdates: [0, 1, 0] });
-    await expect(stillFull.service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
+  it('says to try again, not "the last one", while another removal holds a turn', async () => {
+    const { service, profileModel, tabModel } = setup({ turn: null });
+    profileModel.findOne
+      .mockReturnValueOnce(
+        chain({ _id: profileId, liveTabCount: 2, nextTabOrder: 2 }),
+      )
+      .mockReturnValueOnce(chain({ removalTurns: [{ id: 'other' }] }));
+    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
+      REMOVAL_BUSY,
+    );
+    expect(tabModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('says "the last one" when the page row cannot be read again', async () => {
+    const { service, profileModel } = setup({ turn: null });
+    profileModel.findOne
+      .mockReturnValueOnce(
+        chain({ _id: profileId, liveTabCount: 1, nextTabOrder: 1 }),
+      )
+      .mockReturnValueOnce(chain(null));
+    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
       LAST_BELIEF_REFUSAL,
     );
-    expect(stillFull.tabModel.updateOne).not.toHaveBeenCalled();
   });
 
-  it('undoes itself and gives the turn back when no real belief would be left', async () => {
+  it('undoes itself and drops its turn when no real belief would be left', async () => {
     const { service, tabModel, profileModel } = setup({ left: 0 });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
       ConflictException,
@@ -145,16 +245,20 @@ describe('removing a belief', () => {
       { profileId, tabId: 'tab_a', removedAt },
       { $unset: { removedAt: 1 } },
     );
-    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(
+      ...dropOnly(turnId(profileModel)),
+    );
     expect(counterDecrements(profileModel)).toEqual([]);
   });
 
-  it('says not found, and gives the turn back, when another window removed it first', async () => {
+  it('says not found, and drops its turn, when another window removed it first', async () => {
     const { service, profileModel } = setup({ removed: 0 });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
       NotFoundException,
     );
-    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(
+      ...dropOnly(turnId(profileModel)),
+    );
   });
 
   it('starts the counters of an older page before taking its turn', async () => {
@@ -167,7 +271,6 @@ describe('removing a belief', () => {
       { ...OWNED, _id: profileId, liveTabCount: { $exists: false } },
       { $set: { liveTabCount: 2, nextTabOrder: 5 } },
     ]);
-    expect(profileModel.updateOne.mock.calls[1]).toEqual(TAKE_TURN);
     expect(tabModel.find).toHaveBeenCalledWith({ profileId });
   });
 
@@ -186,14 +289,14 @@ describe('removing a belief', () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
     const { service, profileModel } = setup();
     profileModel.updateOne
-      .mockReturnValueOnce(done({ modifiedCount: 1 }))
+      .mockReturnValueOnce(done({}))
       .mockReturnValueOnce(failing(new Error('timeout')));
     await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
       removed: true,
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('timeout'));
     profileModel.updateOne
-      .mockReturnValueOnce(done({ modifiedCount: 1 }))
+      .mockReturnValueOnce(done({}))
       .mockReturnValueOnce(failing('plain'));
     await service.removeTab(OWNER, 'tab_a');
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('plain'));

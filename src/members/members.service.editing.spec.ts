@@ -83,6 +83,43 @@ const owner: Viewer = {
 };
 const admin: Viewer = { kind: 'signed-in', userId: 'user_x', isAdmin: true };
 
+/** Each block's newest version, as `readHeads` returns it, from the fixtures. */
+function textHeads(
+  blocks: ReadonlyArray<{
+    blockId: string;
+    currentVersionId?: unknown;
+    currentVersionSeq?: number;
+  }>,
+  versions: ReadonlyArray<{ _id: unknown; text: string }>,
+) {
+  return blocks.flatMap((block) => {
+    const head = versions.find(
+      (row) => String(row._id) === String(block.currentVersionId),
+    );
+    return head
+      ? [
+          {
+            _id: block.blockId,
+            seq: block.currentVersionSeq ?? 1,
+            text: head.text,
+          },
+        ]
+      : [];
+  });
+}
+
+/** Revisions ask for the highest seq; the page text asks for the newest rows. */
+function versionAggregate(pipeline: unknown) {
+  return {
+    exec: () =>
+      Promise.resolve(
+        JSON.stringify(pipeline).includes('$max')
+          ? HEADS
+          : textHeads(BLOCKS, VERSIONS),
+      ),
+  };
+}
+
 function setup(options: { one?: unknown } = {}) {
   const profileModel = { findOne: jest.fn(() => chain(options.one ?? null)) };
   const tabModel = {
@@ -92,8 +129,7 @@ function setup(options: { one?: unknown } = {}) {
   };
   const blockModel = { find: jest.fn(() => chain(BLOCKS)) };
   const versionModel = {
-    find: jest.fn(() => chain(VERSIONS)),
-    aggregate: jest.fn(() => ({ exec: () => Promise.resolve(HEADS) })),
+    aggregate: jest.fn(versionAggregate),
   };
   const pictures = {
     currentPicture: jest.fn(() => Promise.resolve(undefined)),
@@ -138,7 +174,11 @@ describe('MembersService.profile, editing data', () => {
       const seen = await other.service.profile('quiet-fern', viewer);
       expect(seen).not.toHaveProperty('revisions');
       // Not even read for anyone else.
-      expect(other.versionModel.aggregate).not.toHaveBeenCalled();
+      expect(other.versionModel.aggregate).not.toHaveBeenCalledWith(
+        expect.arrayContaining([
+          { $group: { _id: '$blockId', seq: { $max: '$seq' } } },
+        ]),
+      );
     }
   });
 
@@ -181,6 +221,18 @@ describe('MembersService.profile, editing data', () => {
     expect(view).not.toHaveProperty('revisions');
   });
 
+  it('shows a block’s newest version, even when its pointer was left behind', async () => {
+    // The bio block's pointer still names v(1); a newer version exists.
+    const { service, versionModel } = setup({ one: page() });
+    versionModel.aggregate.mockReturnValueOnce({
+      exec: () =>
+        // Version 2 exists; the pointer was left at version 1.
+        Promise.resolve([{ _id: 'b-bio', seq: 2, text: 'Newest bio' }]),
+    });
+    const view = await service.profile('quiet-fern', GUEST_VIEWER);
+    expect(view).toMatchObject({ bio: [{ text: 'Newest bio' }] });
+  });
+
   it('shows only the first block of a field once it holds an edit, as a plain paragraph', async () => {
     const { service, blockModel, versionModel } = setup({ one: page() });
     blockModel.find.mockReturnValueOnce(
@@ -205,12 +257,13 @@ describe('MembersService.profile, editing data', () => {
         },
       ]),
     );
-    versionModel.find.mockReturnValueOnce(
-      chain([
-        { _id: v(1), text: 'I. Whole.\n\nTwo.' },
-        { _id: v(2), text: 'Two.' },
-      ]),
-    );
+    versionModel.aggregate.mockReturnValueOnce({
+      exec: () =>
+        Promise.resolve([
+          { _id: 'b-1', seq: 2, text: 'I. Whole.\n\nTwo.' },
+          { _id: 'b-2', seq: 1, text: 'Two.' },
+        ]),
+    });
     const view = await service.profile('quiet-fern', GUEST_VIEWER);
     expect(view).toMatchObject({
       tabs: [

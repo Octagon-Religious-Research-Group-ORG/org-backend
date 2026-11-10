@@ -75,16 +75,17 @@ export function versionSource(authorUserId: string): VersionSource {
 /**
  * The blocks a reader sees for one text field, in order. Only a Chunk 8 edit
  * ever writes a version after the first, and an edit always writes the WHOLE
- * text into the field's first block. So when the first block shows such a
- * version (seq > 1) it alone is the field, shown as a plain paragraph; any
+ * text into the field's first block. So when the first block's newest
+ * version (read from the versions, `readHeads`) is such a version (seq > 1),
+ * it alone is the field, shown as a plain paragraph; any
  * other block still marked live is leftover from an edit whose tidying did
  * not finish, and showing it would repeat the text.
  */
 export function visibleFieldBlocks<
-  T extends { kind: string; label?: string; currentVersionSeq?: number },
->(blocks: readonly T[]): T[] {
+  T extends { blockId: string; kind: string; label?: string },
+>(blocks: readonly T[], headSeq: (blockId: string) => number): T[] {
   const [first] = blocks;
-  if (first && (first.currentVersionSeq ?? 0) > 1) {
+  if (first && headSeq(first.blockId) > 1) {
     return [{ ...first, kind: 'paragraph', label: '' }];
   }
   return [...blocks];

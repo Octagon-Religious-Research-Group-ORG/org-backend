@@ -132,6 +132,43 @@ const owner: Viewer = {
 };
 const admin: Viewer = { kind: 'signed-in', userId: 'user_x', isAdmin: true };
 
+/** Each block's newest version, as `readHeads` returns it, from the fixtures. */
+function textHeads(
+  blocks: ReadonlyArray<{
+    blockId: string;
+    currentVersionId?: unknown;
+    currentVersionSeq?: number;
+  }>,
+  versions: ReadonlyArray<{ _id: unknown; text: string }>,
+) {
+  return blocks.flatMap((block) => {
+    const head = versions.find(
+      (row) => String(row._id) === String(block.currentVersionId),
+    );
+    return head
+      ? [
+          {
+            _id: block.blockId,
+            seq: block.currentVersionSeq ?? 1,
+            text: head.text,
+          },
+        ]
+      : [];
+  });
+}
+
+/** Revisions ask for the highest seq; the page text asks for the newest rows. */
+function versionAggregate(pipeline: unknown) {
+  return {
+    exec: () =>
+      Promise.resolve(
+        JSON.stringify(pipeline).includes('$max')
+          ? HEADS
+          : textHeads(BLOCKS, VERSIONS),
+      ),
+  };
+}
+
 function setup(
   options: {
     one?: unknown;
@@ -157,8 +194,7 @@ function setup(
   };
   const blockModel = { find: jest.fn(() => chain(BLOCKS)) };
   const versionModel = {
-    find: jest.fn(() => chain(VERSIONS)),
-    aggregate: jest.fn(() => ({ exec: () => Promise.resolve(HEADS) })),
+    aggregate: jest.fn(versionAggregate),
   };
   const pictures = {
     read: jest.fn(() =>

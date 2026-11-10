@@ -44,6 +44,7 @@ import {
   type Revisions,
   type TabView,
 } from './profile-serializers';
+import { readHeads } from '../social/version-heads';
 import { titleBlockId, visibleFieldBlocks } from './editable-fields';
 
 /** Exactly one message for a missing page and for a page you may not see. */
@@ -294,20 +295,18 @@ export class MembersService {
       (block) =>
         SHOWN_SECTIONS.includes(block.section) && block.kind !== 'image',
     );
-    const versions = await this.versionModel
-      .find({
-        _id: {
-          $in: shown.flatMap((block) => block.currentVersionId ?? []),
-        },
-      })
-      .select({ text: 1 })
-      .lean()
-      .exec();
-    const textOf = new Map(versions.map((v) => [String(v._id), v.text]));
+    // The newest version of each block is its text: a version is the
+    // record, whatever the block's pointer says.
+    const heads = await readHeads(
+      this.versionModel,
+      shown.map((block) => block.blockId),
+    );
+    const headSeq = (blockId: string) => heads.get(blockId)?.seq ?? 0;
+    const visible = (rows: typeof shown) => visibleFieldBlocks(rows, headSeq);
 
     const paragraphs = (rows: typeof shown): ParagraphView[] =>
       rows.flatMap((block) => {
-        const text = textOf.get(String(block.currentVersionId));
+        const text = heads.get(block.blockId)?.text;
         return text === undefined
           ? []
           : [
@@ -346,7 +345,7 @@ export class MembersService {
           }
         : {}),
       removedTabs: show.manager ? await this.removedTabs(profileId) : [],
-      bio: paragraphs(visibleFieldBlocks(inSection('bio'))),
+      bio: paragraphs(visible(inSection('bio'))),
       extras,
       tabs: tabs.map(
         (tab): TabView => ({
@@ -354,7 +353,7 @@ export class MembersService {
           title: tab.title,
           ...(tab.group ? { group: tab.group } : {}),
           needsReview: tab.reviewStatus === 'imported-review',
-          paragraphs: paragraphs(visibleFieldBlocks(tabBlocks(tab.tabId))),
+          paragraphs: paragraphs(visible(tabBlocks(tab.tabId))),
         }),
       ),
     };

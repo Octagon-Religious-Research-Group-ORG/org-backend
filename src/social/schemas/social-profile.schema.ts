@@ -63,6 +63,18 @@ export class ContactEntry {
 
 export const ContactEntrySchema = SchemaFactory.createForClass(ContactEntry);
 
+/** One tab removal in progress on a page (Chunk 8). */
+@Schema({ _id: false })
+export class RemovalTurn {
+  @Prop({ type: String, required: true })
+  id: string;
+
+  @Prop({ type: Date, required: true })
+  at: Date;
+}
+
+export const RemovalTurnSchema = SchemaFactory.createForClass(RemovalTurn);
+
 export const PROFILE_SOURCES = ['migrated', 'native'] as const;
 export type ProfileSource = (typeof PROFILE_SOURCES)[number];
 
@@ -173,17 +185,13 @@ export class SocialProfile {
   nextTabOrder?: number;
 
   /**
-   * Tab removals that have taken their turn but not finished (Chunk 8). A
-   * removal is counted off `liveTabCount` only after its tab is really gone,
-   * so a removal that dies part-way leaves the counter too high, never too
-   * low. A turn left behind by such a removal is cleared after a while.
+   * Tab removals that have taken their turn but not finished (Chunk 8), each
+   * with its own start time. A removal is counted off `liveTabCount` only
+   * after its tab is really gone, so a removal that dies part-way leaves the
+   * counter too high, never too low; its turn is cleared once it is old.
    */
-  @Prop({ type: Number, min: 0 })
-  pendingRemovals?: number;
-
-  /** When a removal last took its turn: an old pending turn is a dead one. */
-  @Prop({ type: Date })
-  lastRemovalTurnAt?: Date;
+  @Prop({ type: [RemovalTurnSchema], default: undefined })
+  removalTurns?: RemovalTurn[];
 
   /** Clerk user id of the member who owns the page; absent until claimed. */
   @Prop({ type: String })

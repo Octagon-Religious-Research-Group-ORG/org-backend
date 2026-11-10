@@ -237,7 +237,8 @@ export async function createMembersApp(): Promise<INestApplication<App>> {
         useValue: {
           find: () => chain([VERSION_ROW]),
           aggregate: () => ({
-            exec: () => Promise.resolve([{ _id: 'b1', seq: 1 }]),
+            exec: () =>
+              Promise.resolve([{ _id: 'b1', seq: 1, text: 'Synthetic bio' }]),
           }),
         },
       },

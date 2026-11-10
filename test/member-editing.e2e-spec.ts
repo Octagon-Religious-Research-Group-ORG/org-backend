@@ -117,6 +117,22 @@ describe('Members API, editing and history (e2e)', () => {
       expect(body.message).toBe(BIO_TOO_LONG);
     });
 
+    it('keeps the default body limit for a request with no token', async () => {
+      const wide = JSON.stringify({ text: 'x'.repeat(150_000), baseSeq: 1 });
+      await request(app.getHttpServer())
+        .put('/api/v1/me/member-page/bio')
+        .set('X-Forwarded-For', '203.0.113.79')
+        .set('Content-Type', 'application/json')
+        .send(wide)
+        .expect(413);
+      // A small anonymous request still reaches the login check.
+      await request(app.getHttpServer())
+        .put('/api/v1/me/member-page/bio')
+        .set('X-Forwarded-For', '203.0.113.79')
+        .send({ text: 'x', baseSeq: 1 })
+        .expect(401);
+    });
+
     it('edits a belief and its title, moves and removes it', async () => {
       await send('put', '/tabs/tab_1/text')
         .send({ text: 'Synthetic belief, edited.', baseSeq: 1 })

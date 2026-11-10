@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -10,6 +11,7 @@ import { Model, type Types } from 'mongoose';
 import { hasVisibleText } from '../membership/member-text';
 import { withoutMemberText } from '../membership/membership.service';
 import { BlockVersionsService } from '../social/block-versions.service';
+import { readHeads } from '../social/version-heads';
 import {
   BeliefTab,
   type BeliefTabDocument,
@@ -45,6 +47,9 @@ export const LAST_BELIEF_REFUSAL =
   'A page needs at least one belief, so the last one cannot be removed.';
 const MOVED_ELSEWHERE =
   'Your beliefs were just rearranged in another window. Reload and try again.';
+export const REMOVAL_BUSY =
+  'Your page is still finishing a previous change. Please try again in a moment.';
+
 /** A removal turn this old belongs to a removal that died. */
 export const REMOVAL_TURN_STALE_MS = 5 * 60_000;
 export const BELIEF_TOO_LONG = `This belief is longer than one save can hold (${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters). Please move part of it into a new belief tab.`;
@@ -57,6 +62,12 @@ export interface SaveResult {
   seq: number;
 }
 
+interface RemovalTurnTaken {
+  id: string;
+  /** The page's recount number when the turn was taken. */
+  repairs?: number;
+}
+
 interface OwnedPage {
   _id: Types.ObjectId;
   liveTabCount?: number;
@@ -67,8 +78,6 @@ interface TextBlockRow {
   blockId: string;
   kind: string;
   label?: string;
-  currentVersionId?: Types.ObjectId;
-  currentVersionSeq?: number;
 }
 
 interface TextField {
@@ -197,18 +206,14 @@ export class MemberPageEditorService {
         removedAt: { $exists: false },
       })
       .sort({ order: 1, _id: 1 })
-      .select({
-        blockId: 1,
-        kind: 1,
-        label: 1,
-        currentVersionId: 1,
-        currentVersionSeq: 1,
-      })
+      .select({ blockId: 1, kind: 1, label: 1 })
       .lean()
       .exec()) as TextBlockRow[];
 
-    if (text === normaliseFieldText(await this.currentText(blocks))) {
-      return { changed: false, seq: edit.baseSeq };
+    const current = await this.currentText(blocks);
+    if (text === normaliseFieldText(current.text)) {
+      // The real newest version, so the editor's next save starts from it.
+      return { changed: false, seq: current.headSeq };
     }
     // After the comparison: a long imported text saved unchanged is no error.
     if (text.length > MAX_BLOCK_TEXT_LENGTH) {
@@ -243,22 +248,27 @@ export class MemberPageEditorService {
     return { changed: true, seq: saved.seq };
   }
 
-  /** The text the page shows now, as an editor would start from it. */
+  /**
+   * The text the page shows now, as an editor would start from it, read from
+   * the newest versions (as the page reads it), and the newest version number
+   * of the field's first block: what the next save must be based on.
+   */
   private async currentText(blocks: TextBlockRow[]) {
-    const shown = visibleFieldBlocks(blocks);
-    const ids = shown.flatMap((block) => block.currentVersionId ?? []);
-    const rows = await this.versionModel
-      .find({ _id: { $in: ids } })
-      .select({ text: 1 })
-      .lean()
-      .exec();
-    const textOf = new Map(rows.map((row) => [String(row._id), row.text]));
-    return editorText(
-      shown.flatMap((block) => {
-        const text = textOf.get(String(block.currentVersionId));
-        return text === undefined ? [] : [{ label: block.label, text }];
-      }),
+    const heads = await readHeads(
+      this.versionModel,
+      blocks.map((block) => block.blockId),
     );
+    const headSeq = (blockId: string) => heads.get(blockId)?.seq ?? 0;
+    const shown = visibleFieldBlocks(blocks, headSeq);
+    return {
+      text: editorText(
+        shown.flatMap((block) => {
+          const text = heads.get(block.blockId)?.text;
+          return text === undefined ? [] : [{ label: block.label, text }];
+        }),
+      ),
+      headSeq: blocks[0] ? headSeq(blocks[0].blockId) : 0,
+    };
   }
 
   /**
@@ -407,22 +417,31 @@ export class MemberPageEditorService {
    * admins can still open its history. The last belief cannot go: a page needs
    * a bio and at least one belief.
    *
-   * Removals of one page take turns: a turn is taken in one atomic update
-   * that adds to `pendingRemovals`, and only while `liveTabCount` minus the
-   * turns already taken is above one. Of two removals of the last two
-   * beliefs, exactly one gets a turn; of three removals of three, two do.
+   * Removals of one page take turns. A turn is one entry in `removalTurns`,
+   * with its own id and start time, added in one atomic update and only
+   * while `liveTabCount` minus the turns already taken is above one. Of two
+   * removals of the last two beliefs, exactly one gets a turn; of three
+   * removals of three, two do.
    *
-   * The counter that caps a page's tabs is lowered only AFTER the tab is
-   * really removed, together with the turn, in one update. So a removal that
-   * dies at any point leaves `liveTabCount` too high or exact, never too low
-   * (too high is what the Chunk 7 recount repairs), and a turn it left behind
-   * is cleared once it is older than {@link REMOVAL_TURN_STALE_MS}.
+   * The counter that caps a page's tabs never falls below the real live
+   * tabs, whatever runs in between:
+   * - it is lowered only AFTER the tab is really removed, in the update that
+   *   ends the turn, so a removal that dies leaves it high or exact;
+   * - that update also requires the page's recount number
+   *   (`tabCountRepairs`) to be what it was when the turn was taken. A
+   *   Chunk 7 recount in between counted the real tabs, so it either already
+   *   left this tab out or counted it while still live (high, the safe side);
+   *   lowering the counter again could count the removal twice. The turn is
+   *   then simply dropped.
    *
-   * The counter can be too high (an add still running, or a removal that
-   * died), so the real tabs are counted too after the removal; if none is
-   * left, the removal is undone.
+   * A turn older than {@link REMOVAL_TURN_STALE_MS} belongs to a removal that
+   * died, and is cleared on its own, whatever newer turns do.
    *
-   * @throws ConflictException for the last belief on the page
+   * The counter can be too high, so the real tabs are counted too after the
+   * removal; if none is left, the removal is undone.
+   *
+   * @throws ConflictException for the last belief on the page, or while
+   *   another change of the page is still finishing
    */
   async removeTab(userId: string, tabId: string) {
     const page = await this.ownedPage(userId);
@@ -430,9 +449,7 @@ export class MemberPageEditorService {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }
-    if (!(await this.takeRemovalTurn(userId))) {
-      throw new ConflictException(LAST_BELIEF_REFUSAL);
-    }
+    const turn = await this.takeRemovalTurn(userId);
 
     const removedAt = new Date();
     let removed: { modifiedCount: number };
@@ -444,11 +461,11 @@ export class MemberPageEditorService {
         )
         .exec();
     } catch (error) {
-      await this.endRemovalTurn(userId, false);
+      await this.endRemovalTurn(userId, turn, false);
       throw error;
     }
     if (removed.modifiedCount !== 1) {
-      await this.endRemovalTurn(userId, false);
+      await this.endRemovalTurn(userId, turn, false);
       throw new NotFoundException(NO_TAB);
     }
 
@@ -462,73 +479,99 @@ export class MemberPageEditorService {
           { $unset: { removedAt: 1 } },
         )
         .exec();
-      await this.endRemovalTurn(userId, false);
+      await this.endRemovalTurn(userId, turn, false);
       throw new ConflictException(LAST_BELIEF_REFUSAL);
     }
-    await this.endRemovalTurn(userId, true);
+    await this.endRemovalTurn(userId, turn, true);
     return { removed: true };
   }
 
-  /** @returns whether this removal may go ahead */
-  private async takeRemovalTurn(userId: string) {
-    const take = () =>
-      this.profileModel
-        .updateOne(
-          {
-            ...this.ownedFilter(userId),
-            $expr: {
-              $gt: [
-                {
-                  $subtract: [
-                    '$liveTabCount',
-                    { $ifNull: ['$pendingRemovals', 0] },
-                  ],
-                },
-                1,
-              ],
-            },
-          },
-          {
-            $inc: { pendingRemovals: 1 },
-            $set: { lastRemovalTurnAt: new Date() },
-          },
-        )
-        .exec();
-    if ((await take()).modifiedCount === 1) return true;
-    // A turn left by a removal that died blocks the others until cleared.
-    const cleared = await this.profileModel
+  /**
+   * Clears dead turns, then takes one.
+   *
+   * @returns the turn, with the recount number it was taken under
+   * @throws ConflictException: the "last belief" message only when no turn
+   *   is in the way; otherwise a removal is still running (or died less than
+   *   {@link REMOVAL_TURN_STALE_MS} ago), and the member is told to retry
+   */
+  private async takeRemovalTurn(userId: string): Promise<RemovalTurnTaken> {
+    const cutoff = new Date(Date.now() - REMOVAL_TURN_STALE_MS);
+    await this.profileModel
       .updateOne(
-        {
-          ...this.ownedFilter(userId),
-          pendingRemovals: { $gt: 0 },
-          lastRemovalTurnAt: {
-            $lt: new Date(Date.now() - REMOVAL_TURN_STALE_MS),
-          },
-        },
-        { $set: { pendingRemovals: 0 } },
+        { ...this.ownedFilter(userId), 'removalTurns.at': { $lt: cutoff } },
+        { $pull: { removalTurns: { at: { $lt: cutoff } } } },
       )
       .exec();
-    if (cleared.modifiedCount !== 1) return false;
-    return (await take()).modifiedCount === 1;
+    const id = randomUUID();
+    const taken = await this.profileModel
+      .findOneAndUpdate(
+        {
+          ...this.ownedFilter(userId),
+          $expr: {
+            $gt: [
+              {
+                $subtract: [
+                  '$liveTabCount',
+                  { $size: { $ifNull: ['$removalTurns', []] } },
+                ],
+              },
+              1,
+            ],
+          },
+        },
+        { $push: { removalTurns: { id, at: new Date() } } },
+        { returnDocument: 'after' },
+      )
+      .select({ tabCountRepairs: 1 })
+      .lean()
+      .exec();
+    if (taken) return { id, repairs: taken.tabCountRepairs };
+
+    const seen = await this.profileModel
+      .findOne(this.ownedFilter(userId))
+      .select({ removalTurns: 1 })
+      .lean()
+      .exec();
+    throw new ConflictException(
+      (seen?.removalTurns?.length ?? 0) > 0
+        ? REMOVAL_BUSY
+        : LAST_BELIEF_REFUSAL,
+    );
   }
 
   /**
    * Ends a turn. A removal that happened lowers the counter in the same
-   * update; one that did not only gives its turn back. Conditional on a turn
-   * being there, so a turn cleared as stale is never counted off twice. A
-   * failure here leaves the counter too high, which is the safe side.
+   * update, but only while the turn is still there and no recount ran since
+   * it was taken; otherwise, and for a removal that did not happen, the turn
+   * is only dropped. Every failure here leaves the counter high, the safe
+   * side.
    */
-  private async endRemovalTurn(userId: string, removed: boolean) {
+  private async endRemovalTurn(
+    userId: string,
+    turn: RemovalTurnTaken,
+    removed: boolean,
+  ) {
     try {
+      if (removed) {
+        const counted = await this.profileModel
+          .updateOne(
+            {
+              ...this.ownedFilter(userId),
+              'removalTurns.id': turn.id,
+              tabCountRepairs: turn.repairs ?? { $exists: false },
+            },
+            {
+              $inc: { liveTabCount: -1 },
+              $pull: { removalTurns: { id: turn.id } },
+            },
+          )
+          .exec();
+        if (counted.modifiedCount === 1) return;
+      }
       await this.profileModel
-        .updateOne(
-          { ...this.ownedFilter(userId), pendingRemovals: { $gt: 0 } },
-          {
-            $inc: removed
-              ? { liveTabCount: -1, pendingRemovals: -1 }
-              : { pendingRemovals: -1 },
-          },
-        )
+        .updateOne(this.ownedFilter(userId), {
+          $pull: { removalTurns: { id: turn.id } },
+        })
         .exec();
     } catch (error) {
       this.logger.warn(

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import {
   BadRequestException,
   ConflictException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -178,6 +179,27 @@ describe('BlockVersionsService.appendVersion', () => {
     );
     expect(versionModel.create).toHaveBeenCalledTimes(MAX_APPEND_ATTEMPTS);
     expect(blockModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('reports a landed version as saved when only the pointer move fails, and logs it', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const { service, blockModel } = setup([{ seq: 1, hash: 'b'.repeat(64) }]);
+    blockModel.updateOne.mockReturnValueOnce({
+      exec: jest.fn().mockRejectedValue(new Error('pointer blip')),
+    });
+    await expect(service.appendVersion(input)).resolves.toMatchObject({
+      seq: 2,
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('pointer blip'));
+    const again = setup([{ seq: 2, hash: 'c'.repeat(64) }]);
+    again.blockModel.updateOne.mockReturnValueOnce({
+      exec: jest.fn().mockRejectedValue('plain'),
+    });
+    await again.service.appendVersion(input);
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('plain'));
+    warn.mockRestore();
   });
 
   it('rethrows any other database error without retrying', async () => {

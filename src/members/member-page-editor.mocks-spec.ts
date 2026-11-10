@@ -36,6 +36,8 @@ export interface Options {
    * list runs out.
    */
   profileUpdates?: number[];
+  /** The page after a removal takes its turn; null = no turn free. */
+  turn?: unknown;
   left?: number;
   removed?: number;
   tabs?: unknown[];
@@ -53,6 +55,14 @@ export function setup(options: Options = {}) {
           ? { _id: profileId, liveTabCount: 3, nextTabOrder: 3 }
           : options.page,
       ),
+    ),
+    findOneAndUpdate: jest.fn(
+      (filter: Filter, update: Filter, settings?: Filter) =>
+        chain(
+          options.turn === undefined
+            ? { tabCountRepairs: 2, filter, update, settings }
+            : options.turn,
+        ),
     ),
     updateOne: jest.fn((filter: Filter, update: Filter) =>
       done({
@@ -82,20 +92,24 @@ export function setup(options: Options = {}) {
       }),
     ),
   };
+  const blocks = (options.blocks ?? [
+    {
+      blockId: 'blk_1',
+      kind: 'paragraph',
+      label: '',
+      currentVersionId: v(1),
+      currentVersionSeq: 1,
+    },
+  ]) as Array<{
+    blockId: string;
+    currentVersionId?: Types.ObjectId;
+    currentVersionSeq?: number;
+  }>;
+  const stored = (options.versions ?? [
+    { _id: v(1), text: 'Sky is wide.' },
+  ]) as Array<{ _id: Types.ObjectId; text: string }>;
   const blockModel = {
-    find: jest.fn(() =>
-      chain(
-        options.blocks ?? [
-          {
-            blockId: 'blk_1',
-            kind: 'paragraph',
-            label: '',
-            currentVersionId: v(1),
-            currentVersionSeq: 1,
-          },
-        ],
-      ),
-    ),
+    find: jest.fn(() => chain(blocks)),
     create: jest.fn(() => Promise.resolve({})),
     updateOne: jest.fn((filter: Filter, update: Filter) =>
       done({ filter, update }),
@@ -104,9 +118,26 @@ export function setup(options: Options = {}) {
       done({ filter, update }),
     ),
   };
+  // In these fixtures a block's `currentVersionId` / `currentVersionSeq`
+  // describe its NEWEST version, which is what `readHeads` returns.
   const versionModel = {
-    find: jest.fn(() =>
-      chain(options.versions ?? [{ _id: v(1), text: 'Sky is wide.' }]),
+    aggregate: jest.fn(() =>
+      done(
+        blocks.flatMap((block) => {
+          const head = stored.find(
+            (row) => String(row._id) === String(block.currentVersionId),
+          );
+          return head
+            ? [
+                {
+                  _id: block.blockId,
+                  seq: block.currentVersionSeq ?? 1,
+                  text: head.text,
+                },
+              ]
+            : [];
+        }),
+      ),
     ),
   };
   let seq = 0;
