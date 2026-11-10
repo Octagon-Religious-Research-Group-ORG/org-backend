@@ -13,7 +13,8 @@ import { splitParagraphs } from '../membership/membership.service';
  * - text: the field's first text block. Pages written before editing existed
  *   keep one block per paragraph; the first edit writes the whole text as a
  *   new version of the first block and takes the others off the page. Their
- *   versions stay, and the history shows them as parts of the earlier text.
+ *   versions stay, and the history shows them together, in reading order, as
+ *   one entry: the text from before its first edit.
  * - title: a block of its own in the `tab-title` section, which no page read
  *   ever shows; the tab row keeps the current title.
  */
@@ -72,18 +73,19 @@ export function versionSource(authorUserId: string): VersionSource {
 }
 
 /**
- * Did this version hold the field's whole text? Yes for any version of a
- * field that only ever had one block, and for every edit (seq > 1) of its
- * first block, since an edit always writes the whole text there. A version of
- * any other block, or the first version of the first block of a field that
- * had several, is one paragraph of the text from before the first edit.
- *
- * @param fieldBlockIds - every block the field ever had, first block first
+ * The blocks a reader sees for one text field, in order. Only a Chunk 8 edit
+ * ever writes a version after the first, and an edit always writes the WHOLE
+ * text into the field's first block. So when the first block shows such a
+ * version (seq > 1) it alone is the field, shown as a plain paragraph; any
+ * other block still marked live is leftover from an edit whose tidying did
+ * not finish, and showing it would repeat the text.
  */
-export function holdsWholeText(
-  version: { blockId: string; seq: number },
-  fieldBlockIds: readonly string[],
-): boolean {
-  if (fieldBlockIds.length === 1) return true;
-  return version.blockId === fieldBlockIds[0] && version.seq > 1;
+export function visibleFieldBlocks<
+  T extends { kind: string; label?: string; currentVersionSeq?: number },
+>(blocks: readonly T[]): T[] {
+  const [first] = blocks;
+  if (first && (first.currentVersionSeq ?? 0) > 1) {
+    return [{ ...first, kind: 'paragraph', label: '' }];
+  }
+  return [...blocks];
 }

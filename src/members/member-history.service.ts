@@ -14,7 +14,7 @@ import {
   type ProfileBlockDocument,
 } from '../social/schemas/profile-block.schema';
 import {
-  holdsWholeText,
+  editorText,
   titleBlockId,
   type VersionSource,
   versionSource,
@@ -42,10 +42,12 @@ export interface HistoryEntry {
   hash: string;
   source: VersionSource;
   /**
-   * False for one paragraph of a text written before editing existed, which
-   * kept one record per paragraph until its first edit.
+   * The text as it was kept before the field's first edit here, one record
+   * per paragraph, shown together in reading order. Its paragraphs' hashes
+   * are in `partHashes`, in the same order.
    */
-  wholeText: boolean;
+  beforeFirstEdit: boolean;
+  partHashes?: string[];
 }
 
 export interface HistoryPage {
@@ -54,11 +56,57 @@ export interface HistoryPage {
   hasMore: boolean;
 }
 
+interface FieldBlock {
+  blockId: string;
+  label?: string;
+}
+
+interface VersionRow {
+  blockId: string;
+  seq: number;
+  text: string;
+  createdAt: Date;
+  hash: string;
+  authorUserId: string;
+}
+
+const VERSION_FIELDS = {
+  blockId: 1,
+  seq: 1,
+  text: 1,
+  createdAt: 1,
+  hash: 1,
+  authorUserId: 1,
+};
+
+function shortHash(hash: string) {
+  return hash.slice(0, SHORT_HASH_LENGTH);
+}
+
+/**
+ * @param label - an imported outline label, for a first version only: from
+ *   the first edit on, the label is part of the text itself
+ */
+function entryOf(row: VersionRow, label?: string): HistoryEntry {
+  return {
+    seq: row.seq,
+    savedAt: row.createdAt.toISOString(),
+    text: editorText([{ label, text: row.text }]),
+    hash: shortHash(row.hash),
+    source: versionSource(row.authorUserId),
+    beforeFirstEdit: false,
+  };
+}
+
 /**
  * Who can read a history is exactly who can read that part of the page now
  * (the same `decideProfileAccess` answer). A removed belief is on no page, so
  * only its owner and admins can read its history. Anyone else gets the same
  * 404 as for a page that does not exist.
+ *
+ * A field's versions all sit on ONE block (its first), except a text written
+ * before editing existed: there each paragraph has its own first version, and
+ * those are shown together as one entry, the oldest of the history.
  */
 @Injectable()
 export class MemberHistoryService {
@@ -84,8 +132,8 @@ export class MemberHistoryService {
 
   async bioHistory(slug: string, viewer: Viewer, page = 1) {
     const { profileId } = await this.readablePage(slug, viewer);
-    return this.listVersions(
-      await this.textBlockIds({ profileId, section: 'bio' }),
+    return this.listField(
+      await this.textBlocks({ profileId, section: 'bio' }),
       page,
     );
   }
@@ -107,64 +155,116 @@ export class MemberHistoryService {
     if (!tab || (tab.removedAt && !mayManage)) {
       throw new NotFoundException(PROFILE_NOT_FOUND);
     }
-    const blockIds =
+    const blocks =
       field === 'title'
-        ? [titleBlockId(tabId)]
-        : await this.textBlockIds({ profileId, section: 'beliefs', tabId });
-    return this.listVersions(blockIds, page);
+        ? [{ blockId: titleBlockId(tabId) }]
+        : await this.textBlocks({ profileId, section: 'beliefs', tabId });
+    return this.listField(blocks, page);
   }
 
-  /** Every text block the field ever had, removed ones too, first one first. */
-  private async textBlockIds(where: {
+  /** Every text block the field ever had, removed ones too, in reading order. */
+  private async textBlocks(where: {
     profileId: Types.ObjectId;
     section: 'bio' | 'beliefs';
     tabId?: string;
-  }) {
-    const blocks = await this.blockModel
+  }): Promise<FieldBlock[]> {
+    return this.blockModel
       .find({ ...where, kind: { $ne: 'image' } })
       .sort({ order: 1, _id: 1 })
-      .select({ blockId: 1 })
+      .select({ blockId: 1, label: 1 })
       .lean()
       .exec();
-    return blocks.map((block) => block.blockId);
   }
 
-  /** Newest first; one extra row read to know whether there is a next page. */
-  private async listVersions(
-    blockIds: string[],
+  /**
+   * Newest first. A one-block field lists that block's versions. A field of
+   * several lists its first block's edits (seq > 1), then one entry for the
+   * text before the first edit. Sorted by `seq` with `_id` as a final
+   * tie-breaker, so pages never overlap or skip, even when times are equal.
+   */
+  private async listField(
+    blocks: FieldBlock[],
     page: number,
   ): Promise<HistoryPage> {
-    const rows =
-      blockIds.length === 0
-        ? []
-        : await this.versionModel
-            .find({ blockId: { $in: blockIds } })
-            .sort({ createdAt: -1, seq: -1 })
-            .skip((page - 1) * HISTORY_PAGE_SIZE)
-            .limit(HISTORY_PAGE_SIZE + 1)
-            .select({
-              blockId: 1,
-              seq: 1,
-              text: 1,
-              createdAt: 1,
-              hash: 1,
-              authorUserId: 1,
-            })
-            .lean()
-            .exec();
+    const [first] = blocks;
+    if (!first) return { entries: [], page, hasMore: false };
+    const skip = (page - 1) * HISTORY_PAGE_SIZE;
+
+    if (blocks.length === 1) {
+      const rows = await this.versions({ blockId: first.blockId }, skip, 1);
+      return {
+        entries: rows
+          .slice(0, HISTORY_PAGE_SIZE)
+          .map((row) => entryOf(row, row.seq === 1 ? first.label : undefined)),
+        page,
+        hasMore: rows.length > HISTORY_PAGE_SIZE,
+      };
+    }
+
+    const edits = { blockId: first.blockId, seq: { $gt: 1 } };
+    const editCount = await this.versionModel.countDocuments(edits).exec();
+    const rows = await this.versions(edits, skip, 0);
+    const entries = rows.map((row) => entryOf(row));
+    // The earlier text is entry number `editCount` (0-based), the last one.
+    if (skip <= editCount && editCount < skip + HISTORY_PAGE_SIZE) {
+      const earlier = await this.earlierText(blocks, editCount > 0);
+      if (earlier) entries.push(earlier);
+    }
     return {
-      entries: rows.slice(0, HISTORY_PAGE_SIZE).map(
-        (row): HistoryEntry => ({
-          seq: row.seq,
-          savedAt: row.createdAt.toISOString(),
-          text: row.text,
-          hash: row.hash.slice(0, SHORT_HASH_LENGTH),
-          source: versionSource(row.authorUserId),
-          wholeText: holdsWholeText(row, blockIds),
-        }),
-      ),
+      entries,
       page,
-      hasMore: rows.length > HISTORY_PAGE_SIZE,
+      hasMore: skip + HISTORY_PAGE_SIZE < editCount + 1,
+    };
+  }
+
+  private async versions(
+    filter: Record<string, unknown>,
+    skip: number,
+    extra: number,
+  ): Promise<VersionRow[]> {
+    return this.versionModel
+      .find(filter)
+      .sort({ seq: -1, _id: -1 })
+      .skip(skip)
+      .limit(HISTORY_PAGE_SIZE + extra)
+      .select(VERSION_FIELDS)
+      .lean()
+      .exec();
+  }
+
+  /**
+   * The paragraphs as first saved, in reading order with their outline labels,
+   * as one entry. Imported if any of them was imported.
+   */
+  private async earlierText(
+    blocks: FieldBlock[],
+    edited: boolean,
+  ): Promise<HistoryEntry | undefined> {
+    const rows: VersionRow[] = await this.versionModel
+      .find({ blockId: { $in: blocks.map((block) => block.blockId) }, seq: 1 })
+      .select(VERSION_FIELDS)
+      .lean()
+      .exec();
+    const byBlock = new Map(rows.map((row) => [row.blockId, row]));
+    const parts = blocks.flatMap((block) => {
+      const row = byBlock.get(block.blockId);
+      return row ? [{ label: block.label, row }] : [];
+    });
+    if (parts.length === 0) return undefined;
+    const latest = Math.max(...parts.map(({ row }) => row.createdAt.getTime()));
+    const imported = parts.some(
+      ({ row }) => versionSource(row.authorUserId) === 'imported',
+    );
+    return {
+      seq: 1,
+      savedAt: new Date(latest).toISOString(),
+      text: editorText(
+        parts.map(({ label, row }) => ({ label, text: row.text })),
+      ),
+      hash: shortHash(parts[0].row.hash),
+      source: imported ? 'imported' : 'member',
+      beforeFirstEdit: edited,
+      partHashes: parts.map(({ row }) => shortHash(row.hash)),
     };
   }
 }

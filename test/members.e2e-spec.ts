@@ -26,7 +26,10 @@ import {
   MyMemberPageController,
 } from '../src/members/members.controller';
 import { MemberHistoryService } from '../src/members/member-history.service';
-import { MemberPageEditorService } from '../src/members/member-page-editor.service';
+import {
+  BIO_TOO_LONG,
+  MemberPageEditorService,
+} from '../src/members/member-page-editor.service';
 import { MembersService } from '../src/members/members.service';
 import { MyMemberPageService } from '../src/members/my-member-page.service';
 import { OrgSettingsService } from '../src/members/org-settings.service';
@@ -604,6 +607,18 @@ describe('Members API (e2e)', () => {
       await send('put', '/bio').send(body).expect(400);
     });
 
+    it('lets a long text through to the service, which explains the limit', async () => {
+      const { body } = await send('put', '/bio')
+        .set('X-Forwarded-For', '203.0.113.77')
+        .send({ text: 'a'.repeat(20_001), baseSeq: 1 })
+        .expect(400);
+      expect(body.message).toBe(BIO_TOO_LONG);
+      await send('put', '/bio')
+        .set('X-Forwarded-For', '203.0.113.77')
+        .send({ text: 'a'.repeat(60_001), baseSeq: 1 })
+        .expect(400);
+    });
+
     it('edits a belief and its title, moves and removes it', async () => {
       await send('put', '/tabs/tab_1/text')
         .send({ text: 'Synthetic belief, edited.', baseSeq: 1 })
@@ -655,7 +670,7 @@ describe('Members API (e2e)', () => {
             text: 'Synthetic bio',
             hash: 'ffffffffffff',
             source: 'member',
-            wholeText: true,
+            beforeFirstEdit: false,
           },
         ],
       });

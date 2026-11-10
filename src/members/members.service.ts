@@ -44,7 +44,7 @@ import {
   type Revisions,
   type TabView,
 } from './profile-serializers';
-import { titleBlockId } from './editable-fields';
+import { titleBlockId, visibleFieldBlocks } from './editable-fields';
 
 /** Exactly one message for a missing page and for a page you may not see. */
 export const PROFILE_NOT_FOUND = 'That page does not exist.';
@@ -346,7 +346,7 @@ export class MembersService {
           }
         : {}),
       removedTabs: show.manager ? await this.removedTabs(profileId) : [],
-      bio: paragraphs(inSection('bio')),
+      bio: paragraphs(visibleFieldBlocks(inSection('bio'))),
       extras,
       tabs: tabs.map(
         (tab): TabView => ({
@@ -354,7 +354,7 @@ export class MembersService {
           title: tab.title,
           ...(tab.group ? { group: tab.group } : {}),
           needsReview: tab.reviewStatus === 'imported-review',
-          paragraphs: paragraphs(tabBlocks(tab.tabId)),
+          paragraphs: paragraphs(visibleFieldBlocks(tabBlocks(tab.tabId))),
         }),
       ),
     };

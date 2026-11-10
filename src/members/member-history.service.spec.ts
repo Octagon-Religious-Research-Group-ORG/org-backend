@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument */
 import { NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { IMPORT_AUTHOR } from '../import/pages/import-plan';
@@ -16,12 +16,79 @@ function chain(value: unknown) {
   const query = {
     select: jest.fn(() => query),
     sort: jest.fn(() => query),
-    skip: jest.fn(() => query),
-    limit: jest.fn(() => query),
     lean: jest.fn(() => query),
     exec: jest.fn(() => Promise.resolve(value)),
   };
   return query;
+}
+
+interface Row {
+  _id: string;
+  blockId: string;
+  seq: number;
+  text: string;
+  createdAt: Date;
+  hash: string;
+  authorUserId: string;
+  prevHash?: string;
+}
+
+/**
+ * A small version store that honours the filters, the sort, skip and limit
+ * the service sends, so pagination is tested against real ordering rules.
+ */
+function versionStore(rows: Row[]) {
+  const matches = (row: Row, filter: Record<string, any>) => {
+    const ids = filter.blockId?.$in ?? [filter.blockId];
+    if (!ids.includes(row.blockId)) return false;
+    if (typeof filter.seq === 'number') return row.seq === filter.seq;
+    if (filter.seq?.$gt !== undefined) return row.seq > filter.seq.$gt;
+    return true;
+  };
+  const queries: any[] = [];
+  const model = {
+    countDocuments: jest.fn((filter: Record<string, any>) => ({
+      exec: () =>
+        Promise.resolve(rows.filter((row) => matches(row, filter)).length),
+    })),
+    find: jest.fn((filter: Record<string, any>) => {
+      const state = { sort: undefined as any, skip: 0, limit: Infinity };
+      const query = {
+        sort: jest.fn((sort: any) => ((state.sort = sort), query)),
+        skip: jest.fn((n: number) => ((state.skip = n), query)),
+        limit: jest.fn((n: number) => ((state.limit = n), query)),
+        select: jest.fn(() => query),
+        lean: jest.fn(() => query),
+        exec: () => {
+          let out = rows.filter((row) => matches(row, filter));
+          // The sort keys in order; ties left over are broken differently
+          // on every query, as a database without a unique key may do.
+          const salt = queries.length;
+          const scramble = (id: string) =>
+            [...id].reduce(
+              (h, c) => (h * 31 + c.charCodeAt(0) + salt) % 9973,
+              7,
+            );
+          out = [...out].sort((x: any, y: any) => {
+            for (const [key, direction] of Object.entries(state.sort ?? {})) {
+              const left = x[key] instanceof Date ? x[key].getTime() : x[key];
+              const right = y[key] instanceof Date ? y[key].getTime() : y[key];
+              if (left !== right) {
+                return (left < right ? -1 : 1) * (direction as number);
+              }
+            }
+            return scramble(x._id) - scramble(y._id);
+          });
+          return Promise.resolve(
+            out.slice(state.skip, state.skip + state.limit),
+          );
+        },
+      };
+      queries.push(query);
+      return query;
+    }),
+  };
+  return { model, queries };
 }
 
 const FORBIDDEN = {
@@ -45,33 +112,44 @@ function page(overrides: Record<string, unknown> = {}) {
 const at = (minute: number) => new Date(Date.UTC(2026, 10, 1, 12, minute));
 const hash = (c: string) => c.repeat(64);
 
-/** A bio imported as two paragraphs, then edited once by its owner. */
-const BIO_VERSIONS = [
+/** A bio imported as three paragraphs (I., unlabelled, A.), then edited twice. */
+const BIO_BLOCKS = [
+  { blockId: 'b-1', label: 'I.' },
+  { blockId: 'b-2', label: '' },
+  { blockId: 'b-3', label: 'A.' },
+];
+const imported = (blockId: string, text: string, c: string): Row => ({
+  _id: `v-${blockId}-1`,
+  blockId,
+  seq: 1,
+  text,
+  createdAt: at(0),
+  hash: hash(c),
+  authorUserId: IMPORT_AUTHOR,
+});
+const BIO_VERSIONS: Row[] = [
+  // Stored in an order unlike the page, as a database may return them.
+  imported('b-3', 'Third.', 'c'),
+  imported('b-1', 'First.', 'a'),
+  imported('b-2', 'Second.', 'b'),
   {
+    _id: 'v-b-1-2',
     blockId: 'b-1',
     seq: 2,
     text: 'Edited whole bio.',
     createdAt: at(30),
-    hash: hash('a'),
+    hash: hash('d'),
     authorUserId: 'user_owner',
-    prevHash: hash('0'),
-    _id: 'v-internal',
+    prevHash: hash('a'),
   },
   {
-    blockId: 'b-2',
-    seq: 1,
-    text: 'Second imported paragraph.',
-    createdAt: at(1),
-    hash: hash('b'),
-    authorUserId: IMPORT_AUTHOR,
-  },
-  {
+    _id: 'v-b-1-3',
     blockId: 'b-1',
-    seq: 1,
-    text: 'First imported paragraph.',
-    createdAt: at(0),
-    hash: hash('c'),
-    authorUserId: IMPORT_AUTHOR,
+    seq: 3,
+    text: 'Edited again.',
+    createdAt: at(30),
+    hash: hash('e'),
+    authorUserId: 'user_owner',
   },
 ];
 
@@ -97,7 +175,7 @@ function setup(
     profile?: unknown;
     tab?: unknown;
     blocks?: unknown[];
-    versions?: unknown[];
+    versions?: Row[];
   } = {},
 ) {
   const profileModel = {
@@ -111,12 +189,9 @@ function setup(
     ),
   };
   const blockModel = {
-    find: jest.fn(() =>
-      chain(options.blocks ?? [{ blockId: 'b-1' }, { blockId: 'b-2' }]),
-    ),
+    find: jest.fn(() => chain(options.blocks ?? BIO_BLOCKS)),
   };
-  const versionQuery = chain(options.versions ?? BIO_VERSIONS);
-  const versionModel = { find: jest.fn(() => versionQuery) };
+  const store = versionStore(options.versions ?? BIO_VERSIONS);
   const members = new MembersService(
     profileModel as never,
     {} as never,
@@ -130,49 +205,85 @@ function setup(
     members,
     tabModel as never,
     blockModel as never,
-    versionModel as never,
+    store.model as never,
   );
-  return { service, tabModel, blockModel, versionModel, versionQuery };
+  return {
+    service,
+    tabModel,
+    blockModel,
+    versionModel: store.model,
+    queries: store.queries,
+  };
 }
 
 describe('history entries', () => {
-  it('lists newest first with server time, text, a short hash and where it came from', async () => {
-    const { service, versionModel, versionQuery } = setup();
+  it('lists edits newest first, then the earlier text as ONE entry in reading order with its labels', async () => {
+    const { service } = setup();
     const result = await service.bioHistory('quiet-fern', GUEST_VIEWER);
     expect(result).toEqual({
       page: 1,
       hasMore: false,
       entries: [
         {
+          seq: 3,
+          savedAt: '2026-11-01T12:30:00.000Z',
+          text: 'Edited again.',
+          hash: 'eeeeeeeeeeee',
+          source: 'member',
+          beforeFirstEdit: false,
+        },
+        {
           seq: 2,
           savedAt: '2026-11-01T12:30:00.000Z',
           text: 'Edited whole bio.',
-          hash: 'aaaaaaaaaaaa',
+          hash: 'dddddddddddd',
           source: 'member',
-          wholeText: true,
-        },
-        {
-          seq: 1,
-          savedAt: '2026-11-01T12:01:00.000Z',
-          text: 'Second imported paragraph.',
-          hash: 'bbbbbbbbbbbb',
-          source: 'imported',
-          wholeText: false,
+          beforeFirstEdit: false,
         },
         {
           seq: 1,
           savedAt: '2026-11-01T12:00:00.000Z',
-          text: 'First imported paragraph.',
-          hash: 'cccccccccccc',
+          text: 'I. First.\n\nSecond.\n\nA. Third.',
+          hash: 'aaaaaaaaaaaa',
           source: 'imported',
-          wholeText: false,
+          beforeFirstEdit: true,
+          partHashes: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc'],
         },
       ],
     });
-    expect(versionModel.find).toHaveBeenCalledWith({
-      blockId: { $in: ['b-1', 'b-2'] },
+  });
+
+  it('sorts by version number with the database id as the last tie-breaker', async () => {
+    const { service, queries } = setup();
+    await service.bioHistory('quiet-fern', owner);
+    expect(queries[0].sort).toHaveBeenCalledWith({ seq: -1, _id: -1 });
+  });
+
+  it('shows a never-edited text of several paragraphs as one current entry', async () => {
+    const { service } = setup({ versions: BIO_VERSIONS.slice(0, 3) });
+    const result = await service.bioHistory('quiet-fern', owner);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]).toMatchObject({
+      beforeFirstEdit: false,
+      text: 'I. First.\n\nSecond.\n\nA. Third.',
+      source: 'imported',
     });
-    expect(versionQuery.sort).toHaveBeenCalledWith({ createdAt: -1, seq: -1 });
+  });
+
+  it('marks the earlier text as the member’s when none of it was imported', async () => {
+    const own = BIO_VERSIONS.map((row) => ({
+      ...row,
+      authorUserId: 'user_owner',
+    }));
+    const { service } = setup({ versions: own });
+    const result = await service.bioHistory('quiet-fern', owner);
+    expect(result.entries.at(-1)).toMatchObject({ source: 'member' });
+  });
+
+  it('leaves out the earlier text when none of its versions can be read', async () => {
+    const { service } = setup({ versions: BIO_VERSIONS.slice(3) });
+    const result = await service.bioHistory('quiet-fern', owner);
+    expect(result.entries.map((entry) => entry.seq)).toEqual([3, 2]);
   });
 
   it('never sends an author id, a database id, a full hash or the page source fields', async () => {
@@ -180,29 +291,119 @@ describe('history entries', () => {
     const text = JSON.stringify(await service.bioHistory('quiet-fern', owner));
     for (const secret of [
       'user_owner',
-      'v-internal',
+      'v-b-1',
       'prevHash',
       hash('a'),
       'secret-lookalike',
       'legacy.example',
       'authorUserId',
       'blockId',
+      '_id',
     ]) {
       expect(text).not.toContain(secret);
     }
   });
 
-  it('pages twenty at a time, asking for one more to know if there is a next page', async () => {
-    const many = Array.from({ length: HISTORY_PAGE_SIZE + 1 }, (_, i) => ({
-      ...BIO_VERSIONS[0],
-      seq: 30 - i,
-    }));
-    const { service, versionQuery } = setup({ versions: many });
-    const result = await service.bioHistory('quiet-fern', owner, 3);
-    expect(result.entries).toHaveLength(HISTORY_PAGE_SIZE);
-    expect(result).toMatchObject({ page: 3, hasMore: true });
-    expect(versionQuery.skip).toHaveBeenCalledWith(2 * HISTORY_PAGE_SIZE);
-    expect(versionQuery.limit).toHaveBeenCalledWith(HISTORY_PAGE_SIZE + 1);
+  describe('paging', () => {
+    /** 45 edits with the same time, the case where a time sort is unstable. */
+    const tied: Row[] = [
+      ...BIO_VERSIONS.slice(0, 3),
+      ...Array.from({ length: 45 }, (_, i) => ({
+        _id: `e${String(i).padStart(3, '0')}`,
+        blockId: 'b-1',
+        seq: i + 2,
+        text: `Edit ${i + 2}`,
+        createdAt: at(10),
+        hash: hash('f'),
+        authorUserId: 'user_owner',
+      })),
+    ];
+
+    it('covers every version exactly once, the earlier text last', async () => {
+      const seen: string[] = [];
+      const pages: boolean[] = [];
+      for (let number = 1; number <= 3; number++) {
+        const { service } = setup({ versions: tied });
+        const result = await service.bioHistory('quiet-fern', owner, number);
+        seen.push(...result.entries.map((entry) => entry.text));
+        pages.push(result.hasMore);
+      }
+      expect(seen).toHaveLength(46);
+      expect(new Set(seen).size).toBe(46);
+      expect(seen.at(0)).toBe('Edit 46');
+      expect(seen.at(-1)).toBe('I. First.\n\nSecond.\n\nA. Third.');
+      expect(pages).toEqual([true, true, false]);
+    });
+
+    it('puts the earlier text on the next page when the edits fill a page exactly', async () => {
+      const twenty = tied.slice(0, 3 + HISTORY_PAGE_SIZE);
+      const first = await setup({ versions: twenty }).service.bioHistory(
+        'quiet-fern',
+        owner,
+        1,
+      );
+      expect(first.entries).toHaveLength(HISTORY_PAGE_SIZE);
+      expect(first.hasMore).toBe(true);
+      const second = await setup({ versions: twenty }).service.bioHistory(
+        'quiet-fern',
+        owner,
+        2,
+      );
+      expect(second.entries.map((entry) => entry.beforeFirstEdit)).toEqual([
+        true,
+      ]);
+      expect(second.hasMore).toBe(false);
+      const beyond = await setup({ versions: twenty }).service.bioHistory(
+        'quiet-fern',
+        owner,
+        3,
+      );
+      expect(beyond.entries).toEqual([]);
+    });
+
+    it('pages a one-block field by asking for one more than a page', async () => {
+      const single = Array.from({ length: HISTORY_PAGE_SIZE + 5 }, (_, i) => ({
+        _id: `s${String(i).padStart(3, '0')}`,
+        blockId: 'b-1',
+        seq: i + 1,
+        text: `Version ${i + 1}`,
+        createdAt: at(1),
+        hash: hash('9'),
+        authorUserId: 'user_owner',
+      }));
+      const blocks = [{ blockId: 'b-1' }];
+      const one = await setup({ versions: single, blocks }).service.bioHistory(
+        'quiet-fern',
+        owner,
+        1,
+      );
+      expect(one).toMatchObject({ hasMore: true });
+      expect(one.entries).toHaveLength(HISTORY_PAGE_SIZE);
+      expect(one.entries[0].text).toBe(`Version ${HISTORY_PAGE_SIZE + 5}`);
+      const two = await setup({ versions: single, blocks }).service.bioHistory(
+        'quiet-fern',
+        owner,
+        2,
+      );
+      expect(two).toMatchObject({ hasMore: false });
+      expect(two.entries.map((entry) => entry.seq)).toEqual([5, 4, 3, 2, 1]);
+      expect(two.entries.every((entry) => !entry.beforeFirstEdit)).toBe(true);
+    });
+  });
+
+  it('puts a lone block’s outline label in front of its first version only', async () => {
+    const { service } = setup({
+      blocks: [{ blockId: 'b-1', label: 'A.' }],
+      versions: [
+        { ...BIO_VERSIONS[1], text: 'Imported.' },
+        { ...BIO_VERSIONS[3], text: 'A. Edited.' },
+      ],
+    });
+    const result = await service.bioHistory('quiet-fern', owner);
+    expect(result.entries.map((entry) => entry.text)).toEqual([
+      'A. Edited.',
+      'A. Imported.',
+    ]);
   });
 
   it('reads no versions for a field with no blocks', async () => {
@@ -219,6 +420,7 @@ describe('history entries', () => {
     const { service, versionModel, blockModel } = setup({
       versions: [
         {
+          _id: 't1',
           blockId: 'ttl_tab_a',
           seq: 1,
           text: 'Old',
@@ -236,15 +438,13 @@ describe('history entries', () => {
     );
     expect(result.entries[0]).toMatchObject({
       source: 'title-before-history',
-      wholeText: true,
+      beforeFirstEdit: false,
     });
-    expect(versionModel.find).toHaveBeenCalledWith({
-      blockId: { $in: ['ttl_tab_a'] },
-    });
+    expect(versionModel.find).toHaveBeenCalledWith({ blockId: 'ttl_tab_a' });
     expect(blockModel.find).not.toHaveBeenCalled();
   });
 
-  it('reads a belief’s text from all its text blocks, removed ones too', async () => {
+  it('reads a belief’s text from all its text blocks, removed ones too, in reading order', async () => {
     const { service, blockModel } = setup();
     await service.tabHistory('quiet-fern', 'tab_a', owner);
     expect(blockModel.find).toHaveBeenCalledWith({

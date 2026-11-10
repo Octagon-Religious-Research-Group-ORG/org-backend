@@ -162,6 +162,74 @@ describe('MembersService.profile, editing data', () => {
     expect(JSON.stringify(view)).not.toContain('Gone');
   });
 
+  it('the serialiser gives an admin the settings but never the editor’s versions', () => {
+    const view = fullProfile(
+      page() as never,
+      { level: 'full', listed: true, isOwner: false },
+      true,
+      true,
+      {
+        bio: [],
+        extras: [],
+        tabs: [],
+        revisions: { bio: 3, tabs: {} },
+        removedTabs: [],
+      },
+      undefined,
+    );
+    expect(view).toHaveProperty('manage');
+    expect(view).not.toHaveProperty('revisions');
+  });
+
+  it('shows only the first block of a field once it holds an edit, as a plain paragraph', async () => {
+    const { service, blockModel, versionModel } = setup({ one: page() });
+    blockModel.find.mockReturnValueOnce(
+      chain([
+        {
+          blockId: 'b-1',
+          section: 'beliefs',
+          kind: 'outline-item',
+          label: 'I.',
+          tabId: 'tab-1',
+          currentVersionId: v(1),
+          currentVersionSeq: 2,
+        },
+        {
+          blockId: 'b-2',
+          section: 'beliefs',
+          kind: 'paragraph',
+          label: '',
+          tabId: 'tab-1',
+          currentVersionId: v(2),
+          currentVersionSeq: 1,
+        },
+      ]),
+    );
+    versionModel.find.mockReturnValueOnce(
+      chain([
+        { _id: v(1), text: 'I. Whole.\n\nTwo.' },
+        { _id: v(2), text: 'Two.' },
+      ]),
+    );
+    const view = await service.profile('quiet-fern', GUEST_VIEWER);
+    expect(view).toMatchObject({
+      tabs: [
+        {
+          tabId: 'tab-1',
+          paragraphs: [
+            {
+              blockId: 'b-1',
+              kind: 'paragraph',
+              label: '',
+              text: 'I. Whole.\n\nTwo.',
+            },
+          ],
+        },
+        { tabId: 'tab-2', paragraphs: [] },
+      ],
+    });
+  });
+
   it('starts at zero for a page with no bio block', async () => {
     const { service, blockModel } = setup({ one: page() });
     blockModel.find.mockReturnValueOnce(chain([]));

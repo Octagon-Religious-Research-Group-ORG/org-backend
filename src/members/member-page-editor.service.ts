@@ -35,6 +35,7 @@ import {
   normaliseTitle,
   TITLE_RECORD_AUTHOR,
   titleBlockId,
+  visibleFieldBlocks,
 } from './editable-fields';
 import type { TabMove } from './members.dto';
 
@@ -44,7 +45,8 @@ export const LAST_BELIEF_REFUSAL =
   'A page needs at least one belief, so the last one cannot be removed.';
 const MOVED_ELSEWHERE =
   'Your beliefs were just rearranged in another window. Reload and try again.';
-const TEXT_TOO_LONG = `A text can hold at most ${MAX_BLOCK_TEXT_LENGTH} characters.`;
+export const BELIEF_TOO_LONG = `This belief is longer than one save can hold (${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters). Please move part of it into a new belief tab.`;
+export const BIO_TOO_LONG = `Your bio is longer than one save can hold (${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters). Please shorten it.`;
 
 export interface SaveResult {
   /** False when the text read the same as before: nothing was written. */
@@ -55,7 +57,6 @@ export interface SaveResult {
 
 interface OwnedPage {
   _id: Types.ObjectId;
-  tabCountRepairs?: number;
   liveTabCount?: number;
   nextTabOrder?: number;
 }
@@ -65,11 +66,22 @@ interface TextBlockRow {
   kind: string;
   label?: string;
   currentVersionId?: Types.ObjectId;
+  currentVersionSeq?: number;
 }
 
-/** A first block that is not yet a plain paragraph holding the whole text. */
-function needsMerge(first: TextBlockRow, rest: TextBlockRow[]) {
-  return rest.length > 0 || first.kind !== 'paragraph' || Boolean(first.label);
+interface TextField {
+  where: {
+    profileId: Types.ObjectId;
+    section: 'bio' | 'beliefs';
+    tabId?: string;
+  };
+  newBlockId: string;
+  emptyRefusal: string;
+  tooLong: string;
+}
+
+function describeFailure(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -107,12 +119,7 @@ export class MemberPageEditorService {
   private async ownedPage(userId: string): Promise<OwnedPage> {
     const page = await this.profileModel
       .findOne(this.ownedFilter(userId))
-      .select({
-        _id: 1,
-        tabCountRepairs: 1,
-        liveTabCount: 1,
-        nextTabOrder: 1,
-      })
+      .select({ _id: 1, liveTabCount: 1, nextTabOrder: 1 })
       .lean()
       .exec();
     if (!page) throw new NotFoundException(NO_PAGE);
@@ -133,10 +140,13 @@ export class MemberPageEditorService {
   async editBio(userId: string, text: string, baseSeq: number) {
     const page = await this.ownedPage(userId);
     return this.saveText(
-      { profileId: page._id, section: 'bio' },
-      firstTextBlockId('bio', page._id.toString()),
+      {
+        where: { profileId: page._id, section: 'bio' },
+        newBlockId: firstTextBlockId('bio', page._id.toString()),
+        emptyRefusal: 'Your bio needs some text.',
+        tooLong: BIO_TOO_LONG,
+      },
       { userId, text, baseSeq },
-      'Your bio needs some text.',
     );
   }
 
@@ -148,82 +158,93 @@ export class MemberPageEditorService {
   ) {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
-    return this.saveText(
-      { profileId: page._id, section: 'beliefs', tabId },
-      firstTextBlockId('tab', tabId),
+    const saved = await this.saveText(
+      {
+        where: { profileId: page._id, section: 'beliefs', tabId },
+        newBlockId: firstTextBlockId('tab', tabId),
+        emptyRefusal: 'A belief needs some text.',
+        tooLong: BELIEF_TOO_LONG,
+      },
       { userId, text, baseSeq },
-      'A belief needs some text.',
     );
+    if (saved.changed) await this.markReviewed(tabId);
+    return saved;
   }
 
   /**
    * Writes a field's whole text as one new version of its first text block,
-   * on top of exactly the version the editor started from.
+   * on top of exactly the version the editor started from. Text that reads
+   * the same as the page writes nothing, however long it is.
    *
    * @throws BadRequestException for text with nothing to read, or too long
    * @throws ConflictException when the text changed since `baseSeq`
    */
   private async saveText(
-    where: {
-      profileId: Types.ObjectId;
-      section: 'bio' | 'beliefs';
-      tabId?: string;
-    },
-    newBlockId: string,
+    field: TextField,
     edit: { userId: string; text: string; baseSeq: number },
-    emptyRefusal: string,
   ): Promise<SaveResult> {
     const text = normaliseFieldText(edit.text);
-    if (!hasVisibleText(text)) throw new BadRequestException(emptyRefusal);
-    if (text.length > MAX_BLOCK_TEXT_LENGTH) {
-      throw new BadRequestException(TEXT_TOO_LONG);
+    if (!hasVisibleText(text)) {
+      throw new BadRequestException(field.emptyRefusal);
     }
 
     const blocks = (await this.blockModel
       .find({
-        ...where,
+        ...field.where,
         kind: { $ne: 'image' },
         removedAt: { $exists: false },
       })
       .sort({ order: 1, _id: 1 })
-      .select({ blockId: 1, kind: 1, label: 1, currentVersionId: 1 })
+      .select({
+        blockId: 1,
+        kind: 1,
+        label: 1,
+        currentVersionId: 1,
+        currentVersionSeq: 1,
+      })
       .lean()
       .exec()) as TextBlockRow[];
 
     if (text === normaliseFieldText(await this.currentText(blocks))) {
       return { changed: false, seq: edit.baseSeq };
     }
+    // After the comparison: a long imported text saved unchanged is no error.
+    if (text.length > MAX_BLOCK_TEXT_LENGTH) {
+      throw new BadRequestException(field.tooLong);
+    }
 
     const [first, ...rest] = blocks;
     let blockId = first?.blockId;
     if (blockId === undefined) {
-      blockId = newBlockId;
+      blockId = field.newBlockId;
       await this.createBlockOnce({
-        ...where,
+        ...field.where,
         blockId,
         kind: 'paragraph',
         order: 0,
       });
     }
+    let saved: { seq: number };
     try {
-      const saved = await this.versions.appendVersion({
+      saved = await this.versions.appendVersion({
         blockId,
         text,
         authorUserId: edit.userId,
         expectedSeq: edit.baseSeq,
       });
-      if (first && needsMerge(first, rest)) {
-        await this.mergeIntoFirst(first.blockId, rest);
-      }
-      return { changed: true, seq: saved.seq };
     } catch (error) {
       throw withoutMemberText(error);
     }
+    if (first && rest.length > 0) {
+      await this.mergeIntoFirst(first.blockId, rest);
+    }
+    return { changed: true, seq: saved.seq };
   }
 
   /** The text the page shows now, as an editor would start from it. */
   private async currentText(blocks: TextBlockRow[]) {
-    const ids = blocks.flatMap((block) => block.currentVersionId ?? []);
+    const shown = visibleFieldBlocks(blocks);
+    const ids = shown.flatMap((block) => block.currentVersionId ?? []);
     const rows = await this.versionModel
       .find({ _id: { $in: ids } })
       .select({ text: 1 })
@@ -231,7 +252,7 @@ export class MemberPageEditorService {
       .exec();
     const textOf = new Map(rows.map((row) => [String(row._id), row.text]));
     return editorText(
-      blocks.flatMap((block) => {
+      shown.flatMap((block) => {
         const text = textOf.get(String(block.currentVersionId));
         return text === undefined ? [] : [{ label: block.label, text }];
       }),
@@ -239,27 +260,36 @@ export class MemberPageEditorService {
   }
 
   /**
-   * After the first edit of a field written as several blocks: the first one
-   * now holds the whole text, so it becomes a plain paragraph and the others
-   * leave the page. Their versions are untouched.
+   * Tidies a field after an edit wrote its whole text into the first block:
+   * the others leave the page. The first block keeps its imported kind and
+   * label, which the history needs to show the text before the edit; a page
+   * shows it as a plain paragraph anyway (`visibleFieldBlocks`).
+   *
+   * Only tidying: a reader already sees the whole text alone, because a first
+   * block whose shown version is an edit (seq > 1) stands for the whole field
+   * (`visibleFieldBlocks`). So a failure here is logged, never reported as a
+   * failed save, and the next edit of the field runs it again.
+   *
+   * For Chunk 9: blocks taken off here keep their `tabId` and get
+   * `mergedInto`, so an imported comment's `anchorBlockId` still leads to its
+   * tab, and to the block that now holds its text.
    */
   private async mergeIntoFirst(firstId: string, rest: TextBlockRow[]) {
-    await this.blockModel
-      .updateOne(
-        { blockId: firstId },
-        { $set: { kind: 'paragraph', label: '' } },
-      )
-      .exec();
-    if (rest.length === 0) return;
-    await this.blockModel
-      .updateMany(
-        {
-          blockId: { $in: rest.map((block) => block.blockId) },
-          removedAt: { $exists: false },
-        },
-        { $set: { removedAt: new Date() } },
-      )
-      .exec();
+    try {
+      await this.blockModel
+        .updateMany(
+          {
+            blockId: { $in: rest.map((block) => block.blockId) },
+            removedAt: { $exists: false },
+          },
+          { $set: { removedAt: new Date(), mergedInto: firstId } },
+        )
+        .exec();
+    } catch (error) {
+      this.logger.warn(
+        `Could not tidy the blocks of ${firstId} after an edit; the next edit retries: ${describeFailure(error)}`,
+      );
+    }
   }
 
   /** Two first saves race to the same fixed id; the loser uses the winner's. */
@@ -268,6 +298,26 @@ export class MemberPageEditorService {
       await this.blockModel.create(fields);
     } catch (error) {
       if ((error as { code?: unknown }).code !== 11000) throw error;
+    }
+  }
+
+  /**
+   * An imported belief the owner has edited or renamed is reviewed (plan §2c):
+   * "Imported, please review" goes. Only after a save has landed, so a failure
+   * here is logged rather than reported as a failed save.
+   */
+  private async markReviewed(tabId: string) {
+    try {
+      await this.tabModel
+        .updateOne(
+          { tabId, reviewStatus: 'imported-review' },
+          { $set: { reviewStatus: 'confirmed' } },
+        )
+        .exec();
+    } catch (error) {
+      this.logger.warn(
+        `Could not clear the review note on ${tabId}: ${describeFailure(error)}`,
+      );
     }
   }
 
@@ -298,6 +348,7 @@ export class MemberPageEditorService {
 
     const blockId = titleBlockId(tabId);
     let expectedSeq = baseSeq;
+    let saved: { seq: number };
     try {
       if (baseSeq === 0) {
         await this.createBlockOnce({
@@ -316,12 +367,16 @@ export class MemberPageEditorService {
         });
         expectedSeq = 1;
       }
-      const saved = await this.versions.appendVersion({
+      saved = await this.versions.appendVersion({
         blockId,
         text: title,
         authorUserId: userId,
         expectedSeq,
       });
+    } catch (error) {
+      throw withoutMemberText(error);
+    }
+    try {
       await this.tabModel
         .updateOne(
           {
@@ -334,10 +389,14 @@ export class MemberPageEditorService {
           { $set: { title, titleSeq: saved.seq } },
         )
         .exec();
-      return { changed: true, seq: saved.seq };
     } catch (error) {
-      throw withoutMemberText(error);
+      // The version is the record; the page catches up on the next rename.
+      this.logger.warn(
+        `Could not show the new title of ${tabId}: ${describeFailure(error)}`,
+      );
     }
+    await this.markReviewed(tabId);
+    return { changed: true, seq: saved.seq };
   }
 
   /**
@@ -346,9 +405,12 @@ export class MemberPageEditorService {
    * admins can still open its history. The last belief cannot go: a page needs
    * a bio and at least one belief.
    *
-   * Two removals at once cannot both succeed on the last two tabs: each one
-   * removes, then counts, and undoes itself if nothing is left, so the one
-   * that counts last always leaves a belief.
+   * Removals of one page take turns through its live-tab counter: each first
+   * takes one off it, but only while it is above one, in a single atomic
+   * update. Of two removals of the last two beliefs, exactly one gets through.
+   * The counter can only be too high (an add still running, or one that could
+   * not give its place back), never too low, so the real tabs are counted too
+   * after the removal; if none is left, the removal is undone.
    *
    * @throws ConflictException for the last belief on the page
    */
@@ -358,14 +420,15 @@ export class MemberPageEditorService {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }
-    const others = await this.tabModel
-      .countDocuments({
-        profileId: page._id,
-        tabId: { $ne: tabId },
-        removedAt: { $exists: false },
-      })
+    const turn = await this.profileModel
+      .findOneAndUpdate(
+        { ...this.ownedFilter(userId), liveTabCount: { $gt: 1 } },
+        { $inc: { liveTabCount: -1 } },
+      )
+      .select({ _id: 1 })
+      .lean()
       .exec();
-    if (others === 0) throw new ConflictException(LAST_BELIEF_REFUSAL);
+    if (!turn) throw new ConflictException(LAST_BELIEF_REFUSAL);
 
     const removedAt = new Date();
     const removed = await this.tabModel
@@ -374,7 +437,10 @@ export class MemberPageEditorService {
         { $set: { removedAt } },
       )
       .exec();
-    if (removed.modifiedCount !== 1) throw new NotFoundException(NO_TAB);
+    if (removed.modifiedCount !== 1) {
+      await this.givePlaceBack(userId);
+      throw new NotFoundException(NO_TAB);
+    }
 
     const left = await this.tabModel
       .countDocuments({ profileId: page._id, removedAt: { $exists: false } })
@@ -383,37 +449,24 @@ export class MemberPageEditorService {
       await this.tabModel
         .updateOne(
           { profileId: page._id, tabId, removedAt },
-          {
-            $unset: { removedAt: 1 },
-          },
+          { $unset: { removedAt: 1 } },
         )
         .exec();
+      await this.givePlaceBack(userId);
       throw new ConflictException(LAST_BELIEF_REFUSAL);
     }
-    await this.releasePlace(userId, page.tabCountRepairs);
     return { removed: true };
   }
 
-  /**
-   * One place back on the counter that caps a page's tabs (Chunk 7). Skipped
-   * when the counter was recounted since the page was read: a recount counts
-   * the rows, which already leave this tab out. Never below zero.
-   */
-  private async releasePlace(userId: string, repairs: number | undefined) {
+  /** A removal that did not happen returns the place it took off. */
+  private async givePlaceBack(userId: string) {
     try {
       await this.profileModel
-        .updateOne(
-          {
-            ...this.ownedFilter(userId),
-            tabCountRepairs: repairs ?? { $exists: false },
-            liveTabCount: { $gt: 0 },
-          },
-          { $inc: { liveTabCount: -1 } },
-        )
+        .updateOne(this.ownedFilter(userId), { $inc: { liveTabCount: 1 } })
         .exec();
     } catch (error) {
       this.logger.warn(
-        `Could not give back a tab place: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not give a tab place back: ${describeFailure(error)}`,
       );
     }
   }
@@ -447,8 +500,10 @@ export class MemberPageEditorService {
   }
 
   /**
-   * Swaps a tab with its live neighbour. Each order changes only if it is
-   * still what was read, and a half-done swap is put back.
+   * Swaps a tab with its live neighbour in the same category (D03 groups are
+   * shown together, so "earlier" means earlier within the group). Each order
+   * changes only if it is still what was read, and a half-done swap is put
+   * back.
    *
    * @throws BadRequestException when the tab is already first or last
    * @throws ConflictException when the tabs moved in another window
@@ -459,12 +514,15 @@ export class MemberPageEditorService {
     const tabs = await this.tabModel
       .find({ profileId: page._id, removedAt: { $exists: false } })
       .sort({ order: 1, _id: 1 })
-      .select({ tabId: 1, order: 1 })
+      .select({ tabId: 1, order: 1, group: 1 })
       .lean()
       .exec();
-    const index = tabs.findIndex((tab) => tab.tabId === tabId);
-    const other = tabs[direction === 'up' ? index - 1 : index + 1];
-    const moving = tabs[index];
+    const moving = tabs.find((tab) => tab.tabId === tabId);
+    const group = tabs.filter(
+      (tab) => (tab.group ?? '') === (moving?.group ?? ''),
+    );
+    const index = group.findIndex((tab) => tab.tabId === tabId);
+    const other = group[direction === 'up' ? index - 1 : index + 1];
     if (!moving || !other) {
       throw new BadRequestException(
         direction === 'up'

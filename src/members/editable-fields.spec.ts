@@ -2,13 +2,13 @@ import { IMPORT_AUTHOR } from '../import/pages/import-plan';
 import {
   editorText,
   firstTextBlockId,
-  holdsWholeText,
   IMPORTED_AUTHOR,
   normaliseFieldText,
   normaliseTitle,
   TITLE_RECORD_AUTHOR,
   titleBlockId,
   versionSource,
+  visibleFieldBlocks,
 } from './editable-fields';
 
 describe('editable fields', () => {
@@ -44,16 +44,25 @@ describe('editable fields', () => {
     expect(versionSource('user_abc')).toBe('member');
   });
 
-  describe('whole text or one paragraph of it', () => {
-    it('a field that only ever had one block: every version is whole', () => {
-      expect(holdsWholeText({ blockId: 'a', seq: 1 }, ['a'])).toBe(true);
+  describe('what a reader sees of a text field', () => {
+    const blocks = [
+      { blockId: 'a', kind: 'outline-item', label: 'I.', currentVersionSeq: 1 },
+      { blockId: 'b', kind: 'paragraph', label: '', currentVersionSeq: 1 },
+    ];
+
+    it('every paragraph, as stored, until the field is edited', () => {
+      expect(visibleFieldBlocks(blocks)).toEqual(blocks);
+      expect(visibleFieldBlocks([])).toEqual([]);
+      expect(visibleFieldBlocks([{ kind: 'paragraph' }])).toEqual([
+        { kind: 'paragraph' },
+      ]);
     });
 
-    it('a field of several blocks: only edits of its first block are whole', () => {
-      const ids = ['a', 'b'];
-      expect(holdsWholeText({ blockId: 'a', seq: 1 }, ids)).toBe(false);
-      expect(holdsWholeText({ blockId: 'a', seq: 2 }, ids)).toBe(true);
-      expect(holdsWholeText({ blockId: 'b', seq: 1 }, ids)).toBe(false);
+    it('only the first block, as a plain paragraph, once it shows an edit', () => {
+      const edited = [{ ...blocks[0], currentVersionSeq: 2 }, blocks[1]];
+      expect(visibleFieldBlocks(edited)).toEqual([
+        { blockId: 'a', kind: 'paragraph', label: '', currentVersionSeq: 2 },
+      ]);
     });
   });
 });

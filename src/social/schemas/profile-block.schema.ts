@@ -75,6 +75,15 @@ export class ProfileBlock {
   @Prop({ type: Date })
   removedAt?: Date;
 
+  /**
+   * Set when an edit wrote this block's text into the field's first block and
+   * took this one off the page (Chunk 8). The block keeps its `tabId`, so a
+   * comment anchored here (Chunk 9: `anchorBlockId`) still belongs to its
+   * tab, and this names the block that now holds its text.
+   */
+  @Prop({ type: String })
+  mergedInto?: string;
+
   createdAt?: Date;
   updatedAt?: Date;
 }

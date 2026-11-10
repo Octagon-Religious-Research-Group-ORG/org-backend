@@ -1,129 +1,33 @@
-/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect.any() matchers */
 import {
   BadRequestException,
   ConflictException,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Error as MongooseError, Types } from 'mongoose';
+import { Error as MongooseError } from 'mongoose';
 import { STALE_EDIT_REFUSAL } from '../social/block-versions.service';
 import { MAX_TAB_TITLE_LENGTH } from '../social/schemas/belief-tab.schema';
 import { MAX_BLOCK_TEXT_LENGTH } from '../social/schemas/block-version.schema';
 import { TITLE_RECORD_AUTHOR } from './editable-fields';
 import {
-  LAST_BELIEF_REFUSAL,
+  BELIEF_TOO_LONG,
+  BIO_TOO_LONG,
   MemberPageEditorService,
 } from './member-page-editor.service';
+import {
+  failing,
+  OWNED,
+  OWNER,
+  profileId,
+  setup,
+  v,
+} from './member-page-editor.mocks-spec';
 
-const profileId = new Types.ObjectId();
-const v = (n: number) => new Types.ObjectId(String(n).padStart(24, 'c'));
-const OWNER = 'user_owner';
-
-function chain(value: unknown) {
-  const query = {
-    select: jest.fn(() => query),
-    sort: jest.fn(() => query),
-    lean: jest.fn(() => query),
-    exec: jest.fn(() => Promise.resolve(value)),
-  };
-  return query;
-}
-const done = (value: unknown) => ({ exec: () => Promise.resolve(value) });
-
-interface Options {
-  page?: unknown;
-  tab?: unknown;
-  blocks?: unknown[];
-  versions?: unknown[];
-  others?: number;
-  left?: number;
-  removed?: number;
-  tabs?: unknown[];
-  moved?: number[];
-}
-
-function setup(options: Options = {}) {
-  const profileModel = {
-    findOne: jest.fn(() =>
-      chain(
-        options.page === undefined
-          ? { _id: profileId, liveTabCount: 3, nextTabOrder: 3 }
-          : options.page,
-      ),
-    ),
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- typed for the call assertions
-    updateOne: jest.fn((..._args: unknown[]) => done({ matchedCount: 1 })),
-  };
-  const counts = [options.others ?? 2, options.left ?? 2];
-  const moves = [...(options.moved ?? [1, 1, 1])];
-  const tabModel = {
-    findOne: jest.fn(() =>
-      chain(
-        options.tab === undefined
-          ? { tabId: 'tab_a', title: 'Old title', order: 0 }
-          : options.tab,
-      ),
-    ),
-    find: jest.fn(() => chain(options.tabs ?? [])),
-    countDocuments: jest.fn(() => done(counts.shift())),
-    updateOne: jest.fn((filter: { order?: number }) =>
-      done({
-        modifiedCount:
-          filter.order === undefined ? (options.removed ?? 1) : moves.shift(),
-      }),
-    ),
-  };
-  const blockModel = {
-    find: jest.fn(() =>
-      chain(
-        options.blocks ?? [
-          {
-            blockId: 'blk_1',
-            kind: 'paragraph',
-            label: '',
-            currentVersionId: v(1),
-          },
-        ],
-      ),
-    ),
-    create: jest.fn(() => Promise.resolve({})),
-    updateOne: jest.fn(() => done({})),
-    updateMany: jest.fn(() => done({})),
-  };
-  const versionModel = {
-    find: jest.fn(() =>
-      chain(options.versions ?? [{ _id: v(1), text: 'Sky is wide.' }]),
-    ),
-  };
-  let seq = 0;
-  const versions = {
-    appendVersion: jest.fn((input: { expectedSeq?: number }) => {
-      seq = (input.expectedSeq ?? seq) + 1;
-      return Promise.resolve({ seq });
-    }),
-  };
-  const service = new MemberPageEditorService(
-    profileModel as never,
-    tabModel as never,
-    blockModel as never,
-    versionModel as never,
-    versions as never,
-  );
-  return {
-    service,
-    profileModel,
-    tabModel,
-    blockModel,
-    versionModel,
-    versions,
-  };
-}
-
-const OWNED = {
-  ownerUserId: OWNER,
-  deletedAt: { $exists: false },
-  reviewStatus: { $ne: 'claiming' },
-};
+const REVIEWED = [
+  { tabId: 'tab_a', reviewStatus: 'imported-review' },
+  { $set: { reviewStatus: 'confirmed' } },
+];
 
 describe('who may edit', () => {
   it('starts every edit from the page the signed-in account owns', async () => {
@@ -163,6 +67,7 @@ describe('who may edit', () => {
       expect(all.versions.appendVersion).not.toHaveBeenCalled();
       expect(all.tabModel.updateOne).not.toHaveBeenCalled();
       expect(all.blockModel.updateOne).not.toHaveBeenCalled();
+      expect(all.profileModel.findOneAndUpdate).not.toHaveBeenCalled();
     },
   );
 
@@ -214,19 +119,24 @@ describe('editing text', () => {
       kind: { $ne: 'image' },
       removedAt: { $exists: false },
     });
-    // A plain paragraph needs no rewriting.
+    // A plain paragraph needs no tidying.
     expect(blockModel.updateOne).not.toHaveBeenCalled();
     expect(blockModel.updateMany).not.toHaveBeenCalled();
   });
 
   it('writes nothing when the text reads the same after cleaning', async () => {
-    const { service, versions } = setup({
+    const { service, versions, tabModel } = setup({
       versions: [{ _id: v(1), text: 'First.\n\nSecond.' }],
     });
     await expect(
       service.editBio(OWNER, '  First.\r\n\n\n\u202eSecond.  \n', 7),
     ).resolves.toEqual({ changed: false, seq: 7 });
+    await expect(
+      service.editTabText(OWNER, 'tab_a', 'First.\n\nSecond.', 7),
+    ).resolves.toEqual({ changed: false, seq: 7 });
     expect(versions.appendVersion).not.toHaveBeenCalled();
+    // Nothing was edited, so an imported belief stays to be reviewed.
+    expect(tabModel.updateOne).not.toHaveBeenCalled();
   });
 
   it('cleans control characters and blank-line runs before saving', async () => {
@@ -248,12 +158,46 @@ describe('editing text', () => {
     expect(blockModel.find).not.toHaveBeenCalled();
   });
 
-  it('refuses text longer than one version can hold', async () => {
-    const { service, versions } = setup();
-    await expect(
-      service.editBio(OWNER, 'a'.repeat(MAX_BLOCK_TEXT_LENGTH + 1), 1),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(versions.appendVersion).not.toHaveBeenCalled();
+  describe('a text longer than one version holds', () => {
+    const long = 'a'.repeat(MAX_BLOCK_TEXT_LENGTH + 1);
+
+    it('refuses a changed one with a message that says what to do', async () => {
+      const { service, versions } = setup();
+      await expect(
+        service.editTabText(OWNER, 'tab_a', long, 1),
+      ).rejects.toThrow(BELIEF_TOO_LONG);
+      await expect(service.editBio(OWNER, long, 1)).rejects.toThrow(
+        BIO_TOO_LONG,
+      );
+      expect(BELIEF_TOO_LONG).toContain('20,000 characters');
+      expect(BELIEF_TOO_LONG).toContain('new belief tab');
+      expect(versions.appendVersion).not.toHaveBeenCalled();
+    });
+
+    it('saves an unchanged imported one as no change, not as an error', async () => {
+      const half = 'b'.repeat(15_000);
+      const { service, versions } = setup({
+        blocks: [
+          { blockId: 'blk_1', kind: 'paragraph', currentVersionId: v(1) },
+          { blockId: 'blk_2', kind: 'paragraph', currentVersionId: v(2) },
+        ],
+        versions: [
+          { _id: v(1), text: half },
+          { _id: v(2), text: half },
+        ],
+      });
+      await expect(
+        service.editTabText(OWNER, 'tab_a', `${half}\n\n${half}`, 1),
+      ).resolves.toEqual({ changed: false, seq: 1 });
+      expect(versions.appendVersion).not.toHaveBeenCalled();
+    });
+
+    it('still accepts exactly the limit', async () => {
+      const { service } = setup();
+      await expect(
+        service.editBio(OWNER, 'a'.repeat(MAX_BLOCK_TEXT_LENGTH), 1),
+      ).resolves.toMatchObject({ changed: true });
+    });
   });
 
   it('passes the 409 on and changes no block when the text moved on', async () => {
@@ -283,13 +227,21 @@ describe('editing text', () => {
     );
   });
 
+  it('marks an imported belief as reviewed once its text is edited', async () => {
+    const { service, tabModel } = setup();
+    await service.editTabText(OWNER, 'tab_a', 'Sky is wider.', 1);
+    expect(tabModel.updateOne).toHaveBeenCalledWith(...REVIEWED);
+  });
+
   describe('a text kept as one block per paragraph (imported or joined)', () => {
     const blocks = [
       {
         blockId: 'blk_1',
         kind: 'outline-item',
         label: 'I.',
+        tabId: 'tab_a',
         currentVersionId: v(1),
+        currentVersionSeq: 1,
       },
       {
         blockId: 'blk_2',
@@ -330,20 +282,60 @@ describe('editing text', () => {
         authorUserId: OWNER,
         expectedSeq: 1,
       });
-      expect(blockModel.updateOne).toHaveBeenCalledWith(
-        { blockId: 'blk_1' },
-        { $set: { kind: 'paragraph', label: '' } },
-      );
+      // The first block keeps its kind and label for the history; nothing
+      // rewrites it.
+      expect(blockModel.updateOne).not.toHaveBeenCalled();
+      // Exactly these fields: the blocks keep their tabId, so a Chunk 9
+      // comment anchored on one still finds its tab.
       expect(blockModel.updateMany).toHaveBeenCalledWith(
         {
           blockId: { $in: ['blk_2', 'blk_3'] },
           removedAt: { $exists: false },
         },
-        { $set: { removedAt: expect.any(Date) } },
+        { $set: { removedAt: expect.any(Date), mergedInto: 'blk_1' } },
       );
     });
 
-    it('turns a lone labelled block into a plain paragraph, as its label is now in the text', async () => {
+    it('reports the save once its version landed, even if tidying fails, and logs it', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      const { service, blockModel } = setup({ blocks, versions });
+      blockModel.updateMany.mockReturnValueOnce(failing(new Error('net blip')));
+      await expect(
+        service.editTabText(OWNER, 'tab_a', 'Whole new text.', 1),
+      ).resolves.toEqual({ changed: true, seq: 2 });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('net blip'));
+      blockModel.updateMany.mockReturnValueOnce(failing('plain'));
+      await service.editTabText(OWNER, 'tab_a', 'Whole new text again.', 2);
+      expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('plain'));
+      warn.mockRestore();
+    });
+
+    it('after an unfinished tidy, reads only the first block, and tidies again on the next edit', async () => {
+      // blk_1 shows an edit (seq 2) holding the whole text; blk_2 and blk_3
+      // were never taken off the page.
+      const {
+        service,
+        versions: saving,
+        blockModel,
+      } = setup({
+        blocks: [{ ...blocks[0], currentVersionSeq: 2 }, blocks[1], blocks[2]],
+        versions: [
+          { _id: v(1), text: 'I. Sky.\n\nSea and sand.' },
+          { _id: v(2), text: 'Sea.' },
+          { _id: v(3), text: 'Land.' },
+        ],
+      });
+      // The whole text, without the stale label in front and without the
+      // leftover paragraphs, is what the page shows: no change.
+      await expect(
+        service.editTabText(OWNER, 'tab_a', 'I. Sky.\n\nSea and sand.', 2),
+      ).resolves.toEqual({ changed: false, seq: 2 });
+      expect(saving.appendVersion).not.toHaveBeenCalled();
+      await service.editTabText(OWNER, 'tab_a', 'Later text.', 2);
+      expect(blockModel.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a lone labelled block as it is: the page shows the edit as a plain paragraph', async () => {
       const { service, blockModel } = setup({
         blocks: [
           {
@@ -355,7 +347,7 @@ describe('editing text', () => {
         ],
       });
       await service.editTabText(OWNER, 'tab_a', 'A. Something new.', 1);
-      expect(blockModel.updateOne).toHaveBeenCalledTimes(1);
+      expect(blockModel.updateOne).not.toHaveBeenCalled();
       expect(blockModel.updateMany).not.toHaveBeenCalled();
     });
 
@@ -456,6 +448,7 @@ describe('editing a title', () => {
       },
       { $set: { title: 'New title', titleSeq: 2 } },
     );
+    expect(tabModel.updateOne).toHaveBeenCalledWith(...REVIEWED);
   });
 
   it('appends one version on top of a title that already has history', async () => {
@@ -502,188 +495,24 @@ describe('editing a title', () => {
     ).rejects.toThrow(STALE_EDIT_REFUSAL);
     expect(tabModel.updateOne).not.toHaveBeenCalled();
   });
-});
 
-describe('removing a belief', () => {
-  it('hides the tab, keeps its blocks, and takes one place off the counter', async () => {
-    const { service, tabModel, profileModel, blockModel } = setup({
-      page: {
-        _id: profileId,
-        liveTabCount: 3,
-        nextTabOrder: 3,
-        tabCountRepairs: 2,
-      },
-    });
-    await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
-      removed: true,
-    });
-    expect(tabModel.updateOne).toHaveBeenCalledWith(
-      { profileId, tabId: 'tab_a', removedAt: { $exists: false } },
-      { $set: { removedAt: expect.any(Date) } },
-    );
-    expect(profileModel.updateOne).toHaveBeenCalledWith(
-      { ...OWNED, tabCountRepairs: 2, liveTabCount: { $gt: 0 } },
-      { $inc: { liveTabCount: -1 } },
-    );
-    expect(blockModel.updateMany).not.toHaveBeenCalled();
-    expect(blockModel.updateOne).not.toHaveBeenCalled();
-  });
-
-  it('decrements only against a counter never recounted', async () => {
-    const { service, profileModel } = setup();
-    await service.removeTab(OWNER, 'tab_a');
-    expect(profileModel.updateOne).toHaveBeenCalledWith(
-      expect.objectContaining({ tabCountRepairs: { $exists: false } }),
-      { $inc: { liveTabCount: -1 } },
-    );
-  });
-
-  it('refuses the last belief and writes nothing', async () => {
-    const { service, tabModel, profileModel } = setup({ others: 0 });
-    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
-      LAST_BELIEF_REFUSAL,
-    );
-    expect(tabModel.countDocuments).toHaveBeenCalledWith({
-      profileId,
-      tabId: { $ne: 'tab_a' },
-      removedAt: { $exists: false },
-    });
-    expect(tabModel.updateOne).not.toHaveBeenCalled();
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
-  });
-
-  it('undoes itself when a removal elsewhere took the other belief meanwhile', async () => {
-    const { service, tabModel, profileModel } = setup({ others: 1, left: 0 });
-    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
-    const removedAt = (
-      tabModel.updateOne.mock.calls[0] as unknown as [
-        unknown,
-        { $set: { removedAt: Date } },
-      ]
-    )[1].$set.removedAt;
-    expect(tabModel.updateOne).toHaveBeenLastCalledWith(
-      { profileId, tabId: 'tab_a', removedAt },
-      { $unset: { removedAt: 1 } },
-    );
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
-  });
-
-  it('says not found when another window removed it first', async () => {
-    const { service, profileModel } = setup({ removed: 0 });
-    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
-  });
-
-  it('starts the counters of an older page before removing', async () => {
-    const { service, profileModel, tabModel } = setup({
-      page: { _id: profileId },
-      tabs: [{ order: 0 }, { order: 4, removedAt: new Date(0) }, { order: 2 }],
-    });
-    await service.removeTab(OWNER, 'tab_a');
-    expect(profileModel.updateOne.mock.calls[0]).toEqual([
-      { ...OWNED, _id: profileId, liveTabCount: { $exists: false } },
-      { $set: { liveTabCount: 2, nextTabOrder: 5 } },
-    ]);
-    expect(profileModel.updateOne.mock.calls[1][1]).toEqual({
-      $inc: { liveTabCount: -1 },
-    });
-    expect(tabModel.find).toHaveBeenCalledWith({ profileId });
-  });
-
-  it('starts an empty counter at zero', async () => {
-    const { service, profileModel } = setup({
-      page: { _id: profileId, liveTabCount: 1 },
-      tabs: [],
-    });
-    await service.removeTab(OWNER, 'tab_a');
-    expect(profileModel.updateOne.mock.calls[0][1]).toEqual({
-      $set: { liveTabCount: 0, nextTabOrder: 0 },
-    });
-  });
-
-  it('keeps the removal when the counter cannot be written, and says so in the log', async () => {
+  it('reports a landed title as saved even if the page copy or review note fails, and logs it', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
-    const { service, profileModel } = setup();
-    profileModel.updateOne.mockReturnValueOnce({
-      exec: () => Promise.reject(new Error('timeout')),
-    });
-    await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
-      removed: true,
-    });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('timeout'));
-    profileModel.updateOne.mockReturnValueOnce({
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- a non-Error rejection is the case tested
-      exec: () => Promise.reject('plain'),
-    });
-    await service.removeTab(OWNER, 'tab_a');
-    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('plain'));
-    warn.mockRestore();
-  });
-});
-
-describe('moving a belief', () => {
-  const tabs = [
-    { tabId: 'tab_a', order: 0 },
-    { tabId: 'tab_b', order: 3 },
-    { tabId: 'tab_c', order: 7 },
-  ];
-
-  it('swaps orders with the neighbour, each change conditional', async () => {
-    const { service, tabModel } = setup({ tabs });
-    await expect(service.moveTab(OWNER, 'tab_b', 'up')).resolves.toEqual({
-      moved: true,
-    });
-    expect(tabModel.updateOne.mock.calls).toEqual([
-      [{ tabId: 'tab_b', order: 3 }, { $set: { order: 0 } }],
-      [{ tabId: 'tab_a', order: 0 }, { $set: { order: 3 } }],
-    ]);
-    const down = setup({ tabs });
-    await down.service.moveTab(OWNER, 'tab_b', 'down');
-    expect(down.tabModel.updateOne.mock.calls[0]).toEqual([
-      { tabId: 'tab_b', order: 3 },
-      { $set: { order: 7 } },
-    ]);
-  });
-
-  it('refuses to move the first up or the last down', async () => {
-    const first = setup({ tabs });
-    await expect(first.service.moveTab(OWNER, 'tab_a', 'up')).rejects.toThrow(
-      'already first',
-    );
-    const last = setup({ tabs });
-    await expect(last.service.moveTab(OWNER, 'tab_c', 'down')).rejects.toThrow(
-      'already last',
-    );
-    expect(first.tabModel.updateOne).not.toHaveBeenCalled();
-  });
-
-  it('refuses a tab missing from the live list', async () => {
-    const { service } = setup({ tabs: [] });
+    const { service, tabModel } = setup();
+    tabModel.updateOne
+      .mockReturnValueOnce(failing(new Error('copy failed')))
+      .mockReturnValueOnce(failing(new Error('note failed')));
     await expect(
-      service.moveTab(OWNER, 'tab_a', 'down'),
-    ).rejects.toBeInstanceOf(BadRequestException);
-  });
-
-  it('changes nothing when the tab moved in another window', async () => {
-    const { service, tabModel } = setup({ tabs, moved: [0] });
-    await expect(service.moveTab(OWNER, 'tab_b', 'up')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
-    expect(tabModel.updateOne).toHaveBeenCalledTimes(1);
-  });
-
-  it('puts a half-done swap back', async () => {
-    const { service, tabModel } = setup({ tabs, moved: [1, 0, 1] });
-    await expect(service.moveTab(OWNER, 'tab_b', 'up')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
-    expect(tabModel.updateOne).toHaveBeenLastCalledWith(
-      { tabId: 'tab_b', order: 0 },
-      { $set: { order: 3 } },
-    );
+      service.editTabTitle(OWNER, 'tab_a', 'Mine', 2),
+    ).resolves.toEqual({ changed: true, seq: 3 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('copy failed'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('note failed'));
+    tabModel.updateOne
+      .mockReturnValueOnce(failing('plain copy'))
+      .mockReturnValueOnce(failing('plain note'));
+    await service.editTabTitle(OWNER, 'tab_a', 'Mine again', 3);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('plain copy'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('plain note'));
+    warn.mockRestore();
   });
 });

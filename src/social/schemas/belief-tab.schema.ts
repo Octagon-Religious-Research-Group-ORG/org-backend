@@ -5,7 +5,8 @@ import { HydratedDocument, Types } from 'mongoose';
  * - `confirmed`: written by the member, or an imported split they accepted;
  * - `imported-review`: split automatically or by hand during the Apple Pages
  *   import. Shown with "Imported, please review" until the owner accepts,
- *   merges, re-splits or renames it (plan §2c).
+ *   merges, re-splits or renames it (plan §2c). Editing its text or its title
+ *   (Chunk 8) counts as that review and clears it.
  */
 export const TAB_REVIEW_STATUSES = ['confirmed', 'imported-review'] as const;
 export type TabReviewStatus = (typeof TAB_REVIEW_STATUSES)[number];
