@@ -35,6 +35,14 @@ export const MAX_CLIENT_SEQ = 1_000_000;
  */
 export const MAX_EDIT_TEXT_INPUT = 60_000;
 
+/**
+ * Body limit for the owner's page routes: enough for an edit at the cap above
+ * in the worst JSON encoding (an escaped control character: six bytes per UTF-16 unit; a
+ * 3-byte character is 1 unit), plus the other fields. Express's default
+ * 100 kB would answer a plain 413 to 34,000 three-byte characters.
+ */
+export const MAX_EDIT_BODY_BYTES = 6 * MAX_EDIT_TEXT_INPUT + 1024;
+
 export class EditTextDto {
   /** Paragraphs separated by a blank line. */
   @IsString()

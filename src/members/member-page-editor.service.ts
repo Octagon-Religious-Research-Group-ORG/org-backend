@@ -45,6 +45,8 @@ export const LAST_BELIEF_REFUSAL =
   'A page needs at least one belief, so the last one cannot be removed.';
 const MOVED_ELSEWHERE =
   'Your beliefs were just rearranged in another window. Reload and try again.';
+/** A removal turn this old belongs to a removal that died. */
+export const REMOVAL_TURN_STALE_MS = 5 * 60_000;
 export const BELIEF_TOO_LONG = `This belief is longer than one save can hold (${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters). Please move part of it into a new belief tab.`;
 export const BIO_TOO_LONG = `Your bio is longer than one save can hold (${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters). Please shorten it.`;
 
@@ -405,12 +407,20 @@ export class MemberPageEditorService {
    * admins can still open its history. The last belief cannot go: a page needs
    * a bio and at least one belief.
    *
-   * Removals of one page take turns through its live-tab counter: each first
-   * takes one off it, but only while it is above one, in a single atomic
-   * update. Of two removals of the last two beliefs, exactly one gets through.
-   * The counter can only be too high (an add still running, or one that could
-   * not give its place back), never too low, so the real tabs are counted too
-   * after the removal; if none is left, the removal is undone.
+   * Removals of one page take turns: a turn is taken in one atomic update
+   * that adds to `pendingRemovals`, and only while `liveTabCount` minus the
+   * turns already taken is above one. Of two removals of the last two
+   * beliefs, exactly one gets a turn; of three removals of three, two do.
+   *
+   * The counter that caps a page's tabs is lowered only AFTER the tab is
+   * really removed, together with the turn, in one update. So a removal that
+   * dies at any point leaves `liveTabCount` too high or exact, never too low
+   * (too high is what the Chunk 7 recount repairs), and a turn it left behind
+   * is cleared once it is older than {@link REMOVAL_TURN_STALE_MS}.
+   *
+   * The counter can be too high (an add still running, or a removal that
+   * died), so the real tabs are counted too after the removal; if none is
+   * left, the removal is undone.
    *
    * @throws ConflictException for the last belief on the page
    */
@@ -420,25 +430,25 @@ export class MemberPageEditorService {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }
-    const turn = await this.profileModel
-      .findOneAndUpdate(
-        { ...this.ownedFilter(userId), liveTabCount: { $gt: 1 } },
-        { $inc: { liveTabCount: -1 } },
-      )
-      .select({ _id: 1 })
-      .lean()
-      .exec();
-    if (!turn) throw new ConflictException(LAST_BELIEF_REFUSAL);
+    if (!(await this.takeRemovalTurn(userId))) {
+      throw new ConflictException(LAST_BELIEF_REFUSAL);
+    }
 
     const removedAt = new Date();
-    const removed = await this.tabModel
-      .updateOne(
-        { profileId: page._id, tabId, removedAt: { $exists: false } },
-        { $set: { removedAt } },
-      )
-      .exec();
+    let removed: { modifiedCount: number };
+    try {
+      removed = await this.tabModel
+        .updateOne(
+          { profileId: page._id, tabId, removedAt: { $exists: false } },
+          { $set: { removedAt } },
+        )
+        .exec();
+    } catch (error) {
+      await this.endRemovalTurn(userId, false);
+      throw error;
+    }
     if (removed.modifiedCount !== 1) {
-      await this.givePlaceBack(userId);
+      await this.endRemovalTurn(userId, false);
       throw new NotFoundException(NO_TAB);
     }
 
@@ -452,21 +462,77 @@ export class MemberPageEditorService {
           { $unset: { removedAt: 1 } },
         )
         .exec();
-      await this.givePlaceBack(userId);
+      await this.endRemovalTurn(userId, false);
       throw new ConflictException(LAST_BELIEF_REFUSAL);
     }
+    await this.endRemovalTurn(userId, true);
     return { removed: true };
   }
 
-  /** A removal that did not happen returns the place it took off. */
-  private async givePlaceBack(userId: string) {
+  /** @returns whether this removal may go ahead */
+  private async takeRemovalTurn(userId: string) {
+    const take = () =>
+      this.profileModel
+        .updateOne(
+          {
+            ...this.ownedFilter(userId),
+            $expr: {
+              $gt: [
+                {
+                  $subtract: [
+                    '$liveTabCount',
+                    { $ifNull: ['$pendingRemovals', 0] },
+                  ],
+                },
+                1,
+              ],
+            },
+          },
+          {
+            $inc: { pendingRemovals: 1 },
+            $set: { lastRemovalTurnAt: new Date() },
+          },
+        )
+        .exec();
+    if ((await take()).modifiedCount === 1) return true;
+    // A turn left by a removal that died blocks the others until cleared.
+    const cleared = await this.profileModel
+      .updateOne(
+        {
+          ...this.ownedFilter(userId),
+          pendingRemovals: { $gt: 0 },
+          lastRemovalTurnAt: {
+            $lt: new Date(Date.now() - REMOVAL_TURN_STALE_MS),
+          },
+        },
+        { $set: { pendingRemovals: 0 } },
+      )
+      .exec();
+    if (cleared.modifiedCount !== 1) return false;
+    return (await take()).modifiedCount === 1;
+  }
+
+  /**
+   * Ends a turn. A removal that happened lowers the counter in the same
+   * update; one that did not only gives its turn back. Conditional on a turn
+   * being there, so a turn cleared as stale is never counted off twice. A
+   * failure here leaves the counter too high, which is the safe side.
+   */
+  private async endRemovalTurn(userId: string, removed: boolean) {
     try {
       await this.profileModel
-        .updateOne(this.ownedFilter(userId), { $inc: { liveTabCount: 1 } })
+        .updateOne(
+          { ...this.ownedFilter(userId), pendingRemovals: { $gt: 0 } },
+          {
+            $inc: removed
+              ? { liveTabCount: -1, pendingRemovals: -1 }
+              : { pendingRemovals: -1 },
+          },
+        )
         .exec();
     } catch (error) {
       this.logger.warn(
-        `Could not give a tab place back: ${describeFailure(error)}`,
+        `Could not end a removal turn: ${describeFailure(error)}`,
       );
     }
   }

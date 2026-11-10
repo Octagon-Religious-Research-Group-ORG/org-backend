@@ -67,7 +67,7 @@ describe('who may edit', () => {
       expect(all.versions.appendVersion).not.toHaveBeenCalled();
       expect(all.tabModel.updateOne).not.toHaveBeenCalled();
       expect(all.blockModel.updateOne).not.toHaveBeenCalled();
-      expect(all.profileModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(all.profileModel.updateOne).not.toHaveBeenCalled();
     },
   );
 

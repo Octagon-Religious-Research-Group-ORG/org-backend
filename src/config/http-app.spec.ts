@@ -15,13 +15,15 @@ describe('configureHttpApp', () => {
       origins: [],
       trustProxyHops: 1,
     });
-    const [, parser] = app.use.mock.calls.find(
-      ([path]) => path === '/api/v1/me/membership',
-    ) as [string, (req: unknown, res: unknown, next: () => void) => void];
-    expect(parser.name).not.toBe('jsonParser');
-    const next = jest.fn();
-    parser({ headers: {} }, {}, next);
-    expect(next).toHaveBeenCalledTimes(1);
+    for (const route of ['/api/v1/me/membership', '/api/v1/me/member-page']) {
+      const [, parser] = app.use.mock.calls.find(
+        ([path]) => path === route,
+      ) as [string, (req: unknown, res: unknown, next: () => void) => void];
+      expect(parser.name).not.toBe('jsonParser');
+      const next = jest.fn();
+      parser({ headers: {} }, {}, next);
+      expect(next).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('trusts the configured proxy hops and applies the shared HTTP setup', () => {
@@ -40,7 +42,7 @@ describe('configureHttpApp', () => {
 
     expect(app.set).toHaveBeenCalledWith('trust proxy', 1);
     expect(app.setGlobalPrefix).toHaveBeenCalledWith('api/v1');
-    expect(app.use).toHaveBeenCalledTimes(2);
+    expect(app.use).toHaveBeenCalledTimes(3);
     expect(app.use).toHaveBeenCalledWith(
       '/api/v1/me/membership',
       expect.any(Function),

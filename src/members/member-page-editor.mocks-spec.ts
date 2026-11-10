@@ -31,8 +31,11 @@ export interface Options {
   tab?: unknown;
   blocks?: unknown[];
   versions?: unknown[];
-  /** What the removal's turn on the counter returns; null = refused. */
-  turn?: unknown;
+  /**
+   * `modifiedCount` of each profile `updateOne`, in call order; 1 once the
+   * list runs out.
+   */
+  profileUpdates?: number[];
   left?: number;
   removed?: number;
   tabs?: unknown[];
@@ -42,6 +45,7 @@ export interface Options {
 type Filter = Record<string, unknown>;
 
 export function setup(options: Options = {}) {
+  const profileUpdates = [...(options.profileUpdates ?? [])];
   const profileModel = {
     findOne: jest.fn(() =>
       chain(
@@ -50,15 +54,13 @@ export function setup(options: Options = {}) {
           : options.page,
       ),
     ),
-    findOneAndUpdate: jest.fn((filter: Filter, update: Filter) =>
-      chain(
-        options.turn === undefined
-          ? { _id: profileId, filter, update }
-          : options.turn,
-      ),
-    ),
     updateOne: jest.fn((filter: Filter, update: Filter) =>
-      done({ matchedCount: 1, filter, update }),
+      done({
+        matchedCount: 1,
+        modifiedCount: profileUpdates.length > 0 ? profileUpdates.shift() : 1,
+        filter,
+        update,
+      }),
     ),
   };
   const moves = [...(options.moved ?? [1, 1, 1])];

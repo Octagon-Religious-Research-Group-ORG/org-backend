@@ -172,6 +172,19 @@ export class SocialProfile {
   @Prop({ type: Number, min: 0 })
   nextTabOrder?: number;
 
+  /**
+   * Tab removals that have taken their turn but not finished (Chunk 8). A
+   * removal is counted off `liveTabCount` only after its tab is really gone,
+   * so a removal that dies part-way leaves the counter too high, never too
+   * low. A turn left behind by such a removal is cleared after a while.
+   */
+  @Prop({ type: Number, min: 0 })
+  pendingRemovals?: number;
+
+  /** When a removal last took its turn: an old pending turn is a dead one. */
+  @Prop({ type: Date })
+  lastRemovalTurnAt?: Date;
+
   /** Clerk user id of the member who owns the page; absent until claimed. */
   @Prop({ type: String })
   ownerUserId?: string;

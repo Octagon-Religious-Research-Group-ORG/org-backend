@@ -5,8 +5,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { LAST_BELIEF_REFUSAL } from './member-page-editor.service';
 import {
+  LAST_BELIEF_REFUSAL,
+  REMOVAL_TURN_STALE_MS,
+} from './member-page-editor.service';
+import {
+  done,
   failing,
   OWNED,
   OWNER,
@@ -14,39 +18,118 @@ import {
   setup,
 } from './member-page-editor.mocks-spec';
 
+const TURN_FILTER = {
+  ...OWNED,
+  $expr: {
+    $gt: [
+      {
+        $subtract: ['$liveTabCount', { $ifNull: ['$pendingRemovals', 0] }],
+      },
+      1,
+    ],
+  },
+};
 const TAKE_TURN = [
-  { ...OWNED, liveTabCount: { $gt: 1 } },
-  { $inc: { liveTabCount: -1 } },
+  TURN_FILTER,
+  {
+    $inc: { pendingRemovals: 1 },
+    $set: { lastRemovalTurnAt: expect.any(Date) },
+  },
 ];
-const GIVE_BACK = [OWNED, { $inc: { liveTabCount: 1 } }];
+const END_REMOVED = [
+  { ...OWNED, pendingRemovals: { $gt: 0 } },
+  { $inc: { liveTabCount: -1, pendingRemovals: -1 } },
+];
+const END_NOT_REMOVED = [
+  { ...OWNED, pendingRemovals: { $gt: 0 } },
+  { $inc: { pendingRemovals: -1 } },
+];
+
+/** Every decrement of the tab counter, as `[call order, update]`. */
+function counterDecrements(
+  profileModel: ReturnType<typeof setup>['profileModel'],
+) {
+  return profileModel.updateOne.mock.calls.flatMap((call, index) => {
+    const update = call[1] as { $inc?: { liveTabCount?: number } };
+    return update.$inc?.liveTabCount === -1
+      ? [profileModel.updateOne.mock.invocationCallOrder[index]]
+      : [];
+  });
+}
 
 describe('removing a belief', () => {
-  it('takes a turn on the counter, then hides the tab and keeps its blocks', async () => {
+  it('takes a turn, hides the tab, then counts it off with the turn, in that order', async () => {
     const { service, tabModel, profileModel, blockModel } = setup();
     await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
       removed: true,
     });
-    expect(profileModel.findOneAndUpdate).toHaveBeenCalledWith(...TAKE_TURN);
+    expect(profileModel.updateOne.mock.calls).toEqual([TAKE_TURN, END_REMOVED]);
     expect(tabModel.updateOne).toHaveBeenCalledWith(
       { profileId, tabId: 'tab_a', removedAt: { $exists: false } },
       { $set: { removedAt: expect.any(Date) } },
     );
-    // The counter was decremented by the turn; nothing gives it back.
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
+    // The crash-safe order: the counter goes down only after the tab is gone.
+    const [decrement] = counterDecrements(profileModel);
+    expect(decrement).toBeGreaterThan(
+      tabModel.updateOne.mock.invocationCallOrder[0],
+    );
     expect(blockModel.updateMany).not.toHaveBeenCalled();
     expect(blockModel.updateOne).not.toHaveBeenCalled();
   });
 
-  it('refuses the last belief, by the counter, and writes nothing', async () => {
-    const { service, tabModel, profileModel } = setup({ turn: null });
+  it('never lowers the counter when the removal itself fails', async () => {
+    const { service, tabModel, profileModel } = setup();
+    tabModel.updateOne.mockReturnValueOnce(
+      failing(new Error('connection lost')),
+    );
+    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
+      'connection lost',
+    );
+    expect(counterDecrements(profileModel)).toEqual([]);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
+  });
+
+  it('refuses the last belief when no turn is free, and writes nothing', async () => {
+    // The turn is refused; no turn left behind is old enough to clear.
+    const { service, tabModel, profileModel } = setup({
+      profileUpdates: [0, 0],
+    });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
       LAST_BELIEF_REFUSAL,
     );
     expect(tabModel.updateOne).not.toHaveBeenCalled();
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
+    expect(profileModel.updateOne).toHaveBeenCalledTimes(2);
+    expect(profileModel.updateOne.mock.calls[1]).toEqual([
+      {
+        ...OWNED,
+        pendingRemovals: { $gt: 0 },
+        lastRemovalTurnAt: { $lt: expect.any(Date) },
+      },
+      { $set: { pendingRemovals: 0 } },
+    ]);
+    const cutoff = (
+      profileModel.updateOne.mock.calls[1][0] as {
+        lastRemovalTurnAt: { $lt: Date };
+      }
+    ).lastRemovalTurnAt.$lt.getTime();
+    expect(Date.now() - cutoff).toBeGreaterThanOrEqual(REMOVAL_TURN_STALE_MS);
+    expect(Date.now() - cutoff).toBeLessThan(REMOVAL_TURN_STALE_MS + 5_000);
   });
 
-  it('undoes itself and gives the place back when no real belief would be left', async () => {
+  it('clears a turn left by a removal that died, then tries once more', async () => {
+    const cleared = setup({ profileUpdates: [0, 1, 1] });
+    await expect(cleared.service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
+      removed: true,
+    });
+    expect(cleared.profileModel.updateOne.mock.calls[2]).toEqual(TAKE_TURN);
+    const stillFull = setup({ profileUpdates: [0, 1, 0] });
+    await expect(stillFull.service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
+      LAST_BELIEF_REFUSAL,
+    );
+    expect(stillFull.tabModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('undoes itself and gives the turn back when no real belief would be left', async () => {
     const { service, tabModel, profileModel } = setup({ left: 0 });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
       ConflictException,
@@ -62,15 +145,16 @@ describe('removing a belief', () => {
       { profileId, tabId: 'tab_a', removedAt },
       { $unset: { removedAt: 1 } },
     );
-    expect(profileModel.updateOne).toHaveBeenCalledWith(...GIVE_BACK);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
+    expect(counterDecrements(profileModel)).toEqual([]);
   });
 
-  it('says not found, and gives the place back, when another window removed it first', async () => {
+  it('says not found, and gives the turn back, when another window removed it first', async () => {
     const { service, profileModel } = setup({ removed: 0 });
     await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
       NotFoundException,
     );
-    expect(profileModel.updateOne).toHaveBeenCalledWith(...GIVE_BACK);
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(...END_NOT_REMOVED);
   });
 
   it('starts the counters of an older page before taking its turn', async () => {
@@ -83,10 +167,8 @@ describe('removing a belief', () => {
       { ...OWNED, _id: profileId, liveTabCount: { $exists: false } },
       { $set: { liveTabCount: 2, nextTabOrder: 5 } },
     ]);
+    expect(profileModel.updateOne.mock.calls[1]).toEqual(TAKE_TURN);
     expect(tabModel.find).toHaveBeenCalledWith({ profileId });
-    expect(profileModel.updateOne.mock.invocationCallOrder[0]).toBeLessThan(
-      profileModel.findOneAndUpdate.mock.invocationCallOrder[0],
-    );
   });
 
   it('starts an empty counter at zero', async () => {
@@ -100,18 +182,20 @@ describe('removing a belief', () => {
     });
   });
 
-  it('logs, and still answers, when the place cannot be given back', async () => {
+  it('logs, and still answers, when a turn cannot be ended', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
-    const { service, profileModel } = setup({ removed: 0 });
-    profileModel.updateOne.mockReturnValueOnce(failing(new Error('timeout')));
-    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    const { service, profileModel } = setup();
+    profileModel.updateOne
+      .mockReturnValueOnce(done({ modifiedCount: 1 }))
+      .mockReturnValueOnce(failing(new Error('timeout')));
+    await expect(service.removeTab(OWNER, 'tab_a')).resolves.toEqual({
+      removed: true,
+    });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('timeout'));
-    profileModel.updateOne.mockReturnValueOnce(failing('plain'));
-    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    profileModel.updateOne
+      .mockReturnValueOnce(done({ modifiedCount: 1 }))
+      .mockReturnValueOnce(failing('plain'));
+    await service.removeTab(OWNER, 'tab_a');
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('plain'));
     warn.mockRestore();
   });

@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { json, type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
+import { MAX_EDIT_BODY_BYTES } from '../members/members.dto';
 import { MAX_JOIN_BODY_BYTES } from '../membership/membership.dto';
 import { createCorsOptions } from './cors';
 
@@ -38,6 +39,13 @@ export function configureHttpApp(
     '/api/v1/me/membership',
     (request: Request, response: Response, next: NextFunction) =>
       parseLongJoin(request, response, next),
+  );
+  // The owner's edits may be as long as their DTO allows (Chunk 8).
+  const parseLongEdit = json({ limit: MAX_EDIT_BODY_BYTES });
+  app.use(
+    '/api/v1/me/member-page',
+    (request: Request, response: Response, next: NextFunction) =>
+      parseLongEdit(request, response, next),
   );
   app.useGlobalPipes(
     new ValidationPipe({
