@@ -4,7 +4,7 @@ import type {
   ExecutionContext,
   INestApplication,
 } from '@nestjs/common';
-import { UnauthorizedException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { getModelToken } from '@nestjs/mongoose';
@@ -25,6 +25,8 @@ import {
   MembersController,
   MyMemberPageController,
 } from '../src/members/members.controller';
+import { MemberHistoryService } from '../src/members/member-history.service';
+import { MemberPageEditorService } from '../src/members/member-page-editor.service';
 import { MembersService } from '../src/members/members.service';
 import { MyMemberPageService } from '../src/members/my-member-page.service';
 import { OrgSettingsService } from '../src/members/org-settings.service';
@@ -32,7 +34,10 @@ import { MAX_PICTURE_BYTES } from '../src/members/picture-processing';
 import { PictureStore } from '../src/members/picture-store.service';
 import { OrgSetting } from '../src/members/schemas/org-setting.schema';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
-import { BlockVersionsService } from '../src/social/block-versions.service';
+import {
+  BlockVersionsService,
+  STALE_EDIT_REFUSAL,
+} from '../src/social/block-versions.service';
 import { BeliefTab } from '../src/social/schemas/belief-tab.schema';
 import { BlockVersion } from '../src/social/schemas/block-version.schema';
 import { ProfileBlock } from '../src/social/schemas/profile-block.schema';
@@ -43,6 +48,7 @@ function chain(value: unknown) {
   const query = {
     select: () => query,
     sort: () => query,
+    skip: () => query,
     limit: () => query,
     lean: () => query,
     exec: () => Promise.resolve(value),
@@ -52,6 +58,19 @@ function chain(value: unknown) {
 
 const OWNER = 'user_owner';
 const versionId = new Types.ObjectId();
+const VERSION_ROW = {
+  _id: versionId,
+  blockId: 'b1',
+  seq: 1,
+  text: 'Synthetic bio',
+  createdAt: new Date('2026-11-01T12:00:00Z'),
+  hash: 'f'.repeat(64),
+  prevHash: '0'.repeat(64),
+  authorUserId: 'user_owner',
+};
+const appendVersion = jest.fn(
+  (): Promise<unknown> => Promise.resolve({ seq: 2 }),
+);
 
 const page = (slug: string, overrides: Record<string, unknown> = {}) => ({
   _id: new Types.ObjectId(),
@@ -175,6 +194,8 @@ describe('Members API (e2e)', () => {
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         MembersService,
         MyMemberPageService,
+        MemberPageEditorService,
+        MemberHistoryService,
         OrgSettingsService,
         MemberWriteThrottleGuard,
         Reflector,
@@ -184,13 +205,19 @@ describe('Members API (e2e)', () => {
         { provide: AdminAccessService, useValue: adminAccess },
         {
           provide: BlockVersionsService,
-          useValue: { appendVersion: jest.fn(() => Promise.resolve({})) },
+          useValue: { appendVersion },
         },
         { provide: getModelToken(SocialProfile.name), useValue: profiles },
         {
           provide: getModelToken(BeliefTab.name),
           useValue: {
             find: () => chain([]),
+            findOne: () =>
+              chain({ tabId: 'tab_1', title: 'Synthetic title', order: 0 }),
+            countDocuments: () => ({ exec: () => Promise.resolve(2) }),
+            updateOne: () => ({
+              exec: () => Promise.resolve({ modifiedCount: 1 }),
+            }),
             create: jest.fn(() => Promise.resolve({})),
           },
         },
@@ -207,12 +234,17 @@ describe('Members API (e2e)', () => {
                 },
               ]),
             create: jest.fn(() => Promise.resolve({})),
+            updateOne: () => ({ exec: () => Promise.resolve({}) }),
+            updateMany: () => ({ exec: () => Promise.resolve({}) }),
           },
         },
         {
           provide: getModelToken(BlockVersion.name),
           useValue: {
-            find: () => chain([{ _id: versionId, text: 'Synthetic bio' }]),
+            find: () => chain([VERSION_ROW]),
+            aggregate: () => ({
+              exec: () => Promise.resolve([{ _id: 'b1', seq: 1 }]),
+            }),
           },
         },
         { provide: getModelToken(OrgSetting.name), useValue: settings },
@@ -512,6 +544,155 @@ describe('Members API (e2e)', () => {
         'user_anon',
       ).expect(200);
       expect(headers['cache-control']).toBe('public, no-cache');
+    });
+  });
+
+  describe('editing and history', () => {
+    const send = (
+      method: 'put' | 'patch' | 'delete',
+      path: string,
+      user = OWNER,
+    ) =>
+      request(app.getHttpServer())
+        [method](`/api/v1/me/member-page${path}`)
+        .set('Authorization', `Bearer ${user}`);
+
+    it.each([
+      ['put', '/bio'],
+      ['put', '/tabs/tab_1/text'],
+      ['put', '/tabs/tab_1/title'],
+      ['patch', '/tabs/tab_1/position'],
+      ['delete', '/tabs/tab_1'],
+    ] as const)('refuses %s %s without a login', async (method, path) => {
+      await request(app.getHttpServer())
+        [method](`/api/v1/me/member-page${path}`)
+        .send({})
+        .expect(401);
+    });
+
+    it('saves a bio on top of the version the editor saw, stored nowhere', async () => {
+      appendVersion.mockClear();
+      const { body, headers } = await send('put', '/bio')
+        .send({ text: 'A new synthetic bio.', baseSeq: 1 })
+        .expect(200);
+      expect(body).toEqual({ changed: true, seq: 2 });
+      expect(headers['cache-control']).toBe('private, no-store');
+      expect(appendVersion).toHaveBeenCalledWith({
+        blockId: 'b1',
+        text: 'A new synthetic bio.',
+        authorUserId: OWNER,
+        expectedSeq: 1,
+      });
+    });
+
+    it('writes nothing for the same text', async () => {
+      appendVersion.mockClear();
+      await send('put', '/bio')
+        .send({ text: ' Synthetic bio \n', baseSeq: 1 })
+        .expect(200)
+        .expect({ changed: false, seq: 1 });
+      expect(appendVersion).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no starting version', { text: 'x' }],
+      ['a negative version', { text: 'x', baseSeq: -1 }],
+      ['a fractional version', { text: 'x', baseSeq: 1.5 }],
+      ['an empty text', { text: '', baseSeq: 1 }],
+      ['an author in the body', { text: 'x', baseSeq: 1, authorUserId: 'u' }],
+    ])('refuses an edit with %s', async (_name, body) => {
+      await send('put', '/bio').send(body).expect(400);
+    });
+
+    it('edits a belief and its title, moves and removes it', async () => {
+      await send('put', '/tabs/tab_1/text')
+        .send({ text: 'Synthetic belief, edited.', baseSeq: 1 })
+        .expect(200);
+      await send('put', '/tabs/tab_1/title')
+        .send({ title: 'Edited title', baseSeq: 2 })
+        .expect(200)
+        .expect({ changed: true, seq: 2 });
+      await send('patch', '/tabs/tab_1/position')
+        .send({ direction: 'sideways' })
+        .expect(400);
+      await send('delete', '/tabs/tab_1').expect(200).expect({ removed: true });
+    });
+
+    it('answers 409 with the plain message when the text moved on', async () => {
+      appendVersion.mockRejectedValueOnce(
+        new ConflictException(STALE_EDIT_REFUSAL),
+      );
+      const { body } = await send('put', '/bio')
+        .send({ text: 'Another synthetic bio.', baseSeq: 1 })
+        .expect(409);
+      expect(body.message).toBe(STALE_EDIT_REFUSAL);
+    });
+
+    it('refuses an edit from an account with no page', async () => {
+      await send('put', '/bio', 'user_nobody')
+        .send({ text: 'x', baseSeq: 0 })
+        .expect(404);
+    });
+
+    it('gives the owner the version to start from, and nobody else', async () => {
+      const own = await get('/members/profiles/open-page', OWNER).expect(200);
+      expect(own.body.revisions).toEqual({ bio: 1, tabs: {} });
+      const guest = await get('/members/profiles/open-page').expect(200);
+      expect(guest.body).not.toHaveProperty('revisions');
+    });
+
+    it('serves a public page history to a guest, with nothing private in it', async () => {
+      const { body, text, headers } = await get(
+        '/members/profiles/open-page/bio/history',
+      ).expect(200);
+      expect(body).toEqual({
+        page: 1,
+        hasMore: false,
+        entries: [
+          {
+            seq: 1,
+            savedAt: '2026-11-01T12:00:00.000Z',
+            text: 'Synthetic bio',
+            hash: 'ffffffffffff',
+            source: 'member',
+            wholeText: true,
+          },
+        ],
+      });
+      expect(text).not.toMatch(/user_owner|authorUserId|prevHash|LEAKED|_id/);
+      expect(headers['cache-control']).toBe('no-store');
+      expect(headers.vary).toContain('Authorization');
+      const signedIn = await get(
+        '/members/profiles/open-page/tabs/tab_1/history?field=title&page=2',
+        'user_anon',
+      ).expect(200);
+      expect(signedIn.headers['cache-control']).toBe('private, no-store');
+    });
+
+    it('answers a hidden page history exactly like a missing page', async () => {
+      const missing = await get('/members/profiles/no-such-page/bio/history');
+      expect(missing.status).toBe(404);
+      for (const path of [
+        '/members/profiles/hidden-page/bio/history',
+        '/members/profiles/hidden-page/tabs/tab_1/history',
+        '/members/profiles/waiting-page/bio/history',
+        '/members/profiles/named-page/tabs/tab_1/history',
+      ]) {
+        const { status, body } = await get(path);
+        expect(status).toBe(404);
+        expect(body).toEqual(missing.body);
+      }
+    });
+
+    it.each([
+      ['a page of zero', '?page=0'],
+      ['a page that is not a number', '?page=two'],
+      ['an unknown field', '?field=secret'],
+      ['an unknown parameter', '?author=1'],
+    ])('refuses a history query with %s', async (_n, query) => {
+      await get(
+        `/members/profiles/open-page/tabs/tab_1/history${query}`,
+      ).expect(400);
     });
   });
 

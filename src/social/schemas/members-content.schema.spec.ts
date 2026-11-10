@@ -109,6 +109,19 @@ describe('members-area content schemas', () => {
         block({ section: 'bio', tabId: 'tab-1' }).validate(),
       ).rejects.toThrow(/Only blocks in the beliefs section/);
     });
+
+    it('keeps a title history on exactly one tab', async () => {
+      await expect(
+        block({
+          section: 'tab-title',
+          kind: 'heading',
+          tabId: 'tab-1',
+        }).validate(),
+      ).resolves.toBeUndefined();
+      await expect(
+        block({ section: 'tab-title', kind: 'heading' }).validate(),
+      ).rejects.toThrow(/A title history belongs to one tab/);
+    });
   });
 
   describe('importrecords', () => {

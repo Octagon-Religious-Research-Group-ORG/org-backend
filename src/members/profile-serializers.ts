@@ -49,10 +49,26 @@ export interface ExtraSectionView {
   paragraphs: ParagraphView[];
 }
 
+/** The newest version of each editable field; for the owner's editor only. */
+export interface Revisions {
+  bio: number;
+  tabs: Record<string, { text: number; title: number }>;
+}
+
+/** A belief taken off the page; listed for the owner and admins only. */
+export interface RemovedTabView {
+  tabId: string;
+  title: string;
+  removedAt: string;
+}
+
 export interface ProfileContent {
   bio: ParagraphView[];
   extras: ExtraSectionView[];
   tabs: TabView[];
+  revisions?: Revisions;
+  /** Empty unless the reader is the owner or an admin. */
+  removedTabs: RemovedTabView[];
 }
 
 export interface PictureFacts {
@@ -70,7 +86,8 @@ export interface NameOnlyProfile {
   picturePublic: false;
 }
 
-export interface FullProfile extends ProfileContent, PictureFacts {
+export interface FullProfile
+  extends Omit<ProfileContent, 'removedTabs' | 'revisions'>, PictureFacts {
   access: 'full';
   /** Changes when the picture does, so a browser asks for the new one. */
   pictureVersion?: string;
@@ -78,11 +95,14 @@ export interface FullProfile extends ProfileContent, PictureFacts {
   displayName: string;
   isOwner: boolean;
   contacts: Array<{ method: ContactMethod; value: string }>;
+  /** Only for the owner: what each edit is based on. */
+  revisions?: Revisions;
   /** Only for the owner and admins. */
   manage?: {
     visibility: ProfileVisibility;
     reviewStatus: ProfileReviewStatus;
     source?: ProfileSource;
+    removedTabs: RemovedTabView[];
   };
 }
 
@@ -128,12 +148,18 @@ export function fullProfile(
     bio: content.bio,
     extras: content.extras,
     tabs: content.tabs,
+    ...(access.isOwner && content.revisions
+      ? { revisions: content.revisions }
+      : {}),
     ...(access.isOwner || isAdmin
       ? {
           manage: {
             visibility: profile.visibility,
             reviewStatus: profile.reviewStatus ?? 'approved',
             ...(profile.source ? { source: profile.source } : {}),
+            removedTabs: content.removedTabs.map(
+              ({ tabId, title, removedAt }) => ({ tabId, title, removedAt }),
+            ),
           },
         }
       : {}),

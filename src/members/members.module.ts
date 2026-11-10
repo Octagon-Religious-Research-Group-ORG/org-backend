@@ -23,6 +23,8 @@ import {
   MembersController,
   MyMemberPageController,
 } from './members.controller';
+import { MemberHistoryService } from './member-history.service';
+import { MemberPageEditorService } from './member-page-editor.service';
 import { MembersService } from './members.service';
 import { MemberWriteThrottleGuard } from './member-write-throttle.guard';
 import { MyMemberPageService } from './my-member-page.service';
@@ -51,6 +53,8 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
   providers: [
     MembersService,
     MyMemberPageService,
+    MemberPageEditorService,
+    MemberHistoryService,
     OrgSettingsService,
     PictureStore,
     MemberWriteThrottleGuard,

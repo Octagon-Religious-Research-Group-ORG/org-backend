@@ -1,11 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
   Post,
   Put,
+  Query,
   Req,
   Res,
   UploadedFile,
@@ -28,8 +30,15 @@ import {
 import {
   AddBeliefTabDto,
   ChangeVisibilityDto,
+  EditTextDto,
+  EditTitleDto,
+  HistoryQueryDto,
+  MoveTabDto,
   SetVotingInviteDto,
+  TabHistoryQueryDto,
 } from './members.dto';
+import { MemberHistoryService } from './member-history.service';
+import { MemberPageEditorService } from './member-page-editor.service';
 import { MembersService } from './members.service';
 import { MyMemberPageService } from './my-member-page.service';
 import { OrgSettingsService } from './org-settings.service';
@@ -49,7 +58,10 @@ export const PRIVATE_PICTURE_CACHE = 'private, no-store';
 @UseGuards(OptionalClerkAuthGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MembersController {
-  constructor(private readonly members: MembersService) {}
+  constructor(
+    private readonly members: MembersService,
+    private readonly history: MemberHistoryService,
+  ) {}
 
   @Get('directory')
   @UseInterceptors(MemberJsonCacheInterceptor)
@@ -72,6 +84,39 @@ export class MembersController {
     return this.members.profile(
       slug,
       await this.members.resolveViewer(request),
+    );
+  }
+
+  /** Readable by exactly who can read the page now. */
+  @Get('profiles/:slug/bio/history')
+  @UseInterceptors(MemberJsonCacheInterceptor)
+  async bioHistory(
+    @Req() request: AuthenticatedRequest,
+    @Param('slug') slug: string,
+    @Query() query: HistoryQueryDto,
+  ) {
+    return this.history.bioHistory(
+      slug,
+      await this.members.resolveViewer(request),
+      query.page,
+    );
+  }
+
+  /** A removed belief's history: its owner and admins only. */
+  @Get('profiles/:slug/tabs/:tabId/history')
+  @UseInterceptors(MemberJsonCacheInterceptor)
+  async tabHistory(
+    @Req() request: AuthenticatedRequest,
+    @Param('slug') slug: string,
+    @Param('tabId') tabId: string,
+    @Query() query: TabHistoryQueryDto,
+  ) {
+    return this.history.tabHistory(
+      slug,
+      tabId,
+      await this.members.resolveViewer(request),
+      query.field,
+      query.page,
     );
   }
 
@@ -116,7 +161,66 @@ export class MembersController {
 @UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyMemberPageController {
-  constructor(private readonly page: MyMemberPageService) {}
+  constructor(
+    private readonly page: MyMemberPageService,
+    private readonly editor: MemberPageEditorService,
+  ) {}
+
+  @Put('bio')
+  @WriteThrottle()
+  editBio(@Req() request: AuthenticatedRequest, @Body() body: EditTextDto) {
+    return this.editor.editBio(getUserSub(request), body.text, body.baseSeq);
+  }
+
+  @Put('tabs/:tabId/text')
+  @WriteThrottle()
+  editTabText(
+    @Req() request: AuthenticatedRequest,
+    @Param('tabId') tabId: string,
+    @Body() body: EditTextDto,
+  ) {
+    return this.editor.editTabText(
+      getUserSub(request),
+      tabId,
+      body.text,
+      body.baseSeq,
+    );
+  }
+
+  @Put('tabs/:tabId/title')
+  @WriteThrottle()
+  editTabTitle(
+    @Req() request: AuthenticatedRequest,
+    @Param('tabId') tabId: string,
+    @Body() body: EditTitleDto,
+  ) {
+    return this.editor.editTabTitle(
+      getUserSub(request),
+      tabId,
+      body.title,
+      body.baseSeq,
+    );
+  }
+
+  @Patch('tabs/:tabId/position')
+  @WriteThrottle()
+  moveTab(
+    @Req() request: AuthenticatedRequest,
+    @Param('tabId') tabId: string,
+    @Body() body: MoveTabDto,
+  ) {
+    return this.editor.moveTab(getUserSub(request), tabId, body.direction);
+  }
+
+  /** Off the page for everyone; the text and its history are kept. */
+  @Delete('tabs/:tabId')
+  @WriteThrottle()
+  removeTab(
+    @Req() request: AuthenticatedRequest,
+    @Param('tabId') tabId: string,
+  ) {
+    return this.editor.removeTab(getUserSub(request), tabId);
+  }
 
   @Patch('visibility')
   @WriteThrottle()

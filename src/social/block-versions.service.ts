@@ -27,10 +27,21 @@ import {
 /** How many times a save retries after losing a race for the next `seq`. */
 export const MAX_APPEND_ATTEMPTS = 3;
 
+/** What an edit is told when the text moved on since the editor opened it. */
+export const STALE_EDIT_REFUSAL =
+  'This was changed in another window. Reload to see the latest before saving.';
+
 export interface AppendVersionInput {
   blockId: string;
   text: string;
   authorUserId: string;
+  /**
+   * The newest `seq` the editor saw (0 for a block with no versions). When
+   * given, the save lands only on top of exactly that version: anything newer,
+   * or losing the race for the next `seq`, refuses it instead of retrying, so
+   * one save can never silently overwrite another.
+   */
+  expectedSeq?: number;
 }
 
 /** MongoDB duplicate-key error (unique index violation). */
@@ -65,7 +76,8 @@ export class BlockVersionsService {
    *
    * @throws BadRequestException when the text is empty or too long
    * @throws NotFoundException when the block does not exist
-   * @throws ConflictException when the block keeps changing under this save
+   * @throws ConflictException when the block keeps changing under this save,
+   *   or, with `expectedSeq`, when that is no longer the newest version
    */
   async appendVersion(rawInput: AppendVersionInput) {
     const input = { ...rawInput, text: toStorableText(rawInput.text) };
@@ -91,6 +103,12 @@ export class BlockVersionsService {
         .select({ seq: 1, hash: 1 })
         .lean()
         .exec();
+      if (
+        input.expectedSeq !== undefined &&
+        (head?.seq ?? 0) !== input.expectedSeq
+      ) {
+        throw new ConflictException(STALE_EDIT_REFUSAL);
+      }
 
       const fields = {
         blockId: input.blockId,
@@ -108,7 +126,12 @@ export class BlockVersionsService {
           hash: computeVersionHash(fields),
         });
       } catch (error) {
-        if (isDuplicateKey(error)) continue;
+        if (isDuplicateKey(error)) {
+          if (input.expectedSeq !== undefined) {
+            throw new ConflictException(STALE_EDIT_REFUSAL);
+          }
+          continue;
+        }
         throw error;
       }
 

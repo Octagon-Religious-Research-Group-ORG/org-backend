@@ -40,8 +40,11 @@ import {
   type ProfileContent,
   type ProfileRow,
   type ProfileView,
+  type RemovedTabView,
+  type Revisions,
   type TabView,
 } from './profile-serializers';
+import { titleBlockId } from './editable-fields';
 
 /** Exactly one message for a missing page and for a page you may not see. */
 export const PROFILE_NOT_FOUND = 'That page does not exist.';
@@ -192,8 +195,13 @@ export class MembersService {
     return decideProfileAccess(GUEST_VIEWER, row).level === 'full';
   }
 
-  /** @throws NotFoundException for a page this viewer may not know about */
-  private async findVisible(
+  /**
+   * The one way to a page for a read: history uses it too, so it can never
+   * answer differently from the page itself.
+   *
+   * @throws NotFoundException for a page this viewer may not know about
+   */
+  async findVisible(
     rawSlug: string,
     viewer: Viewer,
   ): Promise<{ profile: ProfileRowWithId; access: ProfileAccess }> {
@@ -223,7 +231,10 @@ export class MembersService {
       access,
       viewer.isAdmin,
       this.guestCanSee(profile),
-      await this.content(profile._id),
+      await this.content(profile._id, {
+        owner: access.isOwner,
+        manager: access.isOwner || viewer.isAdmin,
+      }),
       await this.pictures.currentPicture(profile.imageIds ?? []),
     );
   }
@@ -251,7 +262,14 @@ export class MembersService {
       : { voting: 'ask-tripp' };
   }
 
-  private async content(profileId: Types.ObjectId): Promise<ProfileContent> {
+  /**
+   * @param show - `owner` adds the version numbers an editor starts from;
+   *   `manager` (owner or admin) adds the removed beliefs
+   */
+  private async content(
+    profileId: Types.ObjectId,
+    show: { owner: boolean; manager: boolean },
+  ): Promise<ProfileContent> {
     const [tabs, blocks] = await Promise.all([
       this.tabModel
         .find({ profileId, removedAt: { $exists: false } })
@@ -264,7 +282,8 @@ export class MembersService {
           section: { $in: SHOWN_SECTIONS },
           removedAt: { $exists: false },
         })
-        .sort({ order: 1 })
+        // Ties by _id: the same first block the editor picks.
+        .sort({ order: 1, _id: 1 })
         .lean()
         .exec(),
     ]);
@@ -312,7 +331,21 @@ export class MembersService {
     ).filter((extra) => extra.paragraphs.length > 0);
 
     const beliefBlocks = inSection('beliefs');
+    const tabBlocks = (tabId: string) =>
+      beliefBlocks.filter((block) => block.tabId === tabId);
     return {
+      ...(show.owner
+        ? {
+            revisions: await this.revisions(
+              inSection('bio').at(0)?.blockId,
+              tabs.map((tab) => ({
+                tabId: tab.tabId,
+                textBlockId: tabBlocks(tab.tabId).at(0)?.blockId,
+              })),
+            ),
+          }
+        : {}),
+      removedTabs: show.manager ? await this.removedTabs(profileId) : [],
       bio: paragraphs(inSection('bio')),
       extras,
       tabs: tabs.map(
@@ -321,11 +354,68 @@ export class MembersService {
           title: tab.title,
           ...(tab.group ? { group: tab.group } : {}),
           needsReview: tab.reviewStatus === 'imported-review',
-          paragraphs: paragraphs(
-            beliefBlocks.filter((block) => block.tabId === tab.tabId),
-          ),
+          paragraphs: paragraphs(tabBlocks(tab.tabId)),
         }),
       ),
     };
+  }
+
+  /**
+   * The newest version number of each editable field: what an edit must be
+   * based on. Read from the versions themselves, not the block pointer, so a
+   * save that stopped after writing its version cannot lock the field.
+   */
+  private async revisions(
+    bioBlockId: string | undefined,
+    tabs: Array<{ tabId: string; textBlockId: string | undefined }>,
+  ): Promise<Revisions> {
+    const blockIds = [
+      ...(bioBlockId ? [bioBlockId] : []),
+      ...tabs.flatMap((tab) => [
+        ...(tab.textBlockId ? [tab.textBlockId] : []),
+        titleBlockId(tab.tabId),
+      ]),
+    ];
+    const heads = await this.versionModel
+      .aggregate<{
+        _id: string;
+        seq: number;
+      }>([
+        { $match: { blockId: { $in: blockIds } } },
+        { $group: { _id: '$blockId', seq: { $max: '$seq' } } },
+      ])
+      .exec();
+    const headOf = new Map(heads.map((head) => [head._id, head.seq]));
+    const seqOf = (blockId: string | undefined) =>
+      blockId === undefined ? 0 : (headOf.get(blockId) ?? 0);
+    return {
+      bio: seqOf(bioBlockId),
+      tabs: Object.fromEntries(
+        tabs.map((tab) => [
+          tab.tabId,
+          {
+            text: seqOf(tab.textBlockId),
+            title: seqOf(titleBlockId(tab.tabId)),
+          },
+        ]),
+      ),
+    };
+  }
+
+  /** Beliefs taken off the page, newest removal first; owner and admins only. */
+  private async removedTabs(
+    profileId: Types.ObjectId,
+  ): Promise<RemovedTabView[]> {
+    const rows = await this.tabModel
+      .find({ profileId, removedAt: { $exists: true } })
+      .sort({ removedAt: -1 })
+      .select({ tabId: 1, title: 1, removedAt: 1 })
+      .lean()
+      .exec();
+    return rows.map((row) => ({
+      tabId: row.tabId,
+      title: row.title,
+      removedAt: (row.removedAt as Date).toISOString(),
+    }));
   }
 }

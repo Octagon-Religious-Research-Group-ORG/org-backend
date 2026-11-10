@@ -158,7 +158,10 @@
       "members/picture-store.service.ts",
       "members/member-write-throttle.guard.ts",
       "members/members.controller.ts",
-      "members/no-store.interceptor.ts"
+      "members/no-store.interceptor.ts",
+      "members/editable-fields.ts",
+      "members/member-page-editor.service.ts",
+      "members/member-history.service.ts"
     ],
     "coverageThreshold": {
       "global": {

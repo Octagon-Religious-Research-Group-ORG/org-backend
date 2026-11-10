@@ -1,0 +1,200 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+import { Types } from 'mongoose';
+import { MembersService } from './members.service';
+import { GUEST_VIEWER, type Viewer } from './profile-access';
+import { fullProfile } from './profile-serializers';
+
+/** What the owner's editor and the removed-belief list add to a page (Chunk 8). */
+
+function chain(value: unknown) {
+  const query = {
+    select: jest.fn(() => query),
+    sort: jest.fn(() => query),
+    limit: jest.fn(() => query),
+    lean: jest.fn(() => query),
+    exec: jest.fn(() => Promise.resolve(value)),
+  };
+  return query;
+}
+
+const profileId = new Types.ObjectId();
+const v = (n: number) => new Types.ObjectId(String(n).padStart(24, 'b'));
+
+function page() {
+  return {
+    _id: profileId,
+    slug: 'quiet-fern',
+    displayName: 'Quiet Fern',
+    visibility: 'public',
+    reviewStatus: 'approved',
+    ownerUserId: 'user_owner',
+    imageIds: [],
+    contacts: [],
+  };
+}
+
+const BLOCKS = [
+  {
+    blockId: 'b-bio',
+    section: 'bio',
+    kind: 'paragraph',
+    currentVersionId: v(1),
+  },
+  {
+    blockId: 'b-1',
+    section: 'beliefs',
+    kind: 'paragraph',
+    tabId: 'tab-1',
+    currentVersionId: v(2),
+  },
+];
+const VERSIONS = [
+  { _id: v(1), text: 'Synthetic bio' },
+  { _id: v(2), text: 'Synthetic belief' },
+];
+const TABS = [
+  { tabId: 'tab-1', title: 'One', reviewStatus: 'confirmed' },
+  { tabId: 'tab-2', title: 'Two', reviewStatus: 'confirmed' },
+];
+const REMOVED_TABS = [
+  {
+    tabId: 'tab-gone',
+    title: 'Gone',
+    removedAt: new Date('2026-11-01T10:00:00Z'),
+    ownerUserId: 'LEAKED-OWNER',
+  },
+];
+/** Newest version per block; tab-2 has no text block and no title history. */
+const HEADS = [
+  { _id: 'b-bio', seq: 4 },
+  { _id: 'b-1', seq: 2 },
+  { _id: 'ttl_tab-1', seq: 3 },
+];
+
+const member: Viewer = {
+  kind: 'named-member',
+  userId: 'user_m',
+  isAdmin: false,
+};
+const owner: Viewer = {
+  kind: 'signed-in',
+  userId: 'user_owner',
+  isAdmin: false,
+};
+const admin: Viewer = { kind: 'signed-in', userId: 'user_x', isAdmin: true };
+
+function setup(options: { one?: unknown } = {}) {
+  const profileModel = { findOne: jest.fn(() => chain(options.one ?? null)) };
+  const tabModel = {
+    find: jest.fn((filter: { removedAt?: { $exists: boolean } }) =>
+      chain(filter.removedAt?.$exists ? REMOVED_TABS : TABS),
+    ),
+  };
+  const blockModel = { find: jest.fn(() => chain(BLOCKS)) };
+  const versionModel = {
+    find: jest.fn(() => chain(VERSIONS)),
+    aggregate: jest.fn(() => ({ exec: () => Promise.resolve(HEADS) })),
+  };
+  const pictures = {
+    currentPicture: jest.fn(() => Promise.resolve(undefined)),
+  };
+  const service = new MembersService(
+    profileModel as never,
+    tabModel as never,
+    blockModel as never,
+    versionModel as never,
+    pictures as never,
+    {} as never,
+    {} as never,
+  );
+  return { service, tabModel, blockModel, versionModel };
+}
+
+describe('MembersService.profile, editing data', () => {
+  it('gives only the owner the newest version of every editable field', async () => {
+    const { service, versionModel } = setup({ one: page() });
+    const view = await service.profile('quiet-fern', owner);
+    expect(view).toMatchObject({
+      revisions: {
+        bio: 4,
+        tabs: {
+          'tab-1': { text: 2, title: 3 },
+          'tab-2': { text: 0, title: 0 },
+        },
+      },
+    });
+    // Counted from the versions themselves: the bio's first text block, each
+    // tab's first text block and each title history.
+    expect(versionModel.aggregate).toHaveBeenCalledWith([
+      {
+        $match: {
+          blockId: { $in: ['b-bio', 'b-1', 'ttl_tab-1', 'ttl_tab-2'] },
+        },
+      },
+      { $group: { _id: '$blockId', seq: { $max: '$seq' } } },
+    ]);
+    for (const viewer of [admin, member, GUEST_VIEWER]) {
+      const other = setup({ one: page() });
+      const seen = await other.service.profile('quiet-fern', viewer);
+      expect(seen).not.toHaveProperty('revisions');
+      // Not even read for anyone else.
+      expect(other.versionModel.aggregate).not.toHaveBeenCalled();
+    }
+  });
+
+  it('the serialiser drops editor and removed-tab data for anyone else, whatever it is given', () => {
+    const view = fullProfile(
+      page() as never,
+      { level: 'full', listed: true, isOwner: false },
+      false,
+      true,
+      {
+        bio: [],
+        extras: [],
+        tabs: [],
+        revisions: { bio: 3, tabs: {} },
+        removedTabs: [{ tabId: 't', title: 'Gone', removedAt: 'x' }],
+      },
+      undefined,
+    );
+    expect(view).not.toHaveProperty('revisions');
+    expect(view).not.toHaveProperty('manage');
+    expect(JSON.stringify(view)).not.toContain('Gone');
+  });
+
+  it('starts at zero for a page with no bio block', async () => {
+    const { service, blockModel } = setup({ one: page() });
+    blockModel.find.mockReturnValueOnce(chain([]));
+    const view = await service.profile('quiet-fern', owner);
+    expect(view).toMatchObject({ revisions: { bio: 0 } });
+  });
+
+  it('lists removed beliefs for the owner and admins, with allowlisted fields', async () => {
+    for (const viewer of [owner, admin]) {
+      const { service, tabModel } = setup({ one: page() });
+      const view = await service.profile('quiet-fern', viewer);
+      expect(view).toMatchObject({
+        manage: {
+          removedTabs: [
+            {
+              tabId: 'tab-gone',
+              title: 'Gone',
+              removedAt: '2026-11-01T10:00:00.000Z',
+            },
+          ],
+        },
+      });
+      expect(JSON.stringify(view)).not.toContain('LEAKED');
+      expect(tabModel.find).toHaveBeenCalledWith({
+        profileId,
+        removedAt: { $exists: true },
+      });
+    }
+    const { service, tabModel } = setup({ one: page() });
+    const seen = await service.profile('quiet-fern', member);
+    expect(JSON.stringify(seen)).not.toContain('tab-gone');
+    expect(tabModel.find).not.toHaveBeenCalledWith(
+      expect.objectContaining({ removedAt: { $exists: true } }),
+    );
+  });
+});

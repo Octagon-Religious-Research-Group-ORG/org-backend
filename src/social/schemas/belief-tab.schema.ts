@@ -40,6 +40,14 @@ export class BeliefTab {
   })
   title: string;
 
+  /**
+   * Which version of the title history `title` shows (Chunk 8). Only ever
+   * rises, so a slow save cannot put an older title back. Absent until the
+   * title is first edited.
+   */
+  @Prop({ type: Number, min: 0 })
+  titleSeq?: number;
+
   /** The member's category, e.g. the owner's "Theology" (plan D03), if any. */
   @Prop({ type: String, trim: true, maxlength: 120 })
   group?: string;

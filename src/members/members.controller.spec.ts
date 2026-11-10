@@ -9,7 +9,11 @@ import {
   PRIVATE_PICTURE_CACHE,
   PUBLIC_PICTURE_CACHE,
 } from './members.controller';
+import type { MemberHistoryService } from './member-history.service';
+import type { MemberPageEditorService } from './member-page-editor.service';
 import type { MembersService } from './members.service';
+
+const NO_HISTORY = {} as MemberHistoryService;
 import type { MyMemberPageService } from './my-member-page.service';
 import type { OrgSettingsService } from './org-settings.service';
 
@@ -51,6 +55,7 @@ describe('MembersController', () => {
     const { service, viewer } = members(true);
     const controller = new MembersController(
       service as unknown as MembersService,
+      NO_HISTORY,
     );
     await expect(controller.directory(request)).resolves.toBe('directory');
     await expect(controller.chats(request)).resolves.toBe('chats');
@@ -63,11 +68,10 @@ describe('MembersController', () => {
   it('never lets a restricted picture be cached or loaded cross-origin', async () => {
     const { service } = members(false);
     const res = response();
-    await new MembersController(service as unknown as MembersService).picture(
-      request,
-      res,
-      'x',
-    );
+    await new MembersController(
+      service as unknown as MembersService,
+      NO_HISTORY,
+    ).picture(request, res, 'x');
     expect(res.set).toHaveBeenCalledTimes(1);
     expect(res.set).toHaveBeenCalledWith({
       'Content-Type': 'image/webp',
@@ -81,11 +85,10 @@ describe('MembersController', () => {
   it('serves a public picture with a tag, and revalidates every time', async () => {
     const { service } = members(true);
     const res = response();
-    await new MembersController(service as unknown as MembersService).picture(
-      request,
-      res,
-      'x',
-    );
+    await new MembersController(
+      service as unknown as MembersService,
+      NO_HISTORY,
+    ).picture(request, res, 'x');
     expect(res.set).toHaveBeenCalledWith(
       expect.objectContaining({ 'Cache-Control': PUBLIC_PICTURE_CACHE }),
     );
@@ -100,7 +103,10 @@ describe('MembersController', () => {
   it('answers 304 when the browser already holds the public picture', async () => {
     const { service } = members(true);
     const res = response();
-    await new MembersController(service as unknown as MembersService).picture(
+    await new MembersController(
+      service as unknown as MembersService,
+      NO_HISTORY,
+    ).picture(
       { ...request, headers: { 'if-none-match': '"f1"' } } as never,
       res,
       'x',
@@ -116,8 +122,16 @@ describe('MyMemberPageController', () => {
     addBeliefTab: jest.fn(() => 'tab'),
     replacePicture: jest.fn(() => 'picture'),
   };
+  const editor = {
+    editBio: jest.fn(() => 'bio'),
+    editTabText: jest.fn(() => 'text'),
+    editTabTitle: jest.fn(() => 'title'),
+    moveTab: jest.fn(() => 'moved'),
+    removeTab: jest.fn(() => 'removed'),
+  };
   const controller = new MyMemberPageController(
     page as unknown as MyMemberPageService,
+    editor as unknown as MemberPageEditorService,
   );
 
   it('uses the id from the token for every write', () => {
@@ -130,12 +144,62 @@ describe('MyMemberPageController', () => {
     expect(page.addBeliefTab).toHaveBeenCalledWith('u1', dto);
   });
 
+  it('takes the editor from the token, never from the body or the path', () => {
+    expect(controller.editBio(request, { text: 'b', baseSeq: 2 })).toBe('bio');
+    expect(
+      controller.editTabText(request, 'tab_1', { text: 't', baseSeq: 3 }),
+    ).toBe('text');
+    expect(
+      controller.editTabTitle(request, 'tab_1', { title: 'T', baseSeq: 0 }),
+    ).toBe('title');
+    expect(controller.moveTab(request, 'tab_1', { direction: 'up' })).toBe(
+      'moved',
+    );
+    expect(controller.removeTab(request, 'tab_1')).toBe('removed');
+    expect(editor.editBio).toHaveBeenCalledWith('u1', 'b', 2);
+    expect(editor.editTabText).toHaveBeenCalledWith('u1', 'tab_1', 't', 3);
+    expect(editor.editTabTitle).toHaveBeenCalledWith('u1', 'tab_1', 'T', 0);
+    expect(editor.moveTab).toHaveBeenCalledWith('u1', 'tab_1', 'up');
+    expect(editor.removeTab).toHaveBeenCalledWith('u1', 'tab_1');
+  });
+
   it('passes the uploaded bytes, or nothing when no file came', () => {
     const buffer = Buffer.from('x');
     expect(controller.replacePicture(request, { buffer })).toBe('picture');
     expect(page.replacePicture).toHaveBeenLastCalledWith('u1', buffer);
     controller.replacePicture(request, undefined);
     expect(page.replacePicture).toHaveBeenLastCalledWith('u1', undefined);
+  });
+});
+
+describe('MembersController history', () => {
+  it('asks with the resolved viewer and passes the query on', async () => {
+    const { service, viewer } = members(true);
+    const history = {
+      bioHistory: jest.fn(() => Promise.resolve('bio-history')),
+      tabHistory: jest.fn(() => Promise.resolve('tab-history')),
+    };
+    const controller = new MembersController(
+      service as unknown as MembersService,
+      history as unknown as MemberHistoryService,
+    );
+    await expect(
+      controller.bioHistory(request, 'quiet-fern', { page: 2 }),
+    ).resolves.toBe('bio-history');
+    await expect(
+      controller.tabHistory(request, 'quiet-fern', 'tab_1', {
+        field: 'title',
+        page: 3,
+      }),
+    ).resolves.toBe('tab-history');
+    expect(history.bioHistory).toHaveBeenCalledWith('quiet-fern', viewer, 2);
+    expect(history.tabHistory).toHaveBeenCalledWith(
+      'quiet-fern',
+      'tab_1',
+      viewer,
+      'title',
+      3,
+    );
   });
 });
 
@@ -160,12 +224,15 @@ describe('cache headers on the member reads', () => {
         .value as object,
     ) ?? []) as unknown[];
 
-  it.each(['directory', 'chats', 'profile'] as const)(
-    '%s is explicit for guests too',
-    (name) => {
-      expect(interceptorsOf(name)).toContain(MemberJsonCacheInterceptor);
-    },
-  );
+  it.each([
+    'directory',
+    'chats',
+    'profile',
+    'bioHistory',
+    'tabHistory',
+  ] as const)('%s is explicit for guests too', (name) => {
+    expect(interceptorsOf(name)).toContain(MemberJsonCacheInterceptor);
+  });
 
   it('the picture route keeps its own caching', () => {
     expect(interceptorsOf('picture')).not.toContain(MemberJsonCacheInterceptor);

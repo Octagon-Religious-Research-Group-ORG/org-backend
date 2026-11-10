@@ -7,6 +7,7 @@ import {
 import {
   BlockVersionsService,
   MAX_APPEND_ATTEMPTS,
+  STALE_EDIT_REFUSAL,
 } from './block-versions.service';
 import {
   EMPTY_BLOCK_TEXT_REFUSAL,
@@ -117,6 +118,53 @@ describe('BlockVersionsService.appendVersion', () => {
       prevHash: 'c'.repeat(64),
     });
     expect(blockModel.updateOne).toHaveBeenCalledTimes(1);
+  });
+
+  describe('an edit based on a version (expectedSeq)', () => {
+    it('saves on top of exactly that version', async () => {
+      const { service, versionModel } = setup([
+        { seq: 4, hash: 'b'.repeat(64) },
+      ]);
+      const saved = await service.appendVersion({ ...input, expectedSeq: 4 });
+      expect(saved.seq).toBe(5);
+      expect(versionModel.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes nothing when a newer version exists', async () => {
+      const { service, versionModel, blockModel } = setup([
+        { seq: 5, hash: 'b'.repeat(64) },
+      ]);
+      await expect(
+        service.appendVersion({ ...input, expectedSeq: 4 }),
+      ).rejects.toThrow(STALE_EDIT_REFUSAL);
+      expect(versionModel.create).not.toHaveBeenCalled();
+      expect(blockModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('treats a block with no versions as version 0', async () => {
+      const ok = setup([null]);
+      await ok.service.appendVersion({ ...input, expectedSeq: 0 });
+      expect(ok.versionModel.create).toHaveBeenCalledTimes(1);
+      const stale = setup([null]);
+      await expect(
+        stale.service.appendVersion({ ...input, expectedSeq: 1 }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('refuses instead of retrying when it loses the race for the next seq', async () => {
+      // The second read still shows the old head (a lagging read), so only
+      // the no-retry rule, not the head check, can stop a second insert.
+      const { service, versionModel, blockModel } = setup([
+        { seq: 1, hash: 'b'.repeat(64) },
+        { seq: 1, hash: 'b'.repeat(64) },
+      ]);
+      versionModel.create.mockRejectedValueOnce(duplicateKey);
+      await expect(
+        service.appendVersion({ ...input, expectedSeq: 1 }),
+      ).rejects.toThrow(STALE_EDIT_REFUSAL);
+      expect(versionModel.create).toHaveBeenCalledTimes(1);
+      expect(blockModel.updateOne).not.toHaveBeenCalled();
+    });
   });
 
   it('gives up with a conflict after repeated races', async () => {

@@ -100,6 +100,21 @@ const TABS = [
   { tabId: 'tab-2', title: 'Two', reviewStatus: 'confirmed' },
 ];
 
+const REMOVED_TABS = [
+  {
+    tabId: 'tab-gone',
+    title: 'Gone',
+    removedAt: new Date('2026-11-01T10:00:00Z'),
+    ownerUserId: 'LEAKED-OWNER',
+  },
+];
+/** Newest version per block; tab-2 has no text block and no title history. */
+const HEADS = [
+  { _id: 'b-bio', seq: 4 },
+  { _id: 'b-1', seq: 2 },
+  { _id: 'ttl_tab-1', seq: 3 },
+];
+
 const member: Viewer = {
   kind: 'named-member',
   userId: 'user_m',
@@ -135,9 +150,16 @@ function setup(
     ),
     find: jest.fn(() => directoryQuery),
   };
-  const tabModel = { find: jest.fn(() => chain(TABS)) };
+  const tabModel = {
+    find: jest.fn((filter: { removedAt?: { $exists: boolean } }) =>
+      chain(filter.removedAt?.$exists ? REMOVED_TABS : TABS),
+    ),
+  };
   const blockModel = { find: jest.fn(() => chain(BLOCKS)) };
-  const versionModel = { find: jest.fn(() => chain(VERSIONS)) };
+  const versionModel = {
+    find: jest.fn(() => chain(VERSIONS)),
+    aggregate: jest.fn(() => ({ exec: () => Promise.resolve(HEADS) })),
+  };
   const pictures = {
     read: jest.fn(() =>
       Promise.resolve({ data: Buffer.from('webp'), fileId: 'img1' }),

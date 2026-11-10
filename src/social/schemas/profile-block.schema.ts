@@ -11,7 +11,12 @@ export const BLOCK_SECTIONS = [
   // A section under the member's own heading (e.g. the owner's "Theophanies");
   // the heading itself is stored as the section's first block.
   'other',
+  // The history of a belief tab's title (Chunk 8): one block per tab, never
+  // shown as page text; the tab row keeps the current title for display.
+  'tab-title',
 ] as const;
+/** Sections whose blocks belong to one belief tab. */
+export const TAB_SECTIONS: readonly BlockSection[] = ['beliefs', 'tab-title'];
 export type BlockSection = (typeof BLOCK_SECTIONS)[number];
 
 export const BLOCK_KINDS = [
@@ -85,10 +90,13 @@ ProfileBlockSchema.index(
 );
 
 ProfileBlockSchema.pre('validate', function () {
-  if (this.tabId && this.section !== 'beliefs') {
+  if (this.tabId && !TAB_SECTIONS.includes(this.section)) {
     this.invalidate(
       'tabId',
       'Only blocks in the beliefs section belong to a tab.',
     );
+  }
+  if (this.section === 'tab-title' && !this.tabId) {
+    this.invalidate('tabId', 'A title history belongs to one tab.');
   }
 });
