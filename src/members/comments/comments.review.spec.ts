@@ -13,7 +13,7 @@ import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
 import { REMOVAL_BUSY } from '../member-page-editor.service';
 import { THREAD_PAGE_SIZE } from './comment-limits';
 import { COMMENT_TURN_STALE_MS } from './comment-store';
-import { CANNOT_CHECK_ACCOUNT } from './comment-writers';
+import { CANNOT_CHECK_ACCOUNT, NEEDS_VERIFIED_EMAIL } from './comment-writers';
 import {
   MAX_REMEMBERED_READ_ANSWERS,
   ROLE_CACHE_MAX_AGE_MS,
@@ -890,11 +890,31 @@ describe('review item 9: the form is offered only to who may write', () => {
     };
     writers.verified.clear();
     for (let i = 0; i < MAX_REMEMBERED_READ_ANSWERS; i++) {
-      writers.verified.set(`user_x${i}`, { verified: true, expires: Infinity });
+      writers.verified.set(`user_x${i}`, Infinity);
     }
     await h.writer(U.anon);
     expect(writers.verified.size).toBe(MAX_REMEMBERED_READ_ANSWERS);
     expect(writers.verified.has('user_x0')).toBe(false);
     expect(writers.verified.has(U.anon)).toBe(true);
+  });
+});
+
+describe('round 3: an unverified email is asked again every time', () => {
+  it('lets a member write as soon as they confirm their email', async () => {
+    const h = harness();
+    h.clerk.getIdentity
+      .mockResolvedValueOnce({ email: 'x@example.test', emailVerified: false })
+      .mockResolvedValueOnce({ email: 'x@example.test', emailVerified: false });
+    await expect(h.writer(U.named)).rejects.toThrow(NEEDS_VERIFIED_EMAIL);
+    const page = await h.thread('open-page', await h.viewer(U.named), 'tab_a');
+    expect(page.viewerWriteBlock).toBe('verify-email');
+    // They confirm it now: the very next request sees it.
+    await expect(h.writer(U.named)).resolves.toMatchObject({
+      userId: U.named,
+    });
+    expect(h.clerk.getIdentity).toHaveBeenCalledTimes(3);
+    // A verified answer is remembered.
+    await h.writer(U.named);
+    expect(h.clerk.getIdentity).toHaveBeenCalledTimes(3);
   });
 });

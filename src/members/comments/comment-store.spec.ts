@@ -116,3 +116,20 @@ describe('endTextTurn', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('plain'));
   });
 });
+
+describe('round 3', () => {
+  it('asks for site replies so the partial parentCommentId index can serve them', async () => {
+    const { store: s, model } = store([row('root')]);
+    const find = jest.spyOn(model, 'find');
+    await s.replies(page, ['root']);
+    const siteQuery = find.mock.calls
+      .map(([filter]) => filter as Record<string, unknown>)
+      .find((filter) => filter?.source === 'native');
+    // The index is partial on { $type: 'string' }: MongoDB uses it only when
+    // the query names that too (measured; see comment-replies-index e2e).
+    expect(siteQuery?.parentCommentId).toEqual({
+      $type: 'string',
+      $in: ['root'],
+    });
+  });
+});

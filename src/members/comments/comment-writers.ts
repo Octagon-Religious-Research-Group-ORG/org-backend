@@ -57,16 +57,16 @@ function isMember(viewer: Viewer) {
  * Whether an account's email is verified is remembered for
  * {@link ROLE_CACHE_MAX_AGE_MS}, at most {@link MAX_REMEMBERED_READ_ANSWERS}
  * accounts, like the admin role (review round 2, item 3): every thread read
- * of a signed-in member would otherwise ask Clerk. A failed lookup is never
- * remembered.
+ * of a signed-in member would otherwise ask Clerk. Only a VERIFIED answer is
+ * remembered (review round 3): an unverified one is asked again every time,
+ * so a member who has just confirmed their email can write at once. A
+ * failed lookup is never remembered either.
  */
 @Injectable()
 export class CommentWritersService {
   private readonly logger = new Logger(CommentWritersService.name);
-  private readonly verified = new Map<
-    string,
-    { verified: boolean; expires: number }
-  >();
+  /** Accounts whose email Clerk said is verified, until when. */
+  private readonly verified = new Map<string, number>();
 
   constructor(
     private readonly members: MembersService,
@@ -75,22 +75,18 @@ export class CommentWritersService {
 
   /** @throws whatever the Clerk lookup throws; nothing is remembered then */
   private async emailVerified(userId: string): Promise<boolean> {
-    const remembered = this.verified.get(userId);
-    if (remembered && Date.now() < remembered.expires) {
-      return remembered.verified;
-    }
+    const until = this.verified.get(userId);
+    if (until !== undefined && Date.now() < until) return true;
     const identity = await this.clerk.getIdentity(userId);
     const verified = Boolean(identity.email) && identity.emailVerified;
     this.verified.delete(userId);
+    if (!verified) return false;
     if (this.verified.size >= MAX_REMEMBERED_READ_ANSWERS) {
       const [oldest] = this.verified.keys();
       this.verified.delete(oldest);
     }
-    this.verified.set(userId, {
-      verified,
-      expires: Date.now() + ROLE_CACHE_MAX_AGE_MS,
-    });
-    return verified;
+    this.verified.set(userId, Date.now() + ROLE_CACHE_MAX_AGE_MS);
+    return true;
   }
 
   /**
