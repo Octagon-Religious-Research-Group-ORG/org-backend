@@ -9,6 +9,7 @@ import { MAX_BLOCK_TEXT_LENGTH } from '../../social/schemas/block-version.schema
 import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
 import { DECIDED_SUGGESTION } from './comments.service';
 import { harness, U } from './comments-harness.mocks-spec';
+import type { FakeModel } from '../../test-support/fake-model.mocks-spec';
 import {
   ACCEPT_LOCK_STALE_MS,
   BELIEF_CHANGED_RELOAD,
@@ -439,7 +440,8 @@ describe('SuggestionsService', () => {
     it('logs, and leaves the lock to expire, when releasing it fails', async () => {
       const { h, commentId } = await suggested();
       await h.editor.editTabText(U.owner, 'tab_a', 'Owner changed it.', 1);
-      const realUpdate = h.comments.updateOne.bind(h.comments);
+      const realUpdate: FakeModel['updateOne'] = (filter, change) =>
+        h.comments.updateOne(filter, change);
       jest
         .spyOn(h.comments, 'updateOne')
         .mockImplementationOnce(realUpdate)

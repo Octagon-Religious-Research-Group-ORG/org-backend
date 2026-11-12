@@ -90,7 +90,7 @@ describe('Comments API (e2e)', () => {
       ['the owner, a removed belief', 'open-page', 'tab_removed', U.owner, 404],
       ['an admin, a removed belief', 'open-page', 'tab_removed', U.admin, 404],
       ['anyone, a bad tab id', 'open-page', 'bad id!', U.named, 400],
-    ])('%s: %i', async (_name, slug, tab, user, status) => {
+    ])('%s', async (_name, slug, tab, user, status) => {
       await call(
         'get',
         `/members/profiles/${slug}/comments?tab=${encodeURIComponent(tab)}`,
@@ -122,7 +122,7 @@ describe('Comments API (e2e)', () => {
       ['a named member', U.named, 201, undefined],
       ['an anonymous member', U.anon, 201, undefined],
       ['an admin with no page', U.admin, 201, undefined],
-    ])('%s: %i', async (_name, user, status, message) => {
+    ])('%s', async (_name, user, status, message) => {
       const { body } = await post(user, {
         slug: 'open-page',
         tabId: 'tab_a',

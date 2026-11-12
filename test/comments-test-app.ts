@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 // The comments API under test (Chunk 9): real controllers, pipe, guards,
 // throttles, access code and services, over in-memory models that honour the
 // filters (`fake-model`). Only Clerk and the database are stand-ins.
