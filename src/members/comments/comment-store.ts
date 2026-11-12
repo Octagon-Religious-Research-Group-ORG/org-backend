@@ -119,19 +119,14 @@ export class CommentStore {
     private readonly commentModel: Model<CommentDocument>,
   ) {}
 
-  /** Listed rows by id, in no particular order. */
-  async rowsById(commentIds: string[]): Promise<StoredComment[]> {
-    if (commentIds.length === 0) return [];
-    return (await this.commentModel
-      .find({ commentId: { $in: commentIds }, ...LISTED })
+  /** One listed row, by id. */
+  async one(commentId: string): Promise<StoredComment | undefined> {
+    const row = (await this.commentModel
+      .findOne({ commentId, ...LISTED })
       .select(COMMENT_FIELDS)
       .lean()
-      .exec()) as unknown as StoredComment[];
-  }
-
-  async one(commentId: string): Promise<StoredComment | undefined> {
-    const [row] = await this.rowsById([commentId]);
-    return row;
+      .exec()) as unknown as StoredComment | null;
+    return row ?? undefined;
   }
 
   /**

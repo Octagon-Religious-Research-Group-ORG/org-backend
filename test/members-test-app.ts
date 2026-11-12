@@ -248,7 +248,10 @@ export async function createMembersApp(): Promise<INestApplication<App>> {
       // Comments (Chunk 9) have their own e2e app; here every page has none.
       {
         provide: getModelToken(Comment.name),
-        useValue: { find: () => chain([]) },
+        useValue: {
+          find: () => chain([]),
+          aggregate: () => ({ exec: () => Promise.resolve([]) }),
+        },
       },
       CommentAuthorsService,
     ],
