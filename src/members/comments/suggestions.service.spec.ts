@@ -440,8 +440,9 @@ describe('SuggestionsService', () => {
     it('logs, and leaves the lock to expire, when releasing it fails', async () => {
       const { h, commentId } = await suggested();
       await h.editor.editTabText(U.owner, 'tab_a', 'Owner changed it.', 1);
+      const original = h.comments.updateOne;
       const realUpdate: FakeModel['updateOne'] = (filter, change) =>
-        h.comments.updateOne(filter, change);
+        original(filter, change);
       jest
         .spyOn(h.comments, 'updateOne')
         .mockImplementationOnce(realUpdate)
