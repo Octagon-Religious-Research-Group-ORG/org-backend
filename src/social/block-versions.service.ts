@@ -43,6 +43,16 @@ export interface AppendVersionInput {
    * one save can never silently overwrite another.
    */
   expectedSeq?: number;
+  /** When the text is a member's accepted rewording suggestion (Chunk 9). */
+  origin?: VersionOrigin;
+}
+
+/** Where a version's text came from, when not from its author alone. */
+export interface VersionOrigin {
+  /** The suggestion's comment id. */
+  suggestionId: string;
+  /** Its author's Clerk user id. */
+  suggestedBy: string;
 }
 
 /** MongoDB duplicate-key error (unique index violation). */
@@ -120,6 +130,12 @@ export class BlockVersionsService {
         authorUserId: input.authorUserId,
         createdAt: new Date(),
         prevHash: head?.hash ?? GENESIS_HASH,
+        ...(input.origin
+          ? {
+              suggestionId: input.origin.suggestionId,
+              suggestedBy: input.origin.suggestedBy,
+            }
+          : {}),
       };
 
       let created: BlockVersionDocument;

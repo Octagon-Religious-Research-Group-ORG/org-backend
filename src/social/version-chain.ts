@@ -10,6 +10,16 @@ export const GENESIS_HASH = '0'.repeat(64);
  */
 const HASH_SCHEME = 'org-blockversion-v1';
 
+/**
+ * A block version written by accepting a member's rewording suggestion
+ * (Chunk 9) also commits to which suggestion and whose. Its own scheme name,
+ * so it can never hash the same as a version without that origin.
+ */
+const SUGGESTED_HASH_SCHEME = 'org-blockversion-v2-suggestion';
+
+/** Comment versions (Chunk 9): same chain rules, their own scheme. */
+export const COMMENT_HASH_SCHEME = 'org-commentversion-v1';
+
 /** The fields of a block version that its hash commits to. */
 export interface VersionHashInput {
   blockId: string;
@@ -18,6 +28,10 @@ export interface VersionHashInput {
   authorUserId: string;
   createdAt: Date;
   prevHash: string;
+  /** Set only on a block version that accepted a rewording suggestion. */
+  suggestionId?: string;
+  /** That suggestion's author (Clerk user id); set with `suggestionId`. */
+  suggestedBy?: string;
 }
 
 /** A stored version, as read back for verification. */
@@ -45,17 +59,25 @@ export function toStorableText(text: string): string {
  * milliseconds, which is exactly what MongoDB stores, so a value read back from
  * the database hashes identically.
  *
+ * @param scheme - which chain the version belongs to; block versions by
+ *   default, `COMMENT_HASH_SCHEME` for comment versions
  * @returns lowercase hex digest
  */
-export function computeVersionHash(input: VersionHashInput): string {
+export function computeVersionHash(
+  input: VersionHashInput,
+  scheme: string = HASH_SCHEME,
+): string {
+  const suggested =
+    scheme === HASH_SCHEME && typeof input.suggestionId === 'string';
   const canonical = JSON.stringify([
-    HASH_SCHEME,
+    suggested ? SUGGESTED_HASH_SCHEME : scheme,
     input.blockId,
     input.seq,
     input.text,
     input.authorUserId,
     input.createdAt.toISOString(),
     input.prevHash,
+    ...(suggested ? [input.suggestionId, input.suggestedBy ?? ''] : []),
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -98,6 +120,7 @@ function isValidDate(value: unknown): value is Date {
  *
  * @param blockId - the block the versions must belong to
  * @param versions - every stored version of the block, in any order
+ * @param scheme - the chain's hash scheme; block versions by default
  * @returns `valid: true` with the chain length and head hash, or the first
  *   failing sequence number and why it failed. An empty history is valid with
  *   length 0; whether a block may have no versions is the caller's decision.
@@ -105,6 +128,7 @@ function isValidDate(value: unknown): value is Date {
 export function verifyChain(
   blockId: string,
   versions: readonly StoredVersion[],
+  scheme?: string,
 ): ChainVerdict {
   const ordered = [...versions].sort((a, b) => a.seq - b.seq);
   let prevHash = GENESIS_HASH;
@@ -123,7 +147,7 @@ export function verifyChain(
     if (!isValidDate(version.createdAt)) {
       return { valid: false, seq: version.seq, reason: 'invalid-field' };
     }
-    if (computeVersionHash(version) !== version.hash) {
+    if (computeVersionHash(version, scheme) !== version.hash) {
       return { valid: false, seq: version.seq, reason: 'hash-mismatch' };
     }
     prevHash = version.hash;

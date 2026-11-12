@@ -31,6 +31,8 @@ interface Row {
   hash: string;
   authorUserId: string;
   prevHash?: string;
+  suggestionId?: string;
+  suggestedBy?: string;
 }
 
 /**
@@ -200,12 +202,22 @@ function setup(
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
+  const authors = {
+    resolve: jest.fn(() =>
+      Promise.resolve((userId: string) => ({
+        kind: 'member' as const,
+        displayName: `Name of ${userId}`,
+      })),
+    ),
+  };
   const service = new MemberHistoryService(
     members,
     tabModel as never,
     blockModel as never,
     store.model as never,
+    authors as never,
   );
   return {
     service,
@@ -403,6 +415,40 @@ describe('history entries', () => {
     expect(result.entries.map((entry) => entry.text)).toEqual([
       'A. Edited.',
       'A. Imported.',
+    ]);
+  });
+
+  it('names the member whose suggestion a version came from (Chunk 9)', async () => {
+    const { service } = setup({
+      blocks: [{ blockId: 'b-1' }],
+      versions: [
+        { ...BIO_VERSIONS[1], text: 'Imported.' },
+        {
+          ...BIO_VERSIONS[3],
+          text: 'Suggested.',
+          suggestionId: 'cmt_s',
+          suggestedBy: 'user_s',
+        },
+        // A malformed row with no author still names someone, not nothing.
+        {
+          ...BIO_VERSIONS[4],
+          seq: 3,
+          text: 'Odd.',
+          suggestionId: 'cmt_t',
+        },
+      ],
+    });
+    const result = await service.bioHistory('quiet-fern', owner);
+    expect(result.entries.map((entry) => entry.fromSuggestion)).toEqual([
+      {
+        commentId: 'cmt_t',
+        author: { kind: 'member', displayName: 'Name of ' },
+      },
+      {
+        commentId: 'cmt_s',
+        author: { kind: 'member', displayName: 'Name of user_s' },
+      },
+      undefined,
     ]);
   });
 

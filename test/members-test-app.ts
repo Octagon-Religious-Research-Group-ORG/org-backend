@@ -37,6 +37,8 @@ import { ModerationLogService } from '../src/moderation/moderation-log.service';
 import { BlockVersionsService } from '../src/social/block-versions.service';
 import { BeliefTab } from '../src/social/schemas/belief-tab.schema';
 import { BlockVersion } from '../src/social/schemas/block-version.schema';
+import { Comment } from '../src/social/schemas/comment.schema';
+import { CommentAuthorsService } from '../src/members/comments/comment-authors.service';
 import { ProfileBlock } from '../src/social/schemas/profile-block.schema';
 import { SocialProfile } from '../src/social/schemas/social-profile.schema';
 
@@ -243,6 +245,12 @@ export async function createMembersApp(): Promise<INestApplication<App>> {
         },
       },
       { provide: getModelToken(OrgSetting.name), useValue: settings },
+      // Comments (Chunk 9) have their own e2e app; here every page has none.
+      {
+        provide: getModelToken(Comment.name),
+        useValue: { find: () => chain([]) },
+      },
+      CommentAuthorsService,
     ],
   })
     .overrideGuard(OptionalClerkAuthGuard)

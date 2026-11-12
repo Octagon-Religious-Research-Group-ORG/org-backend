@@ -17,7 +17,16 @@ import {
   SocialProfile,
   SocialProfileSchema,
 } from '../social/schemas/social-profile.schema';
+import { Comment, CommentSchema } from '../social/schemas/comment.schema';
 import { SocialModule } from '../social/social.module';
+import { CommentAuthorsService } from './comments/comment-authors.service';
+import { CommentWritersService } from './comments/comment-writers';
+import {
+  CommentThreadsController,
+  CommentWritesController,
+} from './comments/comments.controller';
+import { CommentsService } from './comments/comments.service';
+import { SuggestionsService } from './comments/suggestions.service';
 import {
   AdminSettingsController,
   MembersController,
@@ -32,7 +41,10 @@ import { OrgSettingsService } from './org-settings.service';
 import { PictureStore } from './picture-store.service';
 import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
 
-/** The directory, member pages, owner tools and the ORG chats panel (Chunk 7). */
+/**
+ * The directory, member pages, owner tools and the ORG chats panel (Chunk 7),
+ * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9).
+ */
 @Module({
   imports: [
     SocialModule,
@@ -43,12 +55,15 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
       { name: ProfileBlock.name, schema: ProfileBlockSchema },
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: OrgSetting.name, schema: OrgSettingSchema },
+      { name: Comment.name, schema: CommentSchema },
     ]),
   ],
   controllers: [
     MembersController,
     MyMemberPageController,
     AdminSettingsController,
+    CommentThreadsController,
+    CommentWritesController,
   ],
   providers: [
     MembersService,
@@ -58,6 +73,10 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
     OrgSettingsService,
     PictureStore,
     MemberWriteThrottleGuard,
+    CommentsService,
+    SuggestionsService,
+    CommentAuthorsService,
+    CommentWritersService,
   ],
 })
 export class MembersModule {}

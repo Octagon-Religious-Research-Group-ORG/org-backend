@@ -19,6 +19,8 @@ import {
   type VersionSource,
   versionSource,
 } from './editable-fields';
+import { CommentAuthorsService } from './comments/comment-authors.service';
+import type { CommentAuthorView } from './comments/comment-serializers';
 import type { TabHistoryField } from './members.dto';
 import { MembersService, PROFILE_NOT_FOUND } from './members.service';
 import type { Viewer } from './profile-access';
@@ -48,7 +50,14 @@ export interface HistoryEntry {
    */
   beforeFirstEdit: boolean;
   partHashes?: string[];
+  /**
+   * The owner accepted a member's rewording suggestion (Chunk 9): which one,
+   * and its author as this reader may see them.
+   */
+  fromSuggestion?: { commentId: string; author: CommentAuthorView };
 }
+
+type AuthorLookup = (userId: string) => CommentAuthorView;
 
 export interface HistoryPage {
   entries: HistoryEntry[];
@@ -68,6 +77,8 @@ interface VersionRow {
   createdAt: Date;
   hash: string;
   authorUserId: string;
+  suggestionId?: string;
+  suggestedBy?: string;
 }
 
 const VERSION_FIELDS = {
@@ -77,6 +88,8 @@ const VERSION_FIELDS = {
   createdAt: 1,
   hash: 1,
   authorUserId: 1,
+  suggestionId: 1,
+  suggestedBy: 1,
 };
 
 function shortHash(hash: string) {
@@ -87,7 +100,11 @@ function shortHash(hash: string) {
  * @param label - an imported outline label, for a first version only: from
  *   the first edit on, the label is part of the text itself
  */
-function entryOf(row: VersionRow, label?: string): HistoryEntry {
+function entryOf(
+  row: VersionRow,
+  authorOf: AuthorLookup,
+  label?: string,
+): HistoryEntry {
   return {
     seq: row.seq,
     savedAt: row.createdAt.toISOString(),
@@ -95,6 +112,14 @@ function entryOf(row: VersionRow, label?: string): HistoryEntry {
     hash: shortHash(row.hash),
     source: versionSource(row.authorUserId),
     beforeFirstEdit: false,
+    ...(row.suggestionId
+      ? {
+          fromSuggestion: {
+            commentId: row.suggestionId,
+            author: authorOf(row.suggestedBy ?? ''),
+          },
+        }
+      : {}),
   };
 }
 
@@ -118,6 +143,7 @@ export class MemberHistoryService {
     private readonly blockModel: Model<ProfileBlockDocument>,
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
+    private readonly authors: CommentAuthorsService,
   ) {}
 
   /** @throws NotFoundException unless this viewer can read the whole page */
@@ -135,6 +161,7 @@ export class MemberHistoryService {
     return this.listField(
       await this.textBlocks({ profileId, section: 'bio' }),
       page,
+      viewer,
     );
   }
 
@@ -159,7 +186,7 @@ export class MemberHistoryService {
       field === 'title'
         ? [{ blockId: titleBlockId(tabId) }]
         : await this.textBlocks({ profileId, section: 'beliefs', tabId });
-    return this.listField(blocks, page);
+    return this.listField(blocks, page, viewer);
   }
 
   /** Every text block the field ever had, removed ones too, in reading order. */
@@ -185,6 +212,7 @@ export class MemberHistoryService {
   private async listField(
     blocks: FieldBlock[],
     page: number,
+    viewer: Viewer,
   ): Promise<HistoryPage> {
     const [first] = blocks;
     if (!first) return { entries: [], page, hasMore: false };
@@ -192,10 +220,13 @@ export class MemberHistoryService {
 
     if (blocks.length === 1) {
       const rows = await this.versions({ blockId: first.blockId }, skip, 1);
+      const authorOf = await this.suggesters(rows, viewer);
       return {
         entries: rows
           .slice(0, HISTORY_PAGE_SIZE)
-          .map((row) => entryOf(row, row.seq === 1 ? first.label : undefined)),
+          .map((row) =>
+            entryOf(row, authorOf, row.seq === 1 ? first.label : undefined),
+          ),
         page,
         hasMore: rows.length > HISTORY_PAGE_SIZE,
       };
@@ -204,7 +235,8 @@ export class MemberHistoryService {
     const edits = { blockId: first.blockId, seq: { $gt: 1 } };
     const editCount = await this.versionModel.countDocuments(edits).exec();
     const rows = await this.versions(edits, skip, 0);
-    const entries = rows.map((row) => entryOf(row));
+    const authorOf = await this.suggesters(rows, viewer);
+    const entries = rows.map((row) => entryOf(row, authorOf));
     // The earlier text is entry number `editCount` (0-based), the last one.
     if (skip <= editCount && editCount < skip + HISTORY_PAGE_SIZE) {
       const earlier = await this.earlierText(blocks, editCount > 0);
@@ -215,6 +247,18 @@ export class MemberHistoryService {
       page,
       hasMore: skip + HISTORY_PAGE_SIZE < editCount + 1,
     };
+  }
+
+  /** Names the authors of the suggestions these versions came from. */
+  private async suggesters(
+    rows: VersionRow[],
+    viewer: Viewer,
+  ): Promise<AuthorLookup> {
+    const ids = rows.flatMap((row) =>
+      row.suggestionId && row.suggestedBy ? [row.suggestedBy] : [],
+    );
+    const lookup = await this.authors.resolve(ids, viewer);
+    return (userId) => lookup(userId);
   }
 
   private async versions(

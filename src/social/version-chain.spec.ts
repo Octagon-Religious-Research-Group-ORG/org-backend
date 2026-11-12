@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  COMMENT_HASH_SCHEME,
   computeVersionHash,
   GENESIS_HASH,
   type StoredVersion,
@@ -178,5 +179,79 @@ describe('verifyChain on a row whose types were tampered with', () => {
         reason: 'sequence-gap',
       });
     }
+  });
+});
+
+describe('hash schemes (Chunk 9)', () => {
+  const base = {
+    blockId: BLOCK,
+    seq: 2,
+    text: 'Suggested wording.',
+    authorUserId: 'user_owner',
+    createdAt: new Date('2026-11-12T05:00:00.000Z'),
+    prevHash: GENESIS_HASH,
+  };
+
+  it('keeps every existing block hash: no origin, same digest as before', () => {
+    const expected = createHash('sha256')
+      .update(
+        JSON.stringify([
+          'org-blockversion-v1',
+          BLOCK,
+          2,
+          'Suggested wording.',
+          'user_owner',
+          '2026-11-12T05:00:00.000Z',
+          GENESIS_HASH,
+        ]),
+        'utf8',
+      )
+      .digest('hex');
+    expect(computeVersionHash(base)).toBe(expected);
+  });
+
+  it('commits an accepted suggestion and its author, under their own scheme', () => {
+    const suggested = { ...base, suggestionId: 'cmt_1', suggestedBy: 'user_s' };
+    const expected = createHash('sha256')
+      .update(
+        JSON.stringify([
+          'org-blockversion-v2-suggestion',
+          BLOCK,
+          2,
+          'Suggested wording.',
+          'user_owner',
+          '2026-11-12T05:00:00.000Z',
+          GENESIS_HASH,
+          'cmt_1',
+          'user_s',
+        ]),
+        'utf8',
+      )
+      .digest('hex');
+    expect(computeVersionHash(suggested)).toBe(expected);
+    expect(
+      computeVersionHash({ ...suggested, suggestedBy: 'user_t' }),
+    ).not.toBe(expected);
+    expect(computeVersionHash({ ...base, suggestionId: 'cmt_1' })).not.toBe(
+      expected,
+    );
+  });
+
+  it('never hashes a comment version like a block version', () => {
+    const comment = computeVersionHash(base, COMMENT_HASH_SCHEME);
+    expect(comment).not.toBe(computeVersionHash(base));
+    // A suggestion origin is a block-version field only.
+    expect(
+      computeVersionHash({ ...base, suggestionId: 'x' }, COMMENT_HASH_SCHEME),
+    ).toBe(comment);
+    const chain = [{ ...base, seq: 1, hash: '' }];
+    chain[0].hash = computeVersionHash(chain[0], COMMENT_HASH_SCHEME);
+    expect(verifyChain(BLOCK, chain, COMMENT_HASH_SCHEME)).toMatchObject({
+      valid: true,
+    });
+    expect(verifyChain(BLOCK, chain)).toMatchObject({
+      valid: false,
+      reason: 'hash-mismatch',
+    });
   });
 });

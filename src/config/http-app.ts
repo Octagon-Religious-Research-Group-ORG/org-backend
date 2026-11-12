@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { json, type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
+import { MAX_SUGGESTION_BODY_BYTES } from '../members/comments/comments.dto';
 import { MAX_EDIT_BODY_BYTES } from '../members/members.dto';
 import { MAX_JOIN_BODY_BYTES } from '../membership/membership.dto';
 import { createCorsOptions } from './cors';
@@ -47,17 +48,24 @@ export function configureHttpApp(
   // request carrying a token gets the larger limit: an anonymous one is
   // refused anyway, and keeps the default limit, so it cannot make the
   // server read a large body first.
-  const parseLongEdit = json({ limit: MAX_EDIT_BODY_BYTES });
-  app.use(
-    '/api/v1/me/member-page',
-    (request: Request, response: Response, next: NextFunction) => {
-      if (!BEARER.test(request.headers.authorization ?? '')) {
-        next();
-        return;
-      }
-      parseLongEdit(request, response, next);
-    },
-  );
+  // A rewording suggestion carries a whole belief too (Chunk 9).
+  const longBodies: Array<[string, number]> = [
+    ['/api/v1/me/member-page', MAX_EDIT_BODY_BYTES],
+    ['/api/v1/me/suggestions', MAX_SUGGESTION_BODY_BYTES],
+  ];
+  for (const [path, limit] of longBodies) {
+    const parseLong = json({ limit });
+    app.use(
+      path,
+      (request: Request, response: Response, next: NextFunction) => {
+        if (!BEARER.test(request.headers.authorization ?? '')) {
+          next();
+          return;
+        }
+        parseLong(request, response, next);
+      },
+    );
+  }
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,

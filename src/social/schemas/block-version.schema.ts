@@ -70,6 +70,18 @@ export class BlockVersion {
     immutable: true,
   })
   hash: string;
+
+  /**
+   * Set only when the owner accepted a member's rewording suggestion (Chunk
+   * 9): the suggestion's comment id. Part of the hash, so the record of where
+   * the text came from cannot be changed without breaking the chain.
+   */
+  @Prop({ type: String, immutable: true })
+  suggestionId?: string;
+
+  /** The suggestion's author (Clerk user id); set with `suggestionId`. */
+  @Prop({ type: String, immutable: true })
+  suggestedBy?: string;
 }
 
 export type BlockVersionDocument = HydratedDocument<BlockVersion>;

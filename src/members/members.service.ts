@@ -12,6 +12,10 @@ import {
   type BlockVersionDocument,
 } from '../social/schemas/block-version.schema';
 import {
+  Comment,
+  type CommentDocument,
+} from '../social/schemas/comment.schema';
+import {
   type BlockSection,
   ProfileBlock,
   type ProfileBlockDocument,
@@ -46,6 +50,12 @@ import {
 } from './profile-serializers';
 import { readHeads } from '../social/version-heads';
 import { titleBlockId, visibleFieldBlocks } from './editable-fields';
+import {
+  type CommentSkeleton,
+  PAGE_THREAD,
+  visibleCounts,
+} from './comments/comment-threads';
+import { MAX_PAGE_COMMENTS } from './comments/comment-limits';
 
 /** Exactly one message for a missing page and for a page you may not see. */
 export const PROFILE_NOT_FOUND = 'That page does not exist.';
@@ -109,6 +119,8 @@ export class MembersService {
     private readonly blockModel: Model<ProfileBlockDocument>,
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
+    @InjectModel(Comment.name)
+    private readonly commentModel: Model<CommentDocument>,
     private readonly pictures: PictureStore,
     private readonly settings: OrgSettingsService,
     private readonly adminAccess: AdminAccessService,
@@ -223,6 +235,16 @@ export class MembersService {
     return { profile, access };
   }
 
+  /** The address of a page, by its id; for the comment routes (Chunk 9). */
+  async slugOf(profileId: Types.ObjectId): Promise<string | undefined> {
+    const row = await this.profileModel
+      .findOne({ _id: profileId })
+      .select({ slug: 1 })
+      .lean()
+      .exec();
+    return row?.slug;
+  }
+
   /** @throws NotFoundException for a page this viewer may not know about */
   async profile(slug: string, viewer: Viewer): Promise<ProfileView> {
     const { profile, access } = await this.findVisible(slug, viewer);
@@ -329,6 +351,7 @@ export class MembersService {
       }),
     ).filter((extra) => extra.paragraphs.length > 0);
 
+    const counts = visibleCounts(await this.commentSkeleton(profileId));
     const beliefBlocks = inSection('beliefs');
     const tabBlocks = (tabId: string) =>
       beliefBlocks.filter((block) => block.tabId === tabId);
@@ -354,9 +377,32 @@ export class MembersService {
           ...(tab.group ? { group: tab.group } : {}),
           needsReview: tab.reviewStatus === 'imported-review',
           paragraphs: paragraphs(visible(tabBlocks(tab.tabId))),
+          commentCount: counts.get(tab.tabId) ?? 0,
+          textSeq: headSeq(tabBlocks(tab.tabId).at(0)?.blockId ?? ''),
         }),
       ),
+      pageCommentCount: counts.get(PAGE_THREAD) ?? 0,
     };
+  }
+
+  /**
+   * Every comment row of a page, light, oldest first (Chunk 9): the one read
+   * that threads, paging and counts all come from.
+   */
+  async commentSkeleton(profileId: Types.ObjectId): Promise<CommentSkeleton[]> {
+    const rows = (await this.commentModel
+      .find({ profileId })
+      .sort({ createdAt: 1, _id: 1 })
+      .limit(MAX_PAGE_COMMENTS)
+      .select({ commentId: 1, tabId: 1, parentCommentId: 1, removedAt: 1 })
+      .lean()
+      .exec()) as CommentSkeleton[];
+    if (rows.length === MAX_PAGE_COMMENTS) {
+      this.logger.warn(
+        `A page reached ${MAX_PAGE_COMMENTS} comments; only the oldest are read.`,
+      );
+    }
+    return rows;
   }
 
   /**

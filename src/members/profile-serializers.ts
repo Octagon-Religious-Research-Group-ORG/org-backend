@@ -42,6 +42,13 @@ export interface TabView {
   group?: string;
   needsReview: boolean;
   paragraphs: ParagraphView[];
+  /** Comments a reader sees in this belief's thread (Chunk 9). */
+  commentCount: number;
+  /**
+   * The belief text's newest version: what a rewording suggestion is
+   * written against (Chunk 9). 0 when the belief has no text yet.
+   */
+  textSeq: number;
 }
 
 export interface ExtraSectionView {
@@ -66,6 +73,8 @@ export interface ProfileContent {
   bio: ParagraphView[];
   extras: ExtraSectionView[];
   tabs: TabView[];
+  /** Comments in the page's own thread, "About this page" (Chunk 9). */
+  pageCommentCount: number;
   revisions?: Revisions;
   /** Empty unless the reader is the owner or an admin. */
   removedTabs: RemovedTabView[];
@@ -148,6 +157,7 @@ export function fullProfile(
     bio: content.bio,
     extras: content.extras,
     tabs: content.tabs,
+    pageCommentCount: content.pageCommentCount,
     ...(access.isOwner && content.revisions
       ? { revisions: content.revisions }
       : {}),

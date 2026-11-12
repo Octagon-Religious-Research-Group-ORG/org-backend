@@ -84,11 +84,14 @@ describe('configureHttpApp', () => {
 
     expect(app.set).toHaveBeenCalledWith('trust proxy', 1);
     expect(app.setGlobalPrefix).toHaveBeenCalledWith('api/v1');
-    expect(app.use).toHaveBeenCalledTimes(3);
-    expect(app.use).toHaveBeenCalledWith(
+    expect(app.use).toHaveBeenCalledTimes(4);
+    for (const path of [
       '/api/v1/me/membership',
-      expect.any(Function),
-    );
+      '/api/v1/me/member-page',
+      '/api/v1/me/suggestions',
+    ]) {
+      expect(app.use).toHaveBeenCalledWith(path, expect.any(Function));
+    }
     expect(app.enableCors).toHaveBeenCalledWith(
       expect.objectContaining({ origin: ['https://example.test'] }),
     );

@@ -10,7 +10,10 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
 import { hasVisibleText } from '../membership/member-text';
 import { withoutMemberText } from '../membership/membership.service';
-import { BlockVersionsService } from '../social/block-versions.service';
+import {
+  BlockVersionsService,
+  type VersionOrigin,
+} from '../social/block-versions.service';
 import { readHeads } from '../social/version-heads';
 import {
   BeliefTab,
@@ -161,11 +164,16 @@ export class MemberPageEditorService {
     );
   }
 
+  /**
+   * @param origin - set when the text is a member's rewording suggestion the
+   *   owner accepted (Chunk 9); recorded, hashed, on the new version
+   */
   async editTabText(
     userId: string,
     tabId: string,
     text: string,
     baseSeq: number,
+    origin?: VersionOrigin,
   ) {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
@@ -176,7 +184,7 @@ export class MemberPageEditorService {
         emptyRefusal: 'A belief needs some text.',
         tooLong: BELIEF_TOO_LONG,
       },
-      { userId, text, baseSeq },
+      { userId, text, baseSeq, ...(origin ? { origin } : {}) },
     );
     if (saved.changed) await this.markReviewed(tabId);
     return saved;
@@ -192,24 +200,19 @@ export class MemberPageEditorService {
    */
   private async saveText(
     field: TextField,
-    edit: { userId: string; text: string; baseSeq: number },
+    edit: {
+      userId: string;
+      text: string;
+      baseSeq: number;
+      origin?: VersionOrigin;
+    },
   ): Promise<SaveResult> {
     const text = normaliseFieldText(edit.text);
     if (!hasVisibleText(text)) {
       throw new BadRequestException(field.emptyRefusal);
     }
 
-    const blocks = (await this.blockModel
-      .find({
-        ...field.where,
-        kind: { $ne: 'image' },
-        removedAt: { $exists: false },
-      })
-      .sort({ order: 1, _id: 1 })
-      .select({ blockId: 1, kind: 1, label: 1 })
-      .lean()
-      .exec()) as TextBlockRow[];
-
+    const blocks = await this.liveTextBlocks(field.where);
     const current = await this.currentText(blocks);
     if (text === normaliseFieldText(current.text)) {
       // The real newest version, so the editor's next save starts from it.
@@ -238,6 +241,7 @@ export class MemberPageEditorService {
         text,
         authorUserId: edit.userId,
         expectedSeq: edit.baseSeq,
+        ...(edit.origin ? { origin: edit.origin } : {}),
       });
     } catch (error) {
       throw withoutMemberText(error);
@@ -246,6 +250,30 @@ export class MemberPageEditorService {
       await this.mergeIntoFirst(first.blockId, rest);
     }
     return { changed: true, seq: saved.seq };
+  }
+
+  /** A field's live text blocks, in reading order (ties by _id). */
+  private async liveTextBlocks(where: TextField['where']) {
+    return (await this.blockModel
+      .find({
+        ...where,
+        kind: { $ne: 'image' },
+        removedAt: { $exists: false },
+      })
+      .sort({ order: 1, _id: 1 })
+      .select({ blockId: 1, kind: 1, label: 1 })
+      .lean()
+      .exec()) as TextBlockRow[];
+  }
+
+  /**
+   * A belief's text as an editor starts from it, and the version a save must
+   * be based on (Chunk 9: what a rewording suggestion is written against).
+   */
+  async readTabText(profileId: Types.ObjectId, tabId: string) {
+    return this.currentText(
+      await this.liveTextBlocks({ profileId, section: 'beliefs', tabId }),
+    );
   }
 
   /**
