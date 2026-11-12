@@ -57,6 +57,8 @@ export interface CommentView {
   /** The version an edit must be based on; only on the viewer's own. */
   seq?: number;
   suggestion?: SuggestionView;
+  /** On a reply: the comment it answers. */
+  parentCommentId?: string;
   /** Top-level comments only. */
   replies?: CommentView[];
 }
@@ -68,7 +70,11 @@ export interface ThreadPage {
   /** Signed in with an approved page, or an admin: the form may be shown. */
   viewerMayComment: boolean;
   /** Why the form is not offered, when it is not. */
-  viewerWriteBlock?: 'sign-in' | 'needs-approved-page' | 'verify-email';
+  viewerWriteBlock?:
+    | 'sign-in'
+    | 'needs-approved-page'
+    | 'verify-email'
+    | 'cannot-check';
   /** As above, and not the page's owner (owners edit instead). */
   viewerMaySuggest: boolean;
 }
@@ -168,6 +174,7 @@ export function commentView(
     commentId: row.commentId,
     kind: row.kind ?? 'comment',
     source: imported ? 'imported' : 'member',
+    ...(row.parentCommentId ? { parentCommentId: row.parentCommentId } : {}),
     author: context.authorOf(row),
     postedAt: row.createdAt.toISOString(),
     ...(imported && row.legacyCreatedAt

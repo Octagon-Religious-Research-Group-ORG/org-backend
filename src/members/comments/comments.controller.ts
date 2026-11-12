@@ -21,6 +21,7 @@ import {
   MemberJsonCacheInterceptor,
   NoStoreWhenSignedInInterceptor,
 } from '../no-store.interceptor';
+import type { Viewer } from '../profile-access';
 import { CommentWritersService } from './comment-writers';
 import {
   CommentHistoryQueryDto,
@@ -91,7 +92,23 @@ export class CommentWritesController {
     private readonly writers: CommentWritersService,
     private readonly comments: CommentsService,
     private readonly suggestions: SuggestionsService,
+    private readonly members: MembersService,
   ) {}
+
+  /** Every write answers with the comment as the writer now sees it. */
+  private async withView<T extends object>(
+    result: T,
+    commentId: string,
+    viewer: Viewer,
+    viewerIsOwner = false,
+  ) {
+    const comment = await this.comments.viewOne(
+      commentId,
+      viewer,
+      viewerIsOwner,
+    );
+    return { ...result, ...(comment ? { comment } : {}) };
+  }
 
   @Post('comments')
   @WriteThrottle()
@@ -99,7 +116,8 @@ export class CommentWritesController {
     @Req() request: AuthenticatedRequest,
     @Body() body: NewCommentDto,
   ) {
-    return this.comments.create(await this.writers.requireWriter(request), {
+    const writer = await this.writers.requireWriter(request);
+    const made = await this.comments.create(writer, {
       slug: body.slug,
       body: body.body,
       ...(body.tabId !== undefined ? { tabId: body.tabId } : {}),
@@ -107,6 +125,7 @@ export class CommentWritesController {
         ? { parentCommentId: body.parentCommentId }
         : {}),
     });
+    return this.withView(made, made.commentId, writer);
   }
 
   @Put('comments/:commentId')
@@ -116,22 +135,29 @@ export class CommentWritesController {
     @Param('commentId') commentId: string,
     @Body() body: EditCommentDto,
   ) {
-    return this.comments.edit(
-      await this.writers.requireWriter(request),
+    const writer = await this.writers.requireWriter(request);
+    const saved = await this.comments.edit(
+      writer,
       commentId,
       body.body,
       body.baseSeq,
     );
+    return this.withView(saved, commentId, writer);
   }
 
   /** Soft: the text is kept (plan §2b); its own author only. */
   @Delete('comments/:commentId')
   @WriteThrottle()
-  remove(
+  async remove(
     @Req() request: AuthenticatedRequest,
     @Param('commentId') commentId: string,
   ) {
-    return this.comments.remove(getUserSub(request), commentId);
+    const removed = await this.comments.remove(getUserSub(request), commentId);
+    return this.withView(
+      removed,
+      commentId,
+      await this.members.resolveViewer(request),
+    );
   }
 
   @Post('suggestions')
@@ -140,31 +166,51 @@ export class CommentWritesController {
     @Req() request: AuthenticatedRequest,
     @Body() body: NewSuggestionDto,
   ) {
-    return this.suggestions.suggest(await this.writers.requireWriter(request), {
+    const writer = await this.writers.requireWriter(request);
+    const made = await this.suggestions.suggest(writer, {
       slug: body.slug,
       tabId: body.tabId,
       text: body.text,
       baseSeq: body.baseSeq,
       ...(body.note !== undefined ? { note: body.note } : {}),
     });
+    return this.withView(made, made.commentId, writer);
   }
 
   /** The page owner only: their own page's suggestion. */
   @Post('member-page/suggestions/:commentId/accept')
   @WriteThrottle()
-  accept(
+  async accept(
     @Req() request: AuthenticatedRequest,
     @Param('commentId') commentId: string,
   ) {
-    return this.suggestions.accept(getUserSub(request), commentId);
+    const accepted = await this.suggestions.accept(
+      getUserSub(request),
+      commentId,
+    );
+    return this.withView(
+      accepted,
+      commentId,
+      await this.members.resolveViewer(request),
+      true,
+    );
   }
 
   @Post('member-page/suggestions/:commentId/decline')
   @WriteThrottle()
-  decline(
+  async decline(
     @Req() request: AuthenticatedRequest,
     @Param('commentId') commentId: string,
   ) {
-    return this.suggestions.decline(getUserSub(request), commentId);
+    const declined = await this.suggestions.decline(
+      getUserSub(request),
+      commentId,
+    );
+    return this.withView(
+      declined,
+      commentId,
+      await this.members.resolveViewer(request),
+      true,
+    );
   }
 }

@@ -12,14 +12,17 @@ function setup() {
   const comments = {
     thread: jest.fn(() => Promise.resolve('thread')),
     history: jest.fn(() => Promise.resolve('history')),
-    create: jest.fn(() => Promise.resolve('created')),
-    edit: jest.fn(() => Promise.resolve('edited')),
-    remove: jest.fn(() => Promise.resolve('removed')),
+    create: jest.fn(() => Promise.resolve({ commentId: 'c' })),
+    edit: jest.fn(() => Promise.resolve({ changed: true })),
+    remove: jest.fn(() => Promise.resolve({ removed: true })),
+    viewOne: jest.fn((commentId: string) =>
+      Promise.resolve(commentId === 'gone' ? undefined : { view: commentId }),
+    ),
   };
   const suggestions = {
-    suggest: jest.fn(() => Promise.resolve('suggested')),
-    accept: jest.fn(() => Promise.resolve('accepted')),
-    decline: jest.fn(() => Promise.resolve('declined')),
+    suggest: jest.fn(() => Promise.resolve({ commentId: 'c' })),
+    accept: jest.fn(() => Promise.resolve({ accepted: true })),
+    decline: jest.fn(() => Promise.resolve({ declined: true })),
   };
   const writers = {
     requireWriter: jest.fn(() => Promise.resolve(writer)),
@@ -39,6 +42,7 @@ function setup() {
       writers as never,
       comments as never,
       suggestions as never,
+      members as never,
     ),
   };
 }
@@ -117,11 +121,21 @@ describe('comment controllers', () => {
 
   it('removes, accepts and declines as the token user', async () => {
     const t = setup();
-    await expect(t.writes.remove(req, 'c')).resolves.toBe('removed');
+    await expect(t.writes.remove(req, 'c')).resolves.toEqual({
+      removed: true,
+      comment: { view: 'c' },
+    });
     expect(t.comments.remove).toHaveBeenCalledWith('user_n', 'c');
-    await expect(t.writes.accept(req, 'c')).resolves.toBe('accepted');
+    await expect(t.writes.accept(req, 'c')).resolves.toEqual({
+      accepted: true,
+      comment: { view: 'c' },
+    });
     expect(t.suggestions.accept).toHaveBeenCalledWith('user_n', 'c');
-    await expect(t.writes.decline(req, 'c')).resolves.toBe('declined');
-    expect(t.suggestions.decline).toHaveBeenCalledWith('user_n', 'c');
+    // The owner decides: the view says so.
+    expect(t.comments.viewOne).toHaveBeenLastCalledWith('c', viewer, true);
+    await expect(t.writes.decline(req, 'gone')).resolves.toEqual({
+      declined: true,
+    });
+    expect(t.suggestions.decline).toHaveBeenCalledWith('user_n', 'gone');
   });
 });

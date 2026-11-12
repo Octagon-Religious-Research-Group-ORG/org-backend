@@ -9,7 +9,14 @@
  *   top-level comment at the end of its parent chain, whatever its own `tabId`
  *   says: an imported reply can carry a different anchor from its parent, and
  *   an imported reply to a reply is shown under the root too.
- * - A comment whose parent is missing is its own root.
+ * - A comment whose parent is missing is its own root, and is listed as a
+ *   top-level comment (Chunk 9 review round 2, item 1).
+ * - A parent loop (never written by this site; only possible in imported
+ *   data) is cut at its member with the smallest id, which becomes the root
+ *   of every comment in or below the loop, whichever one the walk starts at.
+ *
+ * Site comments follow the same rules trivially: a site reply always points
+ * at its top-level comment. Only imported comments need this index.
  */
 
 /** The fields of a comment row the thread rules read. */
@@ -22,9 +29,6 @@ export interface CommentSkeleton {
 
 /** The thread key: a tab id, or this value for the page-level thread. */
 export const PAGE_THREAD = '';
-
-/** Longest parent chain followed; anything deeper is treated as a root. */
-export const MAX_THREAD_DEPTH = 32;
 
 export interface ThreadIndex {
   /** The root of each comment. */
@@ -45,18 +49,23 @@ export function indexThreads(rows: readonly CommentSkeleton[]): ThreadIndex {
   const byId = new Map(rows.map((row) => [row.commentId, row]));
   const rootOf = new Map<string, string>();
   const findRoot = (row: CommentSkeleton): string => {
+    const path = [row.commentId];
+    const at = new Map([[row.commentId, 0]]);
     let current = row;
-    const seen = new Set<string>([current.commentId]);
-    for (let depth = 0; depth < MAX_THREAD_DEPTH; depth++) {
+    for (;;) {
       const parent =
         current.parentCommentId === undefined
           ? undefined
           : byId.get(current.parentCommentId);
-      if (!parent || seen.has(parent.commentId)) return current.commentId;
-      seen.add(parent.commentId);
+      if (!parent) return current.commentId;
+      const loopStart = at.get(parent.commentId);
+      if (loopStart !== undefined) {
+        return path.slice(loopStart).sort()[0];
+      }
+      at.set(parent.commentId, path.length);
+      path.push(parent.commentId);
       current = parent;
     }
-    return current.commentId;
   };
 
   const threadOf = new Map<string, string>();

@@ -3,7 +3,9 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { U } from '../src/members/comments/comments-harness.mocks-spec';
+import { ClerkUserInfoService } from '../src/auth/clerk-user-info.service';
 import {
+  CANNOT_CHECK_ACCOUNT,
   NEEDS_APPROVED_PAGE,
   NEEDS_VERIFIED_EMAIL,
 } from '../src/members/comments/comment-writers';
@@ -130,6 +132,53 @@ describe('Comments API (e2e)', () => {
     });
   });
 
+  describe('round 2', () => {
+    it('answers a post with the comment as the writer sees it (item 3)', async () => {
+      const { body } = await post(U.named, {
+        slug: 'open-page',
+        tabId: 'tab_a',
+        body: ' Shown at once. ',
+      }).expect(201);
+      expect(body).toMatchObject({
+        seq: 1,
+        comment: {
+          commentId: body.commentId,
+          body: 'Shown at once.',
+          mine: true,
+          seq: 1,
+          author: { kind: 'member', displayName: 'Name of named-writer' },
+        },
+      });
+      const { body: reply } = await post(U.anon, {
+        slug: 'open-page',
+        parentCommentId: body.commentId,
+        body: 'A reply.',
+      }).expect(201);
+      expect(reply.comment).toMatchObject({
+        parentCommentId: body.commentId,
+      });
+    });
+
+    it('answers 503, and the read says it cannot check, when Clerk is down (item 6)', async () => {
+      const clerk = app.get(ClerkUserInfoService);
+      clerk.getIdentity = () => Promise.reject(new Error('Clerk down'));
+      const { body } = await post(U.anon, {
+        slug: 'open-page',
+        body: 'x',
+      }).expect(503);
+      expect(body.message).toBe(CANNOT_CHECK_ACCOUNT);
+      const { body: thread } = await call(
+        'get',
+        '/members/profiles/open-page/comments',
+        U.anon,
+      ).expect(200);
+      expect(thread).toMatchObject({
+        viewerMayComment: false,
+        viewerWriteBlock: 'cannot-check',
+      });
+    });
+  });
+
   describe('who may write', () => {
     it.each([
       ['logged out', undefined, 401, undefined],
@@ -184,7 +233,13 @@ describe('Comments API (e2e)', () => {
       await call('put', path, U.named)
         .send({ body: 'Second.', baseSeq: 1 })
         .expect(200)
-        .expect({ changed: true, seq: 2 });
+        .expect(({ body: b }) =>
+          expect(b).toMatchObject({
+            changed: true,
+            seq: 2,
+            comment: { body: 'Second.', edited: true },
+          }),
+        );
       const { body: stale } = await call('put', path, U.named)
         .send({ body: 'Third.', baseSeq: 1 })
         .expect(409);
@@ -213,7 +268,14 @@ describe('Comments API (e2e)', () => {
         2, 1,
       ]);
 
-      await call('delete', path, U.named).expect(200).expect({ removed: true });
+      await call('delete', path, U.named)
+        .expect(200)
+        .expect(({ body: b }) =>
+          expect(b).toMatchObject({
+            removed: true,
+            comment: { removed: true },
+          }),
+        );
       const { body: after } = await call(
         'get',
         '/members/profiles/open-page/comments?tab=tab_a',
@@ -258,7 +320,13 @@ describe('Comments API (e2e)', () => {
       await call('post', accept).expect(401);
       await call('post', accept, U.owner)
         .expect(201)
-        .expect({ accepted: true, seq: 2 });
+        .expect(({ body: b }) =>
+          expect(b).toMatchObject({
+            accepted: true,
+            seq: 2,
+            comment: { suggestion: { status: 'accepted' } },
+          }),
+        );
       const { body: history } = await call(
         'get',
         '/members/profiles/open-page/tabs/tab_a/history',
@@ -297,7 +365,12 @@ describe('Comments API (e2e)', () => {
         U.owner,
       )
         .expect(201)
-        .expect({ declined: true });
+        .expect(({ body: b }) =>
+          expect(b).toMatchObject({
+            declined: true,
+            comment: { suggestion: { status: 'declined' } },
+          }),
+        );
     });
 
     it('takes a long suggestion only with a token', async () => {

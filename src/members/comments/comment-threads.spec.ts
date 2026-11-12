@@ -1,9 +1,4 @@
-import {
-  indexThreads,
-  MAX_THREAD_DEPTH,
-  PAGE_THREAD,
-  visibleCounts,
-} from './comment-threads';
+import { indexThreads, PAGE_THREAD, visibleCounts } from './comment-threads';
 
 describe('comment threads', () => {
   it('puts a reply in its root thread, whatever its own tab says', () => {
@@ -21,20 +16,34 @@ describe('comment threads', () => {
     expect(index.repliesOf.get('a')).toEqual(['b', 'c']);
   });
 
-  it('survives a parent loop and an endless chain', () => {
+  it('cuts a parent loop at its smallest id, whichever comment the walk starts from', () => {
     const loop = indexThreads([
-      { commentId: 'x', parentCommentId: 'y', tabId: 't' },
-      { commentId: 'y', parentCommentId: 'x' },
+      { commentId: 'y', parentCommentId: 'x', tabId: 't' },
+      { commentId: 'x', parentCommentId: 'z', tabId: 't' },
+      { commentId: 'z', parentCommentId: 'y', tabId: 't' },
+      { commentId: 'w', parentCommentId: 'z', tabId: 't' },
     ]);
-    expect(loop.rootOf.get('x')).toBe('y');
-    expect(loop.rootOf.get('y')).toBe('x');
+    for (const id of ['x', 'y', 'z', 'w']) {
+      expect(loop.rootOf.get(id)).toBe('x');
+    }
+    expect(loop.rootsByThread.get('t')).toEqual(['x']);
+    expect(loop.repliesOf.get('x')).toEqual(['y', 'z', 'w']);
+    // Every row is in exactly one place: listed and counted alike.
+    expect(
+      visibleCounts(
+        [...loop.rootOf.keys()].map((commentId) => ({ commentId, tabId: 't' })),
+      ),
+    ).toEqual(new Map([['t', 4]]));
+  });
 
-    const chain = Array.from({ length: MAX_THREAD_DEPTH + 5 }, (_, i) => ({
-      commentId: `n${i}`,
-      ...(i > 0 ? { parentCommentId: `n${i - 1}` } : {}),
+  it('follows a long chain to its top', () => {
+    const chain = Array.from({ length: 100 }, (_, i) => ({
+      commentId: `n${String(i).padStart(3, '0')}`,
+      ...(i > 0
+        ? { parentCommentId: `n${String(i - 1).padStart(3, '0')}` }
+        : {}),
     }));
-    const deep = indexThreads(chain);
-    expect(deep.rootOf.get(`n${MAX_THREAD_DEPTH + 4}`)).toBe('n4');
+    expect(indexThreads(chain).rootOf.get('n099')).toBe('n000');
   });
 
   it('counts what a reader sees, removed ones left out', () => {

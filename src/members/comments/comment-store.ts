@@ -7,11 +7,7 @@ import {
   type CommentDocument,
 } from '../../social/schemas/comment.schema';
 import type { CommentRow } from './comment-serializers';
-import {
-  MAX_THREAD_DEPTH,
-  PAGE_THREAD,
-  visibleCounts,
-} from './comment-threads';
+import { indexThreads, PAGE_THREAD, visibleCounts } from './comment-threads';
 import type { CommentSkeleton } from './comment-threads';
 import { describeFailure, THREAD_PAGE_SIZE } from './comment-limits';
 
@@ -63,15 +59,29 @@ function threadFilter(tabId: string | undefined) {
   return tabId === undefined ? { $exists: false } : tabId;
 }
 
+/** The light fields of a page's imported comments, for the thread index. */
+async function importedIndex(
+  commentModel: Model<CommentDocument>,
+  profileId: Types.ObjectId,
+) {
+  // Index {profileId, source}: the import is a fixed, finite set per page.
+  const rows = (await commentModel
+    .find({ profileId, source: 'migrated' })
+    .sort({ createdAt: 1, _id: 1 })
+    .select({ commentId: 1, tabId: 1, parentCommentId: 1, removedAt: 1 })
+    .lean()
+    .exec()) as CommentSkeleton[];
+  return { rows, index: indexThreads(rows) };
+}
+
 /**
  * Visible comments per thread of a page, counted in the database, with no
  * cap on how many there are (Chunk 9, review item 2).
  *
  * - Site comments: grouped by their own `tabId`, which is always their
  *   top-level comment's (a reply is written into its root's thread).
- * - Imported comments: an imported reply can carry a different anchor from
- *   its parent, so they are placed by their root. They are read in full: the
- *   Apple Pages import is a fixed, finite set per page.
+ * - Imported comments: placed by their root (`indexThreads`), exactly as the
+ *   thread lists them, so a count and its thread always agree.
  */
 export async function commentCounts(
   commentModel: Model<CommentDocument>,
@@ -91,13 +101,9 @@ export async function commentCounts(
         { $group: { _id: '$tabId', n: { $sum: 1 } } },
       ])
       .exec(),
-    commentModel
-      .find({ profileId, source: 'migrated' })
-      .select({ commentId: 1, tabId: 1, parentCommentId: 1, removedAt: 1 })
-      .lean()
-      .exec() as Promise<CommentSkeleton[]>,
+    importedIndex(commentModel, profileId),
   ]);
-  const counts = visibleCounts(imported);
+  const counts = visibleCounts(imported.rows);
   for (const row of native) {
     const thread = row._id ?? PAGE_THREAD;
     counts.set(thread, (counts.get(thread) ?? 0) + row.n);
@@ -105,10 +111,23 @@ export async function commentCounts(
   return counts;
 }
 
+/** Oldest first, ties by database id: the order every list uses. */
+function byTime(a: StoredComment, b: StoredComment) {
+  return (
+    a.createdAt.getTime() - b.createdAt.getTime() ||
+    a._id.toHexString().localeCompare(b._id.toHexString())
+  );
+}
+
 /**
  * The comment rows and their low-level rules (Chunk 9): listing by index,
- * walking a reply to its top-level comment, and the turns that keep an edit
- * and a removal of one comment from crossing.
+ * placing a reply under its top-level comment, and the turns that keep an
+ * edit and a removal of one comment from crossing.
+ *
+ * Site comments are one level deep by construction (a reply is written
+ * under its top-level comment). Imported comments are placed by the thread
+ * index (`indexThreads`): an imported reply whose parent is missing is a
+ * top-level comment, and an imported reply to a reply sits under the root.
  */
 @Injectable()
 export class CommentStore {
@@ -129,33 +148,44 @@ export class CommentStore {
     return row ?? undefined;
   }
 
+  /** Listed rows by id, oldest first. */
+  private async many(commentIds: string[]): Promise<StoredComment[]> {
+    if (commentIds.length === 0) return [];
+    const rows = (await this.commentModel
+      .find({ commentId: { $in: commentIds }, ...LISTED })
+      .select(COMMENT_FIELDS)
+      .lean()
+      .exec()) as unknown as StoredComment[];
+    return rows.sort(byTime);
+  }
+
   /**
-   * The top-level comment at the end of a comment's parent chain, on this
-   * page. A missing parent ends the chain there, as does a loop.
+   * The top-level comment a comment is shown under, on this page: itself, its
+   * site parent, or the root of its imported chain.
    *
-   * @returns undefined when the comment itself is not on this page
+   * @returns undefined when the comment is not listed on this page
    */
   async rootOf(
     profileId: Types.ObjectId,
     commentId: string,
   ): Promise<StoredComment | undefined> {
-    let current = await this.one(commentId);
-    if (!current || !current.profileId.equals(profileId)) return undefined;
-    const seen = new Set([current.commentId]);
-    for (let depth = 0; depth < MAX_THREAD_DEPTH; depth++) {
-      const parentId = current.parentCommentId;
-      if (parentId === undefined || seen.has(parentId)) break;
-      const parent = await this.one(parentId);
-      if (!parent || !parent.profileId.equals(profileId)) break;
-      seen.add(parent.commentId);
-      current = parent;
+    const row = await this.one(commentId);
+    if (!row || !row.profileId.equals(profileId)) return undefined;
+    if (row.source === 'migrated') {
+      const { index } = await importedIndex(this.commentModel, profileId);
+      const rootId = index.rootOf.get(commentId) as string;
+      return rootId === commentId ? row : this.one(rootId);
     }
-    return current;
+    // A site reply is written under its top-level comment: one step.
+    if (row.parentCommentId === undefined) return row;
+    const parent = await this.one(row.parentCommentId);
+    return parent?.profileId.equals(profileId) ? parent : row;
   }
 
   /**
    * One page of a thread's top-level comments, oldest first, read by index
-   * ((profileId, tabId, createdAt, _id)) after the `after` comment.
+   * ((profileId, tabId, createdAt, _id)) after the `after` comment. Imported
+   * comments whose parent is missing are top-level too.
    *
    * @returns undefined when `after` is not a top-level comment of this thread
    */
@@ -164,15 +194,26 @@ export class CommentStore {
     tabId: string | undefined,
     after?: string,
   ): Promise<{ roots: StoredComment[]; more: boolean } | undefined> {
+    const { rows, index } = await importedIndex(this.commentModel, profileId);
+    const importedRoots = rows
+      .filter(
+        (row) =>
+          row.parentCommentId !== undefined &&
+          index.rootOf.get(row.commentId) === row.commentId,
+      )
+      .map((row) => row.commentId);
     const where = {
       profileId,
       tabId: threadFilter(tabId),
-      parentCommentId: { $exists: false },
+      $or: [
+        { parentCommentId: { $exists: false } },
+        { commentId: { $in: importedRoots } },
+      ],
     };
     let cursor = {};
     if (after !== undefined) {
       const from = (await this.commentModel
-        .findOne({ ...where, commentId: after, ...LISTED })
+        .findOne({ $and: [where, LISTED, { commentId: after }] })
         .select({ createdAt: 1, _id: 1 })
         .lean()
         .exec()) as { createdAt: Date; _id: Types.ObjectId } | null;
@@ -184,7 +225,7 @@ export class CommentStore {
         ],
       };
     }
-    const rows = (await this.commentModel
+    const found = (await this.commentModel
       .find({ $and: [where, LISTED, cursor] })
       .sort({ createdAt: 1, _id: 1 })
       .limit(THREAD_PAGE_SIZE + 1)
@@ -192,15 +233,17 @@ export class CommentStore {
       .lean()
       .exec()) as unknown as StoredComment[];
     return {
-      roots: rows.slice(0, THREAD_PAGE_SIZE),
-      more: rows.length > THREAD_PAGE_SIZE,
+      roots: found.slice(0, THREAD_PAGE_SIZE),
+      more: found.length > THREAD_PAGE_SIZE,
     };
   }
 
   /**
-   * Every reply under these top-level comments, oldest first per root, found
-   * by `parentCommentId`, level by level: a site reply is one level deep, an
-   * imported reply to a reply sits one level further.
+   * Every reply under these top-level comments, oldest first per root.
+   *
+   * - Site replies by `parentCommentId`, through its index: the query names
+   *   `$type: 'string'` so the partial index on that field can serve it.
+   * - Imported replies from the thread index, by id.
    */
   async replies(
     profileId: Types.ObjectId,
@@ -209,43 +252,49 @@ export class CommentStore {
     const byRoot = new Map<string, StoredComment[]>(
       rootIds.map((id) => [id, []]),
     );
-    const rootOf = new Map(rootIds.map((id) => [id, id]));
-    let frontier = rootIds;
-    for (
-      let depth = 0;
-      depth < MAX_THREAD_DEPTH && frontier.length > 0;
-      depth++
-    ) {
-      const children = (await this.commentModel
-        .find({ profileId, parentCommentId: { $in: frontier }, ...LISTED })
-        .sort({ createdAt: 1, _id: 1 })
+    if (rootIds.length === 0) return byRoot;
+    const { index } = await importedIndex(this.commentModel, profileId);
+    const importedIds = rootIds.flatMap((id) => index.repliesOf.get(id) ?? []);
+    const [native, imported] = await Promise.all([
+      this.commentModel
+        .find({
+          parentCommentId: { $type: 'string', $in: rootIds },
+          profileId,
+          source: 'native',
+          ...LISTED,
+        })
         .select(COMMENT_FIELDS)
         .lean()
-        .exec()) as unknown as StoredComment[];
-      const next: string[] = [];
-      for (const child of children) {
-        const root = rootOf.get(String(child.parentCommentId)) as string;
-        rootOf.set(child.commentId, root);
-        (byRoot.get(root) as StoredComment[]).push(child);
-        next.push(child.commentId);
-      }
-      frontier = next;
-    }
-    for (const list of byRoot.values()) {
-      list.sort(
-        (a, b) =>
-          a.createdAt.getTime() - b.createdAt.getTime() ||
-          a._id.toHexString().localeCompare(b._id.toHexString()),
+        .exec() as unknown as Promise<StoredComment[]>,
+      this.many(importedIds),
+    ]);
+    for (const reply of native) {
+      (byRoot.get(String(reply.parentCommentId)) as StoredComment[]).push(
+        reply,
       );
     }
+    for (const reply of imported) {
+      const root = index.rootOf.get(reply.commentId) as string;
+      (byRoot.get(root) as StoredComment[]).push(reply);
+    }
+    for (const list of byRoot.values()) list.sort(byTime);
     return byRoot;
   }
 
   /**
    * Writes a new site comment: its row first (unlisted), then its first
-   * version (`writeVersion`), then the row is confirmed. If the version
-   * cannot be written the row is deleted again, so no version ever exists
-   * without its comment and no comment is listed without its version.
+   * version (`writeVersion`), then the row is confirmed.
+   *
+   * It succeeds only with its row listed and confirmed (review round 2,
+   * item 4): if a repair deleted the row while this write was stalled, the
+   * row is written again, confirmed, from the same fields. If the version
+   * cannot be written the row is deleted again. A version can be left without
+   * its row only by a crash or a failure after it was written; such a version
+   * is never shown (every read starts from a row) and `orphanVersions` finds
+   * it.
+   *
+   * @throws when the row cannot be confirmed: the comment is not reported
+   *   as posted
    */
   async createConfirmed(
     fields: Record<string, unknown> & { commentId: string },
@@ -261,31 +310,36 @@ export class CommentStore {
         .exec();
       throw error;
     }
-    await this.confirm(fields.commentId, seq);
-    return seq;
-  }
-
-  private async confirm(commentId: string, seq: number) {
-    try {
-      await this.commentModel
-        .updateOne(
-          { commentId, bodySeq: { $exists: false } },
-          { $set: { bodySeq: seq } },
-        )
-        .exec();
-    } catch (error) {
-      // `repairUnconfirmed` confirms it on this author's next comment.
-      this.logger.warn(
-        `Comment ${commentId} has its version but is not confirmed yet: ${describeFailure(error)}`,
-      );
+    const confirmed = await this.commentModel
+      .updateOne(
+        { commentId: fields.commentId, bodySeq: { $exists: false } },
+        { $set: { bodySeq: seq } },
+      )
+      .exec();
+    if (confirmed.modifiedCount === 1) return seq;
+    const now = (await this.commentModel
+      .findOne({ commentId: fields.commentId })
+      .select({ bodySeq: 1 })
+      .lean()
+      .exec()) as { bodySeq?: number } | null;
+    if (!now) {
+      // A repair took the row while this write stalled: put it back, done.
+      await this.commentModel.create({ ...fields, bodySeq: seq });
+      return seq;
     }
+    if (now.bodySeq === undefined) {
+      throw new Error(`Comment ${fields.commentId} could not be confirmed.`);
+    }
+    return seq;
   }
 
   /**
    * Finishes or undoes an author's site comments whose writing stopped
    * part-way more than {@link COMMENT_TURN_STALE_MS} ago: one whose version
    * was written is confirmed (it becomes listed, as its author meant), one
-   * without a version is deleted (nothing of it was ever recorded).
+   * without a version is deleted (nothing of it was ever recorded). A write
+   * still in progress whose row is deleted here puts it back itself
+   * (`createConfirmed`).
    *
    * @param versionHead - the newest version of a comment, if any
    * @returns how many rows were confirmed and deleted
@@ -313,11 +367,36 @@ export class CommentStore {
           .exec();
         outcome.deleted++;
       } else {
-        await this.confirm(commentId, seq);
+        await this.commentModel
+          .updateOne(
+            { commentId, bodySeq: { $exists: false } },
+            { $set: { bodySeq: seq } },
+          )
+          .exec();
         outcome.confirmed++;
       }
     }
     return outcome;
+  }
+
+  /**
+   * Comment versions with no comment row: never shown (every read starts
+   * from a row), listed here so they can be found and explained, e.g. by
+   * the daily anchor (Chunk 16).
+   *
+   * @param commentIds - the comment ids the versions name
+   * @returns those with no row at all
+   */
+  async withoutRows(commentIds: readonly string[]): Promise<string[]> {
+    const wanted = [...new Set(commentIds)];
+    if (wanted.length === 0) return [];
+    const rows = (await this.commentModel
+      .find({ commentId: { $in: wanted } })
+      .select({ commentId: 1 })
+      .lean()
+      .exec()) as Array<{ commentId: string }>;
+    const found = new Set(rows.map((row) => row.commentId));
+    return wanted.filter((id) => !found.has(id));
   }
 
   /**

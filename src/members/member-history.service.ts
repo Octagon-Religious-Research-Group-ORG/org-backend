@@ -19,6 +19,10 @@ import {
   type VersionSource,
   versionSource,
 } from './editable-fields';
+import {
+  Comment,
+  type CommentDocument,
+} from '../social/schemas/comment.schema';
 import { CommentAuthorsService } from './comments/comment-authors.service';
 import type { CommentAuthorView } from './comments/comment-serializers';
 import type { TabHistoryField } from './members.dto';
@@ -57,7 +61,8 @@ export interface HistoryEntry {
   fromSuggestion?: { commentId: string; author: CommentAuthorView };
 }
 
-type AuthorLookup = (userId: string) => CommentAuthorView;
+/** The author of the suggestion a version came from. */
+type AuthorLookup = (row: VersionRow) => CommentAuthorView;
 
 export interface HistoryPage {
   entries: HistoryEntry[];
@@ -116,7 +121,7 @@ function entryOf(
       ? {
           fromSuggestion: {
             commentId: row.suggestionId,
-            author: authorOf(row.suggestedBy ?? ''),
+            author: authorOf(row),
           },
         }
       : {}),
@@ -144,6 +149,8 @@ export class MemberHistoryService {
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
     private readonly authors: CommentAuthorsService,
+    @InjectModel(Comment.name)
+    private readonly commentModel: Model<CommentDocument>,
   ) {}
 
   /** @throws NotFoundException unless this viewer can read the whole page */
@@ -254,11 +261,31 @@ export class MemberHistoryService {
     rows: VersionRow[],
     viewer: Viewer,
   ): Promise<AuthorLookup> {
-    const ids = rows.flatMap((row) =>
-      row.suggestionId && row.suggestedBy ? [row.suggestedBy] : [],
+    const suggested = rows.filter((row) => row.suggestionId);
+    const lookup = await this.authors.resolve(
+      suggested.flatMap((row) => (row.suggestedBy ? [row.suggestedBy] : [])),
+      viewer,
     );
-    const lookup = await this.authors.resolve(ids, viewer);
-    return (userId) => lookup(userId);
+    // Written as an admin: named as the thread names it (review round 2,
+    // item 7), from the suggestion's own row.
+    const asAdmin = new Set(
+      suggested.length === 0
+        ? []
+        : (
+            (await this.commentModel
+              .find({
+                commentId: {
+                  $in: suggested.map((row) => String(row.suggestionId)),
+                },
+                writtenAsAdmin: true,
+              })
+              .select({ commentId: 1 })
+              .lean()
+              .exec()) as Array<{ commentId: string }>
+          ).map((comment) => comment.commentId),
+    );
+    return (row) =>
+      lookup(row.suggestedBy ?? '', asAdmin.has(String(row.suggestionId)));
   }
 
   private async versions(

@@ -154,6 +154,24 @@ export class CommentsService {
     };
   }
 
+  /**
+   * One comment as this reader sees it, for a write's answer (review round
+   * 2, item 3): the website shows it at once, in place or at the thread's
+   * end, without reading the thread again.
+   *
+   * @param viewerIsOwner - the reader owns the page (decides suggestions)
+   */
+  async viewOne(
+    commentId: string,
+    viewer: Viewer,
+    viewerIsOwner = false,
+  ): Promise<CommentView | undefined> {
+    const row = await this.store.one(commentId);
+    if (!row) return undefined;
+    const views = await this.views([row], viewer, row.profileId, viewerIsOwner);
+    return views.get(commentId);
+  }
+
   /** Builds the reader's view of each row, keyed by comment id. */
   private async views(
     rows: StoredComment[],

@@ -1,4 +1,14 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import {
+  MAX_REMEMBERED_READ_ANSWERS,
+  ROLE_CACHE_MAX_AGE_MS,
+} from '../../auth/admin-access.service';
 import type { AuthenticatedRequest } from '../../auth/auth.types';
 import { ClerkUserInfoService } from '../../auth/clerk-user-info.service';
 import { MembersService } from '../members.service';
@@ -9,6 +19,8 @@ export const NEEDS_APPROVED_PAGE =
   'Comments and suggestions are open to members whose page has been approved.';
 export const NEEDS_VERIFIED_EMAIL =
   'Please confirm your email address before commenting.';
+export const CANNOT_CHECK_ACCOUNT =
+  "We can't check your account right now. Please try again in a moment.";
 
 /** A viewer allowed to write comments, with their id for sure. */
 export interface CommentWriter extends Viewer {
@@ -21,7 +33,11 @@ export interface CommentWriter extends Viewer {
  * Why a reader may not write, for the website to say so instead of showing
  * a form that would be refused.
  */
-export type WriteBlock = 'sign-in' | 'needs-approved-page' | 'verify-email';
+export type WriteBlock =
+  | 'sign-in'
+  | 'needs-approved-page'
+  | 'verify-email'
+  | 'cannot-check';
 
 export interface WriteStatus {
   mayComment: boolean;
@@ -37,20 +53,50 @@ function isMember(viewer: Viewer) {
  * a verified email AND an approved member page (any kind, anonymous too), or
  * an admin. Guests, accounts with no page and accounts whose page is pending
  * may not. The page and the role come from the database and Clerk only.
+ *
+ * Whether an account's email is verified is remembered for
+ * {@link ROLE_CACHE_MAX_AGE_MS}, at most {@link MAX_REMEMBERED_READ_ANSWERS}
+ * accounts, like the admin role (review round 2, item 3): every thread read
+ * of a signed-in member would otherwise ask Clerk. A failed lookup is never
+ * remembered.
  */
 @Injectable()
 export class CommentWritersService {
   private readonly logger = new Logger(CommentWritersService.name);
+  private readonly verified = new Map<
+    string,
+    { verified: boolean; expires: number }
+  >();
 
   constructor(
     private readonly members: MembersService,
     private readonly clerk: ClerkUserInfoService,
   ) {}
 
+  /** @throws whatever the Clerk lookup throws; nothing is remembered then */
+  private async emailVerified(userId: string): Promise<boolean> {
+    const remembered = this.verified.get(userId);
+    if (remembered && Date.now() < remembered.expires) {
+      return remembered.verified;
+    }
+    const identity = await this.clerk.getIdentity(userId);
+    const verified = Boolean(identity.email) && identity.emailVerified;
+    this.verified.delete(userId);
+    if (this.verified.size >= MAX_REMEMBERED_READ_ANSWERS) {
+      const [oldest] = this.verified.keys();
+      this.verified.delete(oldest);
+    }
+    this.verified.set(userId, {
+      verified,
+      expires: Date.now() + ROLE_CACHE_MAX_AGE_MS,
+    });
+    return verified;
+  }
+
   /**
    * The same rule as {@link requireWriter}, as an answer for a page read.
-   * If Clerk cannot be asked, a member is offered the form: the write itself
-   * checks again and says why it is refused.
+   * When Clerk cannot be asked, the reader is told so (`cannot-check`)
+   * instead of being shown a form the write would refuse.
    */
   async writeStatus(viewer: Viewer): Promise<WriteStatus> {
     if (viewer.userId === undefined) {
@@ -61,20 +107,20 @@ export class CommentWritersService {
       return { mayComment: false, block: 'needs-approved-page' };
     }
     try {
-      const identity = await this.clerk.getIdentity(viewer.userId);
-      if (!identity.email || !identity.emailVerified) {
-        return { mayComment: false, block: 'verify-email' };
-      }
+      return (await this.emailVerified(viewer.userId))
+        ? { mayComment: true }
+        : { mayComment: false, block: 'verify-email' };
     } catch (error) {
       this.logger.warn(
         `Could not read an email status: ${describeFailure(error)}`,
       );
+      return { mayComment: false, block: 'cannot-check' };
     }
-    return { mayComment: true };
   }
 
   /**
    * @throws ForbiddenException with the reason, for anyone else
+   * @throws ServiceUnavailableException when the account cannot be checked
    */
   async requireWriter(request: AuthenticatedRequest): Promise<CommentWriter> {
     const viewer = await this.members.resolveViewer(request);
@@ -85,10 +131,21 @@ export class CommentWritersService {
       return { ...viewer, userId, writesAsAdmin: !member };
     }
     if (!member) throw new ForbiddenException(NEEDS_APPROVED_PAGE);
-    const identity = await this.clerk.getIdentity(userId);
-    if (!identity.email || !identity.emailVerified) {
-      throw new ForbiddenException(NEEDS_VERIFIED_EMAIL);
+    let verified: boolean;
+    try {
+      verified = await this.emailVerified(userId);
+    } catch (error) {
+      // A rejected account (Clerk's 404) stays what it is; anything else is
+      // "try again", never a server error.
+      if (error instanceof HttpException && error.getStatus() === 401) {
+        throw error;
+      }
+      this.logger.warn(
+        `Could not check a writer's email: ${describeFailure(error)}`,
+      );
+      throw new ServiceUnavailableException(CANNOT_CHECK_ACCOUNT);
     }
+    if (!verified) throw new ForbiddenException(NEEDS_VERIFIED_EMAIL);
     return { ...viewer, userId, writesAsAdmin: false };
   }
 }

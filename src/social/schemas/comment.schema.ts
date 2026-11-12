@@ -209,10 +209,14 @@ CommentSchema.pre('validate', function () {
 });
 
 CommentSchema.index({ commentId: 1 }, { unique: true });
-CommentSchema.index({ profileId: 1, tabId: 1, createdAt: 1 });
 // A thread page: top-level comments after a (createdAt, _id) cursor (Chunk 9).
+// It replaces { profileId, tabId, createdAt }, its prefix; a database that
+// already has that one reports it as not declared (db:indexes never drops).
 CommentSchema.index({ profileId: 1, tabId: 1, createdAt: 1, _id: 1 });
+// Replies by parent. Only queries that name { $type: 'string' } can use it.
 CommentSchema.index(
   { parentCommentId: 1 },
   { partialFilterExpression: { parentCommentId: { $type: 'string' } } },
 );
+// A page's imported comments, read whole to place them in threads.
+CommentSchema.index({ profileId: 1, source: 1 });

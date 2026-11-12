@@ -341,6 +341,7 @@ export function harness(
     blocks as never,
     versions as never,
     authors,
+    comments as never,
   );
   return {
     profiles,

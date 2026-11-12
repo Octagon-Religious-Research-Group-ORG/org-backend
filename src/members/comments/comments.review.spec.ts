@@ -1,6 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await -- spies wrapping the in-memory store */
 // Chunk 9 independent review: one test (or more) per item it raised.
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Types } from 'mongoose';
 import { MAX_BLOCK_TEXT_LENGTH } from '../../social/schemas/block-version.schema';
 import { MAX_COMMENT_VERSION_TEXT } from '../../social/schemas/comment-version.schema';
@@ -8,6 +13,11 @@ import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
 import { REMOVAL_BUSY } from '../member-page-editor.service';
 import { THREAD_PAGE_SIZE } from './comment-limits';
 import { COMMENT_TURN_STALE_MS } from './comment-store';
+import { CANNOT_CHECK_ACCOUNT } from './comment-writers';
+import {
+  MAX_REMEMBERED_READ_ANSWERS,
+  ROLE_CACHE_MAX_AGE_MS,
+} from '../../auth/admin-access.service';
 import {
   COMMENT_BUSY,
   COMMENT_NOT_FOUND,
@@ -653,13 +663,24 @@ describe('review item 6: an edit never lands after a removal; no orphan versions
     ).rejects.toThrow(new NotFoundException(COMMENT_NOT_FOUND));
   });
 
-  it('never fails a new comment because a repair failed, and logs a failed confirm', async () => {
+  it('never fails a new comment because a repair failed', async () => {
     const h = harness();
     const writer = await h.writer(U.named);
     jest
       .spyOn(h.store, 'repairUnconfirmed')
       .mockRejectedValueOnce(new Error('repair down'));
+    const { commentId } = await h.commentsService.create(writer, {
+      slug: 'open-page',
+      body: 'Still posted.',
+    });
+    expect(row(h, commentId)).toMatchObject({ bodySeq: 1 });
+  });
+
+  it('never reports a comment as posted unless its row is confirmed (round 2, item 4)', async () => {
+    const h = harness();
+    const writer = await h.writer(U.named);
     const real = h.comments.updateOne;
+    // The confirm fails outright: the post fails, nothing is listed.
     jest
       .spyOn(h.comments, 'updateOne')
       .mockImplementationOnce((filter, update) =>
@@ -667,11 +688,95 @@ describe('review item 6: an edit never lands after a removal; no orphan versions
           ? { exec: () => Promise.reject(new Error('confirm down')) }
           : real(filter, update),
       );
-    const { commentId } = await h.commentsService.create(writer, {
-      slug: 'open-page',
-      body: 'Still posted.',
+    await expect(
+      h.commentsService.create(writer, { slug: 'open-page', body: 'A.' }),
+    ).rejects.toThrow('confirm down');
+    // The confirm matches nothing while the row is still unconfirmed.
+    jest.spyOn(h.comments, 'updateOne').mockImplementationOnce(() => ({
+      exec: () => Promise.resolve({ matchedCount: 0, modifiedCount: 0 }),
+    }));
+    await expect(
+      h.commentsService.create(writer, { slug: 'open-page', body: 'B.' }),
+    ).rejects.toThrow('could not be confirmed');
+    const page = await h.thread('open-page', await h.viewer(), undefined);
+    expect(page.comments).toEqual([]);
+  });
+
+  it('answers success when another call confirmed the row first', async () => {
+    const h = harness();
+    const result = await h.store.createConfirmed(
+      {
+        commentId: 'cmt_twice',
+        profileId: ids.open,
+        authorUserId: U.named,
+        body: 'Twice.',
+        source: 'native',
+        kind: 'comment',
+      },
+      async () => {
+        // A repair confirmed it meanwhile.
+        row(h, 'cmt_twice').bodySeq = 1;
+        return Promise.resolve({ seq: 1 });
+      },
+    );
+    expect(result).toBe(1);
+  });
+
+  it('puts back a row a repair deleted while its write was stalled (extra-v2 X5)', async () => {
+    const h = harness();
+    const writer = await h.writer(U.named);
+    const versions = h.commentsService['versions'];
+    const result = await h.store.createConfirmed(
+      {
+        commentId: 'cmt_inflight',
+        profileId: ids.open,
+        authorUserId: U.named,
+        body: 'In flight.',
+        source: 'native',
+        kind: 'comment',
+      },
+      async () => {
+        row(h, 'cmt_inflight').createdAt = new Date(
+          Date.now() - COMMENT_TURN_STALE_MS - 1000,
+        );
+        // The author posts elsewhere: the repair deletes the stalled row.
+        await h.commentsService.create(writer, {
+          slug: 'open-page',
+          body: 'Second.',
+        });
+        expect(
+          h.comments.docs.some((d) => d.commentId === 'cmt_inflight'),
+        ).toBe(false);
+        return versions.append({
+          commentId: 'cmt_inflight',
+          text: 'In flight.',
+          authorUserId: U.named,
+          expectedSeq: 0,
+        });
+      },
+    );
+    expect(result).toBe(1);
+    expect(row(h, 'cmt_inflight')).toMatchObject({ bodySeq: 1 });
+    const page = await h.thread('open-page', await h.viewer(), undefined);
+    expect(page.comments.map((c) => c.commentId)).toContain('cmt_inflight');
+  });
+
+  it('a version without a row is never shown, and is found', async () => {
+    const h = harness();
+    await h.commentsService['versions'].append({
+      commentId: 'cmt_orphan',
+      text: 'Orphan text.',
+      authorUserId: U.named,
+      expectedSeq: 0,
     });
-    expect(row(h, commentId)).not.toHaveProperty('bodySeq');
+    await expect(h.store.withoutRows(['cmt_orphan'])).resolves.toEqual([
+      'cmt_orphan',
+    ]);
+    const page = await h.thread('open-page', await h.viewer(), undefined);
+    expect(JSON.stringify(page)).not.toContain('Orphan text');
+    await expect(
+      h.commentsService.history('open-page', 'cmt_orphan', await h.viewer()),
+    ).rejects.toThrow(NotFoundException);
   });
 });
 
@@ -746,13 +851,50 @@ describe('review item 9: the form is offered only to who may write', () => {
       expect(page).not.toHaveProperty('viewerWriteBlock');
   });
 
-  it('offers the form when Clerk cannot be asked: the write checks again', async () => {
+  it('says so, on the read and on the write, when Clerk cannot be asked (round 2, item 6)', async () => {
     const h = harness();
     h.clerk.getIdentity.mockRejectedValueOnce(new Error('Clerk down'));
     const page = await h.thread('open-page', await h.viewer(U.named), 'tab_a');
-    expect(page.viewerMayComment).toBe(true);
+    expect(page).toMatchObject({
+      viewerMayComment: false,
+      viewerWriteBlock: 'cannot-check',
+    });
     h.clerk.getIdentity.mockRejectedValueOnce('plain');
-    const again = await h.thread('open-page', await h.viewer(U.named), 'tab_a');
-    expect(again.viewerMayComment).toBe(true);
+    await expect(h.writer(U.named)).rejects.toThrow(
+      new ServiceUnavailableException(CANNOT_CHECK_ACCOUNT),
+    );
+    // Clerk's "no such account" stays a 401.
+    h.clerk.getIdentity.mockRejectedValueOnce(
+      new UnauthorizedException('The member profile was rejected.'),
+    );
+    await expect(h.writer(U.named)).rejects.toThrow(UnauthorizedException);
+    // A failed lookup is not remembered: the next one asks again.
+    await expect(h.writer(U.named)).resolves.toMatchObject({
+      userId: U.named,
+    });
+  });
+
+  it('remembers an email status for a minute, for at most 2,000 accounts (round 2, item 3)', async () => {
+    const h = harness();
+    await h.thread('open-page', await h.viewer(U.named), 'tab_a');
+    await h.thread('open-page', await h.viewer(U.named), 'tab_a');
+    await h.writer(U.named);
+    expect(h.clerk.getIdentity).toHaveBeenCalledTimes(1);
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now + ROLE_CACHE_MAX_AGE_MS + 1);
+    await h.writer(U.named);
+    expect(h.clerk.getIdentity).toHaveBeenCalledTimes(2);
+    jest.restoreAllMocks();
+    const writers = h.writers as unknown as {
+      verified: Map<string, unknown>;
+    };
+    writers.verified.clear();
+    for (let i = 0; i < MAX_REMEMBERED_READ_ANSWERS; i++) {
+      writers.verified.set(`user_x${i}`, { verified: true, expires: Infinity });
+    }
+    await h.writer(U.anon);
+    expect(writers.verified.size).toBe(MAX_REMEMBERED_READ_ANSWERS);
+    expect(writers.verified.has('user_x0')).toBe(false);
+    expect(writers.verified.has(U.anon)).toBe(true);
   });
 });

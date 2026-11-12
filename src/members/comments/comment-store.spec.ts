@@ -1,8 +1,7 @@
 import { Types } from 'mongoose';
 import { fakeModel } from '../../test-support/fake-model.mocks-spec';
 import { endTextTurn } from '../tab-text-turns';
-import { CommentStore } from './comment-store';
-import { MAX_THREAD_DEPTH } from './comment-threads';
+import { commentCounts, CommentStore } from './comment-store';
 
 const page = new Types.ObjectId();
 const other = new Types.ObjectId();
@@ -24,33 +23,60 @@ function store(rows: Record<string, unknown>[]) {
 }
 
 describe('CommentStore', () => {
-  it('walks to the top-level comment, stopping at a missing parent, another page, or a loop', async () => {
+  const imported = (commentId: string, extra: Record<string, unknown> = {}) =>
+    row(commentId, { source: 'migrated', bodySeq: undefined, ...extra });
+
+  it('places an imported comment by its chain: a missing parent or a loop ends it the same way every time', async () => {
     const { store: s } = store([
-      row('a'),
-      row('b', { parentCommentId: 'a' }),
-      row('c', { parentCommentId: 'b' }),
-      row('orphan', { parentCommentId: 'gone' }),
-      row('cross', { parentCommentId: 'elsewhere' }),
-      row('elsewhere', { profileId: other }),
-      row('x', { parentCommentId: 'y' }),
-      row('y', { parentCommentId: 'x' }),
+      imported('a'),
+      imported('b', { parentCommentId: 'a' }),
+      imported('c', { parentCommentId: 'b' }),
+      imported('orphan', { parentCommentId: 'gone' }),
+      imported('x', { parentCommentId: 'y' }),
+      imported('y', { parentCommentId: 'x' }),
+      imported('elsewhere', { profileId: other }),
     ]);
     expect((await s.rootOf(page, 'c'))?.commentId).toBe('a');
     expect((await s.rootOf(page, 'orphan'))?.commentId).toBe('orphan');
-    expect((await s.rootOf(page, 'cross'))?.commentId).toBe('cross');
-    expect((await s.rootOf(page, 'x'))?.commentId).toBe('y');
+    expect((await s.rootOf(page, 'x'))?.commentId).toBe('x');
+    expect((await s.rootOf(page, 'y'))?.commentId).toBe('x');
     expect(await s.rootOf(page, 'elsewhere')).toBeUndefined();
     expect(await s.rootOf(page, 'none')).toBeUndefined();
   });
 
-  it('stops after MAX_THREAD_DEPTH parents', async () => {
-    const chain = Array.from({ length: MAX_THREAD_DEPTH + 3 }, (_, i) =>
-      row(`n${i}`, i > 0 ? { parentCommentId: `n${i - 1}` } : {}),
-    );
-    const { store: s } = store(chain);
-    expect((await s.rootOf(page, `n${MAX_THREAD_DEPTH + 2}`))?.commentId).toBe(
-      'n2',
-    );
+  it('places a site reply under its parent, or alone when the parent is not on the page', async () => {
+    const { store: s } = store([
+      row('root'),
+      row('reply', { parentCommentId: 'root' }),
+      row('cross', { parentCommentId: 'elsewhere' }),
+      row('elsewhere', { profileId: other }),
+      row('lost', { parentCommentId: 'gone' }),
+    ]);
+    expect((await s.rootOf(page, 'reply'))?.commentId).toBe('root');
+    expect((await s.rootOf(page, 'cross'))?.commentId).toBe('cross');
+    expect((await s.rootOf(page, 'lost'))?.commentId).toBe('lost');
+  });
+
+  it('lists an orphaned imported reply as a top-level comment, and counts it there', async () => {
+    const { store: s, model } = store([
+      imported('a', { tabId: 't' }),
+      imported('b', { tabId: 't', parentCommentId: 'a' }),
+      imported('orphan', { tabId: 't', parentCommentId: 'gone' }),
+    ]);
+    const page1 = await s.topLevel(page, 't');
+    expect(page1?.roots.map((r) => r.commentId)).toEqual(['a', 'orphan']);
+    const replies = await s.replies(page, ['a', 'orphan']);
+    expect(replies.get('a')?.map((r) => r.commentId)).toEqual(['b']);
+    expect(replies.get('orphan')).toEqual([]);
+    const counts = await commentCounts(model as never, page);
+    expect(counts.get('t')).toBe(3);
+    await expect(s.replies(page, [])).resolves.toEqual(new Map());
+  });
+
+  it('lists comment ids that have versions but no row', async () => {
+    const { store: s } = store([row('a')]);
+    await expect(s.withoutRows(['a', 'b', 'b'])).resolves.toEqual(['b']);
+    await expect(s.withoutRows([])).resolves.toEqual([]);
   });
 
   it('orders replies of one moment by their database id', async () => {

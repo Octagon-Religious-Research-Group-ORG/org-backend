@@ -178,6 +178,7 @@ function setup(
     tab?: unknown;
     blocks?: unknown[];
     versions?: Row[];
+    adminSuggestions?: Array<{ commentId: string }>;
   } = {},
 ) {
   const profileModel = {
@@ -218,6 +219,15 @@ function setup(
     blockModel as never,
     store.model as never,
     authors as never,
+    {
+      find: jest.fn(() => ({
+        select: () => ({
+          lean: () => ({
+            exec: () => Promise.resolve(options.adminSuggestions ?? []),
+          }),
+        }),
+      })),
+    } as never,
   );
   return {
     service,
