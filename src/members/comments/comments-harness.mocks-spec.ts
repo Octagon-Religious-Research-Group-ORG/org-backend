@@ -16,6 +16,7 @@ import { MembersService } from '../members.service';
 import { CommentAuthorsService } from './comment-authors.service';
 import { CommentWritersService } from './comment-writers';
 import { CommentsService } from './comments.service';
+import { CommentStore } from './comment-store';
 import { SuggestionsService } from './suggestions.service';
 
 export const ids = {
@@ -240,6 +241,14 @@ export interface Harness {
   writer: (
     userId: string,
   ) => ReturnType<CommentWritersService['requireWriter']>;
+  store: CommentStore;
+  /** A thread as the controller reads it, with the viewer's write status. */
+  thread: (
+    slug: string,
+    viewer: Awaited<ReturnType<MembersService['resolveViewer']>>,
+    tabId?: string,
+    after?: string,
+  ) => ReturnType<CommentsService['thread']>;
 }
 
 export function harness(
@@ -306,9 +315,10 @@ export function harness(
     commentVersions as never,
   );
   const authors = new CommentAuthorsService(profiles as never);
+  const store = new CommentStore(comments as never);
   const commentsService = new CommentsService(
-    comments as never,
     tabs as never,
+    store,
     members,
     editor,
     commentVersionService,
@@ -319,6 +329,7 @@ export function harness(
     profiles as never,
     blocks as never,
     versions as never,
+    store,
     commentsService,
     editor,
     commentVersionService,
@@ -345,7 +356,16 @@ export function harness(
     suggestions,
     writers,
     clerk,
+    store,
     viewer: (userId) => members.resolveViewer(request(userId)),
+    thread: async (slug, viewer, tabId, after) =>
+      commentsService.thread(
+        slug,
+        viewer,
+        tabId,
+        after,
+        await writers.writeStatus(viewer),
+      ),
     writer: (userId) => writers.requireWriter(request(userId)),
   };
 }

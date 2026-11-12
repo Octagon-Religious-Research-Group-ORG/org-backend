@@ -18,7 +18,7 @@ import {
   REMOVED_COMMENT,
   REPLY_TO_REMOVED,
 } from './comments.service';
-import { harness, ids, U } from './comments-harness.mocks-spec';
+import { harness, U } from './comments-harness.mocks-spec';
 
 describe('CommentsService', () => {
   describe('who may write (CommentWritersService)', () => {
@@ -71,11 +71,7 @@ describe('CommentsService', () => {
           { $set: { removedAt: new Date(), mergedInto: 'blk_i1' } },
         )
         .exec();
-      const page = await h.commentsService.thread(
-        'imported-page',
-        await h.viewer(),
-        'tab_i',
-      );
+      const page = await h.thread('imported-page', await h.viewer(), 'tab_i');
       expect(page).toEqual({
         comments: [
           {
@@ -100,6 +96,7 @@ describe('CommentsService', () => {
           },
         ],
         viewerMayComment: false,
+        viewerWriteBlock: 'sign-in',
         viewerMaySuggest: false,
       });
       expect(page.comments[0].replies?.[0]).not.toHaveProperty('importedDate');
@@ -107,7 +104,7 @@ describe('CommentsService', () => {
 
     it('lists comments with no tab in the page thread', async () => {
       const h = harness();
-      const page = await h.commentsService.thread(
+      const page = await h.thread(
         'IMPORTED-page',
         await h.viewer(U.named),
         undefined,
@@ -123,11 +120,7 @@ describe('CommentsService', () => {
       const h = harness();
       for (const userId of [undefined, U.owner, U.admin]) {
         await expect(
-          h.commentsService.thread(
-            'open-page',
-            await h.viewer(userId),
-            'tab_removed',
-          ),
+          h.thread('open-page', await h.viewer(userId), 'tab_removed'),
         ).rejects.toThrow(new NotFoundException(NO_SUCH_BELIEF));
       }
       expect(
@@ -142,9 +135,9 @@ describe('CommentsService', () => {
       ['anyone on a deleted page', 'gone-page', undefined, U.named],
     ])('answers 404 to %s', async (_name, slug, tab, userId) => {
       const h = harness();
-      await expect(
-        h.commentsService.thread(slug, await h.viewer(userId), tab),
-      ).rejects.toThrow(new NotFoundException(PROFILE_NOT_FOUND));
+      await expect(h.thread(slug, await h.viewer(userId), tab)).rejects.toThrow(
+        new NotFoundException(PROFILE_NOT_FOUND),
+      );
     });
 
     it.each([
@@ -160,7 +153,7 @@ describe('CommentsService', () => {
     ])('lets %s read', async (_name, slug, tab, userId) => {
       const h = harness();
       await expect(
-        h.commentsService.thread(slug, await h.viewer(userId), tab),
+        h.thread(slug, await h.viewer(userId), tab),
       ).resolves.toMatchObject({ comments: [] });
     });
 
@@ -185,15 +178,11 @@ describe('CommentsService', () => {
         body: 'Synthetic reply',
       });
       const viewer = await h.viewer();
-      const first = await h.commentsService.thread(
-        'open-page',
-        viewer,
-        'tab_a',
-      );
+      const first = await h.thread('open-page', viewer, 'tab_a');
       expect(first.comments).toHaveLength(THREAD_PAGE_SIZE);
       expect(first.comments[0].replies).toHaveLength(1);
       expect(first.nextAfter).toBe(made[THREAD_PAGE_SIZE - 1]);
-      const second = await h.commentsService.thread(
+      const second = await h.thread(
         'open-page',
         viewer,
         'tab_a',
@@ -204,59 +193,8 @@ describe('CommentsService', () => {
       );
       expect(second).not.toHaveProperty('nextAfter');
       await expect(
-        h.commentsService.thread('open-page', viewer, 'tab_a', 'cmt_nope'),
+        h.thread('open-page', viewer, 'tab_a', 'cmt_nope'),
       ).rejects.toThrow(BadRequestException);
-    });
-
-    it('skips a row that vanished between the two reads', async () => {
-      const h = harness();
-      const writer = await h.writer(U.named);
-      const { commentId } = await h.commentsService.create(writer, {
-        slug: 'open-page',
-        tabId: 'tab_a',
-        body: 'Will vanish',
-      });
-      await h.commentsService.create(writer, {
-        slug: 'open-page',
-        parentCommentId: commentId,
-        body: 'Its reply',
-      });
-      const skeleton = await h.members.commentSkeleton(ids.open);
-      jest.spyOn(h.members, 'commentSkeleton').mockResolvedValue(skeleton);
-      h.comments.docs.splice(0, h.comments.docs.length);
-      const page = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
-      expect(page.comments).toEqual([]);
-    });
-
-    it('drops a reply that vanished, keeping its root', async () => {
-      const h = harness();
-      const writer = await h.writer(U.named);
-      const { commentId } = await h.commentsService.create(writer, {
-        slug: 'open-page',
-        tabId: 'tab_a',
-        body: 'Root',
-      });
-      const reply = await h.commentsService.create(writer, {
-        slug: 'open-page',
-        parentCommentId: commentId,
-        body: 'Reply',
-      });
-      const skeleton = await h.members.commentSkeleton(ids.open);
-      jest.spyOn(h.members, 'commentSkeleton').mockResolvedValue(skeleton);
-      const at = h.comments.docs.findIndex(
-        (d) => d.commentId === reply.commentId,
-      );
-      h.comments.docs.splice(at, 1);
-      const page = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
-      expect(page.comments[0].replies).toEqual([]);
     });
   });
 
@@ -282,11 +220,7 @@ describe('CommentsService', () => {
       ).resolves.toMatchObject({ valid: true, length: 1 });
 
       // The anonymous writer's page is members-only.
-      const forGuest = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
+      const forGuest = await h.thread('open-page', await h.viewer(), 'tab_a');
       expect(forGuest.comments[0]).toMatchObject({
         author: { kind: 'member', displayName: 'Name of anon-writer' },
         body: 'Hello there.',
@@ -294,7 +228,7 @@ describe('CommentsService', () => {
         source: 'member',
       });
       expect(forGuest.comments[0].author).not.toHaveProperty('slug');
-      const forMember = await h.commentsService.thread(
+      const forMember = await h.thread(
         'open-page',
         await h.viewer(U.named),
         'tab_a',
@@ -304,7 +238,7 @@ describe('CommentsService', () => {
         displayName: 'Name of anon-writer',
         slug: 'anon-writer',
       });
-      const forAuthor = await h.commentsService.thread(
+      const forAuthor = await h.thread(
         'open-page',
         await h.viewer(U.anon),
         'tab_a',
@@ -312,7 +246,7 @@ describe('CommentsService', () => {
       expect(forAuthor.comments[0]).toMatchObject({ mine: true, seq: 1 });
     });
 
-    it('marks an admin with no page, and a former member', async () => {
+    it('marks an admin with no page, and names no one whose page is gone', async () => {
       const h = harness();
       await h.commentsService.create(await h.writer(U.admin), {
         slug: 'open-page',
@@ -328,14 +262,10 @@ describe('CommentsService', () => {
           { $set: { deletedAt: new Date() } },
         )
         .exec();
-      const page = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        undefined,
-      );
+      const page = await h.thread('open-page', await h.viewer(), undefined);
       expect(page.comments.map((c) => c.author)).toEqual([
         { kind: 'admin' },
-        { kind: 'former-member' },
+        { kind: 'member' },
       ]);
       expect(
         h.comments.docs.find((d) => d.authorUserId === U.admin),
@@ -393,21 +323,6 @@ describe('CommentsService', () => {
           body: 'Too late.',
         }),
       ).rejects.toThrow(new ConflictException(REPLY_TO_REMOVED));
-    });
-
-    it('refuses a root row that vanished between the two reads', async () => {
-      const h = harness();
-      const writer = await h.writer(U.named);
-      const skeleton = await h.members.commentSkeleton(ids.imported);
-      jest.spyOn(h.members, 'commentSkeleton').mockResolvedValue(skeleton);
-      h.comments.docs.splice(0, h.comments.docs.length);
-      await expect(
-        h.commentsService.create(writer, {
-          slug: 'imported-page',
-          parentCommentId: 'cmt_imp2',
-          body: 'x',
-        }),
-      ).rejects.toThrow(new NotFoundException(COMMENT_NOT_FOUND));
     });
 
     it.each([
@@ -497,11 +412,7 @@ describe('CommentsService', () => {
         h.comments.docs.find((d) => d.commentId === commentId),
       ).toMatchObject({ body: 'Second wording.', bodySeq: 2 });
 
-      const page = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
+      const page = await h.thread('open-page', await h.viewer(), 'tab_a');
       expect(page.comments[0]).toMatchObject({
         body: 'Second wording.',
         edited: true,
@@ -533,17 +444,18 @@ describe('CommentsService', () => {
 
     it('reads the version even when the copy on the row was not updated', async () => {
       const { h, writer, commentId } = await posted();
+      const real = h.comments.updateOne;
       jest
         .spyOn(h.comments, 'updateOne')
-        .mockReturnValueOnce({ exec: () => Promise.reject(new Error('down')) });
+        .mockImplementation((filter, update) =>
+          '$set' in update && 'body' in (update.$set as object)
+            ? { exec: () => Promise.reject(new Error('down')) }
+            : real(filter, update),
+        );
       await expect(
         h.commentsService.edit(writer, commentId, 'Saved anyway.', 1),
       ).resolves.toEqual({ changed: true, seq: 2 });
-      const page = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
+      const page = await h.thread('open-page', await h.viewer(), 'tab_a');
       expect(page.comments[0].body).toBe('Saved anyway.');
     });
 
@@ -643,7 +555,7 @@ describe('CommentsService', () => {
         removedBy: U.named,
         removedAt: expect.any(Date),
       });
-      const page = await h.commentsService.thread(
+      const page = await h.thread(
         'open-page',
         await h.viewer(U.named),
         'tab_b',
@@ -678,7 +590,7 @@ describe('CommentsService', () => {
         body: 'Versions lost.',
       });
       h.commentVersions.docs.splice(0, h.commentVersions.docs.length);
-      const page = await h.commentsService.thread(
+      const page = await h.thread(
         'open-page',
         await h.viewer(U.named),
         undefined,
@@ -691,19 +603,6 @@ describe('CommentsService', () => {
       });
       expect(describeFailure('plain')).toBe('plain');
       expect(describeFailure(new Error('err'))).toBe('err');
-    });
-
-    it('refuses a history whose comment vanished between the two reads', async () => {
-      const h = harness();
-      const writer = await h.writer(U.named);
-      const { commentId } = await h.commentsService.create(writer, {
-        slug: 'open-page',
-        body: 'x',
-      });
-      jest.spyOn(h.members, 'commentSkeleton').mockResolvedValue([]);
-      await expect(
-        h.commentsService.history('open-page', commentId, await h.viewer()),
-      ).rejects.toThrow(new NotFoundException(COMMENT_NOT_FOUND));
     });
   });
 

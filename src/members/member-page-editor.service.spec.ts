@@ -22,6 +22,7 @@ import {
   profileId,
   setup,
   v,
+  tabChanges,
 } from './member-page-editor.mocks-spec';
 
 const REVIEWED = [
@@ -136,7 +137,7 @@ describe('editing text', () => {
     ).resolves.toEqual({ changed: false, seq: 1 });
     expect(versions.appendVersion).not.toHaveBeenCalled();
     // Nothing was edited, so an imported belief stays to be reviewed.
-    expect(tabModel.updateOne).not.toHaveBeenCalled();
+    expect(tabChanges(tabModel)).toEqual([]);
   });
 
   it('cleans control characters and blank-line runs before saving', async () => {
@@ -506,23 +507,28 @@ describe('editing a title', () => {
     await expect(
       service.editTabTitle(OWNER, 'tab_a', 'Mine', 2),
     ).rejects.toThrow(STALE_EDIT_REFUSAL);
-    expect(tabModel.updateOne).not.toHaveBeenCalled();
+    expect(tabChanges(tabModel)).toEqual([]);
   });
 
   it('reports a landed title as saved even if the page copy or review note fails, and logs it', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
     const { service, tabModel } = setup();
-    tabModel.updateOne
-      .mockReturnValueOnce(failing(new Error('copy failed')))
-      .mockReturnValueOnce(failing(new Error('note failed')));
+    const failures: unknown[] = [];
+    const real = tabModel.updateOne.getMockImplementation() as NonNullable<
+      ReturnType<typeof tabModel.updateOne.getMockImplementation>
+    >;
+    tabModel.updateOne.mockImplementation((filter, update) =>
+      '$set' in update && failures.length > 0
+        ? failing(failures.shift())
+        : real(filter, update),
+    );
+    failures.push(new Error('copy failed'), new Error('note failed'));
     await expect(
       service.editTabTitle(OWNER, 'tab_a', 'Mine', 2),
     ).resolves.toEqual({ changed: true, seq: 3 });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('copy failed'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('note failed'));
-    tabModel.updateOne
-      .mockReturnValueOnce(failing('plain copy'))
-      .mockReturnValueOnce(failing('plain note'));
+    failures.push('plain copy', 'plain note');
     await service.editTabTitle(OWNER, 'tab_a', 'Mine again', 3);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('plain copy'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('plain note'));

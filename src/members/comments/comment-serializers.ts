@@ -12,14 +12,16 @@ import type {
 
 /** Who wrote a comment, as a reader may see it. */
 export type CommentAuthorView =
-  /** A site member, by their page's display name; `slug` only when the reader may open that page. */
-  | { kind: 'member'; displayName: string; slug?: string }
+  /**
+   * A site member: their page's display name only when that page is approved
+   * and the reader may at least see its name, and `slug` only when the reader
+   * may open the whole page. Otherwise neither: shown as "A member".
+   */
+  | { kind: 'member'; displayName?: string; slug?: string }
   /** A name typed into Apple Pages; proves no identity (plan Q5). */
   | { kind: 'imported'; name: string }
-  /** An admin with no approved page of their own. */
-  | { kind: 'admin' }
-  /** An account whose page is gone. */
-  | { kind: 'former-member' };
+  /** An admin, not named (see the member case). */
+  | { kind: 'admin' };
 
 export interface SuggestionView {
   /** Absent once the suggestion was removed by its author. */
@@ -65,6 +67,8 @@ export interface ThreadPage {
   nextAfter?: string;
   /** Signed in with an approved page, or an admin: the form may be shown. */
   viewerMayComment: boolean;
+  /** Why the form is not offered, when it is not. */
+  viewerWriteBlock?: 'sign-in' | 'needs-approved-page' | 'verify-email';
   /** As above, and not the page's owner (owners edit instead). */
   viewerMaySuggest: boolean;
 }

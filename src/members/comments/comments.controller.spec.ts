@@ -21,13 +21,20 @@ function setup() {
     accept: jest.fn(() => Promise.resolve('accepted')),
     decline: jest.fn(() => Promise.resolve('declined')),
   };
-  const writers = { requireWriter: jest.fn(() => Promise.resolve(writer)) };
+  const writers = {
+    requireWriter: jest.fn(() => Promise.resolve(writer)),
+    writeStatus: jest.fn(() => Promise.resolve({ mayComment: true })),
+  };
   return {
     members,
     comments,
     suggestions,
     writers,
-    reads: new CommentThreadsController(members as never, comments as never),
+    reads: new CommentThreadsController(
+      members as never,
+      comments as never,
+      writers as never,
+    ),
     writes: new CommentWritesController(
       writers as never,
       comments as never,
@@ -47,7 +54,9 @@ describe('comment controllers', () => {
       viewer,
       'tab_a',
       'cmt_1',
+      { mayComment: true },
     );
+    expect(t.writers.writeStatus).toHaveBeenCalledWith(viewer);
     await expect(
       t.reads.history(req, 'some-page', 'cmt_1', { page: 2 }),
     ).resolves.toBe('history');

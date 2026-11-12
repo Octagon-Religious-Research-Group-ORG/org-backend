@@ -20,10 +20,20 @@ const AUTHOR_PAGE_FIELDS = {
 };
 
 /**
- * Names site authors by their member page (Chunk 9): the page's display name,
- * and its address only when the reader may see that whole page, by the same
- * `decideProfileAccess` answer as everywhere else (a page the reader could
- * only see by name gets no link).
+ * Names site authors by their member page (Chunk 9), conservatively: a
+ * comment must never tell a reader more about its author's page than that
+ * page itself would (review item 1).
+ *
+ * - The display name only when the author's page is APPROVED (a pending,
+ *   claiming or deleted page names no one) AND this reader may see at least
+ *   its name (`decideProfileAccess` level `name-only` or `full`). An
+ *   unlisted page shows its name to its owner and admins only.
+ * - The page's address only when the reader may open the whole page.
+ * - Otherwise an admin's comment reads "ORG admin" and anyone else's "A
+ *   member", with no name.
+ *
+ * The page is looked up by owner whatever its review status (an account has
+ * at most one page), and the status is decided here, not in the query.
  */
 @Injectable()
 export class CommentAuthorsService {
@@ -34,7 +44,7 @@ export class CommentAuthorsService {
 
   /**
    * @returns a lookup from Clerk user id to how the reader sees that author;
-   *   `writtenAsAdmin` says what to show for an author with no page
+   *   `writtenAsAdmin` says what to show for an author not named
    */
   async resolve(
     userIds: readonly string[],
@@ -45,21 +55,23 @@ export class CommentAuthorsService {
       wanted.length === 0
         ? []
         : ((await this.profileModel
-            .find({
-              ownerUserId: { $in: wanted },
-              deletedAt: { $exists: false },
-              reviewStatus: { $ne: 'claiming' },
-            })
+            .find({ ownerUserId: { $in: wanted } })
             .select(AUTHOR_PAGE_FIELDS)
             .lean()
             .exec()) as unknown as ProfileRow[]);
     const pageOf = new Map(pages.map((page) => [page.ownerUserId, page]));
     return (userId, writtenAsAdmin) => {
+      const unnamed: CommentAuthorView = writtenAsAdmin
+        ? { kind: 'admin' }
+        : { kind: 'member' };
       const page = pageOf.get(userId);
-      if (!page) {
-        return writtenAsAdmin ? { kind: 'admin' } : { kind: 'former-member' };
+      // Not approved: unnamed even for the readers (owner, admins) who may
+      // open a pending page. A deleted page gives level 'none' below.
+      if (!page || (page.reviewStatus ?? 'approved') !== 'approved') {
+        return unnamed;
       }
       const level = decideProfileAccess(viewer, page).level;
+      if (level === 'none') return unnamed;
       return {
         kind: 'member',
         displayName: page.displayName,

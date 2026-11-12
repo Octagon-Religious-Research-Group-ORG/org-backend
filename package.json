@@ -172,7 +172,9 @@
       "members/comments/comment-writers.ts",
       "members/comments/comments.controller.ts",
       "members/comments/comments.service.ts",
-      "members/comments/suggestions.service.ts"
+      "members/comments/suggestions.service.ts",
+      "members/comments/comment-store.ts",
+      "members/tab-text-turns.ts"
     ],
     "coverageThreshold": {
       "global": {

@@ -50,12 +50,8 @@ import {
 } from './profile-serializers';
 import { readHeads } from '../social/version-heads';
 import { titleBlockId, visibleFieldBlocks } from './editable-fields';
-import {
-  type CommentSkeleton,
-  PAGE_THREAD,
-  visibleCounts,
-} from './comments/comment-threads';
-import { MAX_PAGE_COMMENTS } from './comments/comment-limits';
+import { PAGE_THREAD } from './comments/comment-threads';
+import { commentCounts } from './comments/comment-store';
 
 /** Exactly one message for a missing page and for a page you may not see. */
 export const PROFILE_NOT_FOUND = 'That page does not exist.';
@@ -351,7 +347,7 @@ export class MembersService {
       }),
     ).filter((extra) => extra.paragraphs.length > 0);
 
-    const counts = visibleCounts(await this.commentSkeleton(profileId));
+    const counts = await commentCounts(this.commentModel, profileId);
     const beliefBlocks = inSection('beliefs');
     const tabBlocks = (tabId: string) =>
       beliefBlocks.filter((block) => block.tabId === tabId);
@@ -383,26 +379,6 @@ export class MembersService {
       ),
       pageCommentCount: counts.get(PAGE_THREAD) ?? 0,
     };
-  }
-
-  /**
-   * Every comment row of a page, light, oldest first (Chunk 9): the one read
-   * that threads, paging and counts all come from.
-   */
-  async commentSkeleton(profileId: Types.ObjectId): Promise<CommentSkeleton[]> {
-    const rows = (await this.commentModel
-      .find({ profileId })
-      .sort({ createdAt: 1, _id: 1 })
-      .limit(MAX_PAGE_COMMENTS)
-      .select({ commentId: 1, tabId: 1, parentCommentId: 1, removedAt: 1 })
-      .lean()
-      .exec()) as CommentSkeleton[];
-    if (rows.length === MAX_PAGE_COMMENTS) {
-      this.logger.warn(
-        `A page reached ${MAX_PAGE_COMMENTS} comments; only the oldest are read.`,
-      );
-    }
-    return rows;
   }
 
   /**

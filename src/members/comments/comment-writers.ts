@@ -1,8 +1,9 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import type { AuthenticatedRequest } from '../../auth/auth.types';
 import { ClerkUserInfoService } from '../../auth/clerk-user-info.service';
 import { MembersService } from '../members.service';
 import type { Viewer } from '../profile-access';
+import { describeFailure } from './comment-limits';
 
 export const NEEDS_APPROVED_PAGE =
   'Comments and suggestions are open to members whose page has been approved.';
@@ -16,13 +17,19 @@ export interface CommentWriter extends Viewer {
   writesAsAdmin: boolean;
 }
 
-/** May this viewer see the comment form at all (no email check here). */
-export function mayOfferCommentForm(viewer: Viewer): boolean {
-  return (
-    viewer.isAdmin ||
-    viewer.kind === 'anonymous-member' ||
-    viewer.kind === 'named-member'
-  );
+/**
+ * Why a reader may not write, for the website to say so instead of showing
+ * a form that would be refused.
+ */
+export type WriteBlock = 'sign-in' | 'needs-approved-page' | 'verify-email';
+
+export interface WriteStatus {
+  mayComment: boolean;
+  block?: WriteBlock;
+}
+
+function isMember(viewer: Viewer) {
+  return viewer.kind === 'anonymous-member' || viewer.kind === 'named-member';
 }
 
 /**
@@ -33,10 +40,38 @@ export function mayOfferCommentForm(viewer: Viewer): boolean {
  */
 @Injectable()
 export class CommentWritersService {
+  private readonly logger = new Logger(CommentWritersService.name);
+
   constructor(
     private readonly members: MembersService,
     private readonly clerk: ClerkUserInfoService,
   ) {}
+
+  /**
+   * The same rule as {@link requireWriter}, as an answer for a page read.
+   * If Clerk cannot be asked, a member is offered the form: the write itself
+   * checks again and says why it is refused.
+   */
+  async writeStatus(viewer: Viewer): Promise<WriteStatus> {
+    if (viewer.userId === undefined) {
+      return { mayComment: false, block: 'sign-in' };
+    }
+    if (viewer.isAdmin) return { mayComment: true };
+    if (!isMember(viewer)) {
+      return { mayComment: false, block: 'needs-approved-page' };
+    }
+    try {
+      const identity = await this.clerk.getIdentity(viewer.userId);
+      if (!identity.email || !identity.emailVerified) {
+        return { mayComment: false, block: 'verify-email' };
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not read an email status: ${describeFailure(error)}`,
+      );
+    }
+    return { mayComment: true };
+  }
 
   /**
    * @throws ForbiddenException with the reason, for anyone else
@@ -45,8 +80,7 @@ export class CommentWritersService {
     const viewer = await this.members.resolveViewer(request);
     const userId = viewer.userId;
     if (userId === undefined) throw new ForbiddenException(NEEDS_APPROVED_PAGE);
-    const member =
-      viewer.kind === 'anonymous-member' || viewer.kind === 'named-member';
+    const member = isMember(viewer);
     if (viewer.isAdmin) {
       return { ...viewer, userId, writesAsAdmin: !member };
     }

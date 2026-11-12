@@ -139,7 +139,10 @@ function setup(options: { one?: unknown } = {}) {
     tabModel as never,
     blockModel as never,
     versionModel as never,
-    { find: jest.fn(() => chain([])) } as never,
+    {
+      find: jest.fn(() => chain([])),
+      aggregate: jest.fn(() => ({ exec: () => Promise.resolve([]) })),
+    } as never,
     pictures as never,
     {} as never,
     {} as never,

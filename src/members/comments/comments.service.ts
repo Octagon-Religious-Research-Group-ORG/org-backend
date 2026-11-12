@@ -14,16 +14,13 @@ import {
   BeliefTab,
   type BeliefTabDocument,
 } from '../../social/schemas/belief-tab.schema';
-import {
-  Comment,
-  type CommentDocument,
-  MAX_COMMENT_LENGTH,
-} from '../../social/schemas/comment.schema';
+import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
 import { normaliseFieldText } from '../editable-fields';
 import { MemberPageEditorService } from '../member-page-editor.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
 import type { Viewer } from '../profile-access';
 import { CommentAuthorsService } from './comment-authors.service';
+import { COMMENT_HISTORY_PAGE_SIZE, describeFailure } from './comment-limits';
 import {
   type CommentHistoryPage,
   type CommentRow,
@@ -31,17 +28,8 @@ import {
   commentView,
   type ThreadPage,
 } from './comment-serializers';
-import {
-  type CommentSkeleton,
-  indexThreads,
-  PAGE_THREAD,
-} from './comment-threads';
-import { type CommentWriter, mayOfferCommentForm } from './comment-writers';
-import {
-  COMMENT_HISTORY_PAGE_SIZE,
-  describeFailure,
-  THREAD_PAGE_SIZE,
-} from './comment-limits';
+import { CommentStore, type StoredComment } from './comment-store';
+import type { CommentWriter, WriteStatus } from './comment-writers';
 
 /** Characters of a version hash a history entry shows. */
 const SHORT_HASH_LENGTH = 12;
@@ -51,31 +39,14 @@ export const NO_SUCH_BELIEF = 'That belief is not on this page.';
 export const REPLY_TO_REMOVED =
   'That comment was removed by its author, so it cannot take new replies.';
 export const REMOVED_COMMENT = 'That comment was removed.';
+export const COMMENT_BUSY =
+  'This comment is being saved in another window. Please try again in a moment.';
 export const DECIDED_SUGGESTION =
   'This suggestion has been decided, so it stays as part of the record.';
 export const COMMENT_TOO_LONG = `A comment can hold at most ${MAX_COMMENT_LENGTH.toLocaleString('en-US')} characters.`;
 export const EMPTY_COMMENT = 'A comment needs some text.';
-
-/** The comment row fields any answer is built from. */
-export const COMMENT_FIELDS = {
-  commentId: 1,
-  profileId: 1,
-  tabId: 1,
-  parentCommentId: 1,
-  authorUserId: 1,
-  legacyAuthorName: 1,
-  legacyCreatedAt: 1,
-  anchorText: 1,
-  body: 1,
-  source: 1,
-  kind: 1,
-  writtenAsAdmin: 1,
-  createdAt: 1,
-  removedAt: 1,
-  suggestion: 1,
-};
-
-export type StoredComment = CommentRow & { profileId: Types.ObjectId };
+export const STALE_THREAD_PAGE =
+  'That list of comments has changed. Please reload it.';
 
 export interface NewCommentInput {
   slug: string;
@@ -100,6 +71,7 @@ export function cleanCommentBody(raw: string): string {
  *
  * - Reading: whoever can read the whole page (`findVisible`, level `full`).
  *   A removed belief's thread is listed for no one; its comments stay stored.
+ *   Threads are read by index, a page at a time, with no cap on their size.
  * - Writing: `CommentWritersService` decides who; this decides where.
  * - Every site comment's text is an append-only, hash-chained version
  *   (`CommentVersionsService`); removal is soft and keeps the text.
@@ -109,10 +81,9 @@ export class CommentsService {
   private readonly logger = new Logger(CommentsService.name);
 
   constructor(
-    @InjectModel(Comment.name)
-    private readonly commentModel: Model<CommentDocument>,
     @InjectModel(BeliefTab.name)
     private readonly tabModel: Model<BeliefTabDocument>,
+    private readonly store: CommentStore,
     private readonly members: MembersService,
     private readonly editor: MemberPageEditorService,
     private readonly versions: CommentVersionsService,
@@ -140,19 +111,13 @@ export class CommentsService {
     if (!tab) throw new NotFoundException(NO_SUCH_BELIEF);
   }
 
-  /** Every comment row of a page, light, oldest first. */
-  private async skeleton(
-    profileId: Types.ObjectId,
-  ): Promise<CommentSkeleton[]> {
-    return this.members.commentSkeleton(profileId);
-  }
-
   /**
    * One page of a thread, oldest first, each top-level comment with all its
    * replies.
    *
    * @param tabId - a belief tab, or undefined for the page's own thread
    * @param after - `nextAfter` of the previous page
+   * @param writing - whether this reader may write, and why not
    * @throws NotFoundException for a page the viewer may not read in full, or
    *   a tab that is not live on it
    * @throws BadRequestException for an `after` that names no comment there
@@ -161,56 +126,32 @@ export class CommentsService {
     slug: string,
     viewer: Viewer,
     tabId: string | undefined,
-    after?: string,
+    after: string | undefined,
+    writing: WriteStatus,
   ): Promise<ThreadPage> {
     const { profile, access } = await this.readablePage(slug, viewer);
     if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
 
-    const index = indexThreads(await this.skeleton(profile._id));
-    const roots = index.rootsByThread.get(tabId ?? PAGE_THREAD) ?? [];
-    let start = 0;
-    if (after !== undefined) {
-      const at = roots.indexOf(after);
-      if (at === -1) {
-        throw new BadRequestException(
-          'That list of comments has changed. Please reload it.',
-        );
-      }
-      start = at + 1;
-    }
-    const pageRoots = roots.slice(start, start + THREAD_PAGE_SIZE);
-    const wanted = pageRoots.flatMap((root) => [
-      root,
-      ...(index.repliesOf.get(root) ?? []),
-    ]);
-    const rows = await this.rowsById(wanted);
-    const views = await this.views(rows, viewer, profile._id, access.isOwner);
-    const comments = pageRoots.flatMap((root) => {
-      const view = views.get(root);
-      if (!view) return [];
-      const replies = (index.repliesOf.get(root) ?? []).flatMap((id) => {
-        const reply = views.get(id);
-        return reply ? [reply] : [];
-      });
-      return [{ ...view, replies }];
-    });
-    const more = start + THREAD_PAGE_SIZE < roots.length;
-    const mayComment = mayOfferCommentForm(viewer);
+    const page = await this.store.topLevel(profile._id, tabId, after);
+    if (!page) throw new BadRequestException(STALE_THREAD_PAGE);
+    const replies = await this.store.replies(
+      profile._id,
+      page.roots.map((root) => root.commentId),
+    );
+    const all = [...page.roots, ...[...replies.values()].flat()];
+    const views = await this.views(all, viewer, profile._id, access.isOwner);
+    const viewOf = (row: StoredComment) =>
+      views.get(row.commentId) as CommentView;
     return {
-      comments,
-      ...(more ? { nextAfter: pageRoots.at(-1) } : {}),
-      viewerMayComment: mayComment,
-      viewerMaySuggest: mayComment && !access.isOwner,
+      comments: page.roots.map((root) => ({
+        ...viewOf(root),
+        replies: (replies.get(root.commentId) as StoredComment[]).map(viewOf),
+      })),
+      ...(page.more ? { nextAfter: page.roots.at(-1)?.commentId } : {}),
+      viewerMayComment: writing.mayComment,
+      ...(writing.block ? { viewerWriteBlock: writing.block } : {}),
+      viewerMaySuggest: writing.mayComment && !access.isOwner,
     };
-  }
-
-  private async rowsById(commentIds: string[]): Promise<StoredComment[]> {
-    if (commentIds.length === 0) return [];
-    return (await this.commentModel
-      .find({ commentId: { $in: commentIds } })
-      .select(COMMENT_FIELDS)
-      .lean()
-      .exec()) as unknown as StoredComment[];
   }
 
   /** Builds the reader's view of each row, keyed by comment id. */
@@ -276,7 +217,9 @@ export class CommentsService {
     let tabId = input.tabId;
     let parentCommentId: string | undefined;
     if (input.parentCommentId !== undefined) {
-      const root = await this.rootOf(profile._id, input.parentCommentId);
+      const root = await this.store.rootOf(profile._id, input.parentCommentId);
+      if (!root) throw new NotFoundException(COMMENT_NOT_FOUND);
+      if (root.removedAt) throw new ConflictException(REPLY_TO_REMOVED);
       if (tabId !== undefined && tabId !== root.tabId) {
         throw new BadRequestException(
           'A reply belongs to the thread of the comment it answers.',
@@ -286,43 +229,47 @@ export class CommentsService {
       parentCommentId = root.commentId;
     }
     if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
+    await this.repair(writer.userId);
 
     const commentId = `cmt_${randomUUID()}`;
-    const version = await this.versions.append({
-      commentId,
-      text: body,
-      authorUserId: writer.userId,
-      expectedSeq: 0,
-    });
-    await this.commentModel.create({
-      commentId,
-      profileId: profile._id,
-      ...(tabId !== undefined ? { tabId } : {}),
-      ...(parentCommentId ? { parentCommentId } : {}),
-      authorUserId: writer.userId,
-      body,
-      bodySeq: version.seq,
-      source: 'native',
-      kind: 'comment',
-      ...(writer.writesAsAdmin ? { writtenAsAdmin: true } : {}),
-    });
-    return { commentId, seq: version.seq };
+    const seq = await this.store.createConfirmed(
+      {
+        commentId,
+        profileId: profile._id,
+        ...(tabId !== undefined ? { tabId } : {}),
+        ...(parentCommentId ? { parentCommentId } : {}),
+        authorUserId: writer.userId,
+        body,
+        source: 'native',
+        kind: 'comment',
+        ...(writer.writesAsAdmin ? { writtenAsAdmin: true } : {}),
+      },
+      () =>
+        this.versions.append({
+          commentId,
+          text: body,
+          authorUserId: writer.userId,
+          expectedSeq: 0,
+        }),
+    );
+    return { commentId, seq };
   }
 
   /**
-   * The top-level comment of a thread that `commentId` is in or answers.
-   *
-   * @throws NotFoundException when it is not on this page
-   * @throws ConflictException when that top-level comment was removed
+   * Finishes this author's comments whose writing stopped part-way. Never
+   * fails the new comment: a failure here is logged and retried next time.
    */
-  private async rootOf(profileId: Types.ObjectId, commentId: string) {
-    const index = indexThreads(await this.skeleton(profileId));
-    const rootId = index.rootOf.get(commentId);
-    if (rootId === undefined) throw new NotFoundException(COMMENT_NOT_FOUND);
-    const [root] = await this.rowsById([rootId]);
-    if (!root) throw new NotFoundException(COMMENT_NOT_FOUND);
-    if (root.removedAt) throw new ConflictException(REPLY_TO_REMOVED);
-    return root;
+  async repair(userId: string) {
+    try {
+      await this.store.repairUnconfirmed(userId, async (commentId) => {
+        const [head] = await this.versions.page(commentId, 0, 1);
+        return head?.seq;
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not repair unfinished comments: ${describeFailure(error)}`,
+      );
+    }
   }
 
   /**
@@ -332,7 +279,7 @@ export class CommentsService {
    *   it is not theirs to change, and no more is said)
    */
   async ownComment(userId: string, commentId: string, viewer?: Viewer) {
-    const [row] = await this.rowsById([commentId]);
+    const row = await this.store.one(commentId);
     if (!row || row.source !== 'native' || row.authorUserId !== userId) {
       throw new NotFoundException(COMMENT_NOT_FOUND);
     }
@@ -345,7 +292,9 @@ export class CommentsService {
   }
 
   /**
-   * Edits the writer's own comment: a new version on top of `baseSeq`.
+   * Edits the writer's own comment: a new version on top of `baseSeq`, while
+   * holding a turn on the comment, so a removal cannot slip in between the
+   * check and the version (review item 6).
    *
    * @throws ConflictException when the comment changed since `baseSeq`, or
    *   it was removed
@@ -370,34 +319,35 @@ export class CommentsService {
     const [head] = await this.versions.page(commentId, 0, 1);
     if (head && head.text === body) return { changed: false, seq: head.seq };
 
-    const saved = await this.versions.append({
-      commentId,
-      text: body,
-      authorUserId: writer.userId,
-      expectedSeq: baseSeq,
-    });
+    const turn = await this.store.takeEditTurn(commentId, writer.userId);
+    if (turn === undefined) throw new ConflictException(REMOVED_COMMENT);
     try {
-      await this.commentModel
-        .updateOne(
-          {
-            commentId,
-            $or: [
-              { bodySeq: { $exists: false } },
-              { bodySeq: { $lt: saved.seq } },
-            ],
-          },
-          {
-            $set: { body, bodySeq: saved.seq, editedAt: saved.createdAt },
-          },
-        )
-        .exec();
+      const saved = await this.versions.append({
+        commentId,
+        text: body,
+        authorUserId: writer.userId,
+        expectedSeq: baseSeq,
+      });
+      await this.saveCopy(commentId, body, saved);
+      return { changed: true, seq: saved.seq };
+    } finally {
+      await this.store.endEditTurn(commentId, turn);
+    }
+  }
+
+  private async saveCopy(
+    commentId: string,
+    body: string,
+    saved: { seq: number; createdAt: Date },
+  ) {
+    try {
+      await this.store.updateCopy(commentId, body, saved);
     } catch (error) {
       // The version is the record and every read follows it.
       this.logger.warn(
         `Comment ${commentId} version ${saved.seq} is saved, but its copy was not updated: ${describeFailure(error)}`,
       );
     }
-    return { changed: true, seq: saved.seq };
   }
 
   /**
@@ -410,7 +360,8 @@ export class CommentsService {
    * A pending suggestion can be removed (withdrawn); a decided one cannot,
    * since an accepted one is part of the belief's record.
    *
-   * @throws ConflictException for a decided suggestion, or one being accepted
+   * @throws ConflictException for a decided suggestion, one being accepted,
+   *   or a comment an edit is saving right now
    */
   async remove(userId: string, commentId: string) {
     const row = await this.ownComment(userId, commentId);
@@ -419,21 +370,15 @@ export class CommentsService {
       row.kind === 'suggestion'
         ? { 'suggestion.status': 'pending' as const }
         : {};
-    const done = await this.commentModel
-      .updateOne(
-        {
-          commentId,
-          authorUserId: userId,
-          removedAt: { $exists: false },
-          ...pendingOnly,
-        },
-        { $set: { removedAt: new Date(), removedBy: userId } },
-      )
-      .exec();
-    if (done.modifiedCount === 0 && row.kind === 'suggestion') {
+    if (await this.store.removeWhenFree(commentId, userId, pendingOnly)) {
+      return { removed: true };
+    }
+    const now = await this.store.one(commentId);
+    if (now?.removedAt) return { removed: true };
+    if (row.kind === 'suggestion') {
       throw new ConflictException(DECIDED_SUGGESTION);
     }
-    return { removed: true };
+    throw new ConflictException(COMMENT_BUSY);
   }
 
   /**
@@ -449,7 +394,7 @@ export class CommentsService {
     page = 1,
   ): Promise<CommentHistoryPage> {
     const { profile } = await this.readablePage(slug, viewer);
-    const [row] = await this.rowsById([commentId]);
+    const row = await this.store.one(commentId);
     if (
       !row ||
       !row.profileId.equals(profile._id) ||
@@ -459,10 +404,13 @@ export class CommentsService {
     ) {
       throw new NotFoundException(COMMENT_NOT_FOUND);
     }
-    const index = indexThreads(await this.skeleton(profile._id));
-    const thread = index.threadOf.get(commentId);
-    if (thread === undefined) throw new NotFoundException(COMMENT_NOT_FOUND);
-    if (thread !== PAGE_THREAD) await this.requireLiveTab(profile._id, thread);
+    const root = (await this.store.rootOf(
+      profile._id,
+      commentId,
+    )) as StoredComment;
+    if (root.tabId !== undefined) {
+      await this.requireLiveTab(profile._id, root.tabId);
+    }
 
     const skip = (page - 1) * COMMENT_HISTORY_PAGE_SIZE;
     const rows = await this.versions.page(

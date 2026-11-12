@@ -1,8 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment */
-import { Logger, NotFoundException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import type { AuthenticatedRequest } from '../auth/auth.types';
-import { MAX_PAGE_COMMENTS } from './comments/comment-limits';
 import { MAX_DIRECTORY_CARDS, MembersService } from './members.service';
 import { GUEST_VIEWER, type Viewer } from './profile-access';
 
@@ -177,6 +176,7 @@ function setup(
     own?: unknown;
     live?: string[];
     comments?: unknown[];
+    nativeCounts?: unknown[];
   } = {},
 ) {
   const live = new Set(options.live ?? ['img1']);
@@ -210,7 +210,13 @@ function setup(
     ),
   };
   const settings = { votingInvite: jest.fn(() => Promise.resolve(undefined)) };
-  const commentModel = { find: jest.fn(() => chain(options.comments ?? [])) };
+  const commentModel = {
+    // Imported comments are read in full; site comments counted in the database.
+    find: jest.fn(() => chain(options.comments ?? [])),
+    aggregate: jest.fn(() => ({
+      exec: () => Promise.resolve(options.nativeCounts ?? []),
+    })),
+  };
   const adminAccess = { isAdminForRead: jest.fn(() => Promise.resolve(false)) };
   const service = new MembersService(
     profileModel as never,
@@ -517,6 +523,10 @@ describe('MembersService.profile', () => {
         { commentId: 'c3', tabId: 'tab-1', removedAt: new Date() },
         { commentId: 'c4' },
       ],
+      nativeCounts: [
+        { _id: 'tab-1', n: 3 },
+        { _id: null, n: 2 },
+      ],
     });
     await expect(service.profile('quiet-fern', GUEST_VIEWER)).resolves.toEqual({
       access: 'full',
@@ -562,7 +572,7 @@ describe('MembersService.profile', () => {
               text: 'Synthetic belief',
             },
           ],
-          commentCount: 2,
+          commentCount: 5,
           textSeq: 1,
         },
         {
@@ -574,30 +584,8 @@ describe('MembersService.profile', () => {
           textSeq: 0,
         },
       ],
-      pageCommentCount: 1,
+      pageCommentCount: 3,
     });
-  });
-
-  it('reads at most MAX_PAGE_COMMENTS comment rows, and says so in the log', async () => {
-    const { service } = setup({
-      one: page(),
-      comments: Array.from({ length: MAX_PAGE_COMMENTS }, (_, i) => ({
-        commentId: `c${i}`,
-        tabId: 'tab-1',
-      })),
-    });
-    const warn = jest
-      .spyOn(Logger.prototype, 'warn')
-      .mockImplementation(() => undefined);
-    const view = await service.profile('quiet-fern', GUEST_VIEWER);
-    expect(view).toMatchObject({
-      tabs: [
-        expect.objectContaining({ commentCount: MAX_PAGE_COMMENTS }),
-        expect.anything(),
-      ],
-    });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('20000'));
-    warn.mockRestore();
   });
 
   it('tells the owner it is theirs and gives them the settings', async () => {

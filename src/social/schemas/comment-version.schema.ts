@@ -1,12 +1,23 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 import { makeAppendOnly } from '../append-only';
+import { MAX_BLOCK_TEXT_LENGTH } from './block-version.schema';
+import { MAX_COMMENT_LENGTH } from './comment.schema';
 
 /**
  * Longest text one comment version may hold. A suggestion's version records
- * its note AND the proposed belief text, so this is above both limits.
+ * its note AND the proposed belief text as one JSON array, so this covers the
+ * worst encoding of both at their own limits (Chunk 9 review item 3).
+ *
+ * Both are stored cleaned (`normaliseFieldText`): no control characters but
+ * tab, line feed and carriage return, and no lone surrogates. JSON then
+ * writes at most two characters for one (a quote, a backslash, a tab, a line
+ * feed or a carriage return each become two); its six-character escape is
+ * only for the characters cleaning removed. The 1,000 covers the label, the tab id, the version number and
+ * the punctuation.
  */
-export const MAX_COMMENT_VERSION_TEXT = 40_000;
+export const MAX_COMMENT_VERSION_TEXT =
+  2 * (MAX_BLOCK_TEXT_LENGTH + MAX_COMMENT_LENGTH) + 1_000;
 
 /**
  * One saved state of a site member's comment (Chunk 9). **Append-only**, like

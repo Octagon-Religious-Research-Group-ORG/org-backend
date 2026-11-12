@@ -43,6 +43,12 @@ import {
   visibleFieldBlocks,
 } from './editable-fields';
 import type { TabMove } from './members.dto';
+import {
+  dropStaleTextTurns,
+  endTextTurn,
+  NO_TEXT_TURNS,
+  takeTextTurn,
+} from './tab-text-turns';
 
 const NO_PAGE = "You don't have a member page yet.";
 const NO_TAB = 'That belief is not on your page.';
@@ -177,14 +183,16 @@ export class MemberPageEditorService {
   ) {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
-    const saved = await this.saveText(
-      {
-        where: { profileId: page._id, section: 'beliefs', tabId },
-        newBlockId: firstTextBlockId('tab', tabId),
-        emptyRefusal: 'A belief needs some text.',
-        tooLong: BELIEF_TOO_LONG,
-      },
-      { userId, text, baseSeq, ...(origin ? { origin } : {}) },
+    const saved = await this.withTextTurn(page._id, tabId, () =>
+      this.saveText(
+        {
+          where: { profileId: page._id, section: 'beliefs', tabId },
+          newBlockId: firstTextBlockId('tab', tabId),
+          emptyRefusal: 'A belief needs some text.',
+          tooLong: BELIEF_TOO_LONG,
+        },
+        { userId, text, baseSeq, ...(origin ? { origin } : {}) },
+      ),
     );
     if (saved.changed) await this.markReviewed(tabId);
     return saved;
@@ -250,6 +258,28 @@ export class MemberPageEditorService {
       await this.mergeIntoFirst(first.blockId, rest);
     }
     return { changed: true, seq: saved.seq };
+  }
+
+  /**
+   * Runs a belief's text or title save while holding a turn on its tab, so
+   * the belief cannot be removed under it (`tab-text-turns.ts`).
+   *
+   * @throws NotFoundException when the belief was removed meanwhile
+   */
+  private async withTextTurn<T>(
+    profileId: Types.ObjectId,
+    tabId: string,
+    save: () => Promise<T>,
+  ): Promise<T> {
+    const turn = await takeTextTurn(this.tabModel, profileId, tabId);
+    if (turn === undefined) throw new NotFoundException(NO_TAB);
+    try {
+      return await save();
+    } finally {
+      await endTextTurn(this.tabModel, tabId, turn, (message) =>
+        this.logger.warn(message),
+      );
+    }
   }
 
   /** A field's live text blocks, in reading order (ties by _id). */
@@ -387,35 +417,36 @@ export class MemberPageEditorService {
     if (title === tab.title) return { changed: false, seq: baseSeq };
 
     const blockId = titleBlockId(tabId);
-    let expectedSeq = baseSeq;
-    let saved: { seq: number };
-    try {
-      if (baseSeq === 0) {
-        await this.createBlockOnce({
-          profileId: page._id,
+    const saved = await this.withTextTurn(page._id, tabId, async () => {
+      let expectedSeq = baseSeq;
+      try {
+        if (baseSeq === 0) {
+          await this.createBlockOnce({
+            profileId: page._id,
+            blockId,
+            section: 'tab-title',
+            kind: 'heading',
+            tabId,
+            order: 0,
+          });
+          await this.versions.appendVersion({
+            blockId,
+            text: tab.title,
+            authorUserId: TITLE_RECORD_AUTHOR,
+            expectedSeq: 0,
+          });
+          expectedSeq = 1;
+        }
+        return await this.versions.appendVersion({
           blockId,
-          section: 'tab-title',
-          kind: 'heading',
-          tabId,
-          order: 0,
+          text: title,
+          authorUserId: userId,
+          expectedSeq,
         });
-        await this.versions.appendVersion({
-          blockId,
-          text: tab.title,
-          authorUserId: TITLE_RECORD_AUTHOR,
-          expectedSeq: 0,
-        });
-        expectedSeq = 1;
+      } catch (error) {
+        throw withoutMemberText(error);
       }
-      saved = await this.versions.appendVersion({
-        blockId,
-        text: title,
-        authorUserId: userId,
-        expectedSeq,
-      });
-    } catch (error) {
-      throw withoutMemberText(error);
-    }
+    });
     try {
       await this.tabModel
         .updateOne(
@@ -482,9 +513,16 @@ export class MemberPageEditorService {
     const removedAt = new Date();
     let removed: { modifiedCount: number };
     try {
+      await dropStaleTextTurns(this.tabModel, tabId);
+      // Only while no text or title edit holds a turn (tab-text-turns.ts).
       removed = await this.tabModel
         .updateOne(
-          { profileId: page._id, tabId, removedAt: { $exists: false } },
+          {
+            profileId: page._id,
+            tabId,
+            removedAt: { $exists: false },
+            ...NO_TEXT_TURNS,
+          },
           { $set: { removedAt } },
         )
         .exec();
@@ -494,7 +532,12 @@ export class MemberPageEditorService {
     }
     if (removed.modifiedCount !== 1) {
       await this.endRemovalTurn(userId, turn, false);
-      throw new NotFoundException(NO_TAB);
+      const editing = await this.tabModel
+        .exists({ profileId: page._id, tabId, removedAt: { $exists: false } })
+        .exec();
+      throw editing
+        ? new ConflictException(REMOVAL_BUSY)
+        : new NotFoundException(NO_TAB);
     }
 
     const left = await this.tabModel

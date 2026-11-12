@@ -42,6 +42,18 @@ export interface Options {
   removed?: number;
   tabs?: unknown[];
   moved?: number[];
+  /** `modifiedCount` of taking a text turn; 0 = the tab is not live. */
+  textTurn?: number;
+  /** After a refused removal: is the tab still live (an edit holds it)? */
+  stillLive?: boolean;
+}
+
+/** The tab updates that change it ($set / $unset), turns left out. */
+export function tabChanges(tabModel: { updateOne: jest.Mock }) {
+  return tabModel.updateOne.mock.calls.filter(
+    ([, update]) =>
+      '$set' in (update as object) || '$unset' in (update as object),
+  ) as Array<[Record<string, unknown>, Record<string, unknown>]>;
 }
 
 type Filter = Record<string, unknown>;
@@ -84,13 +96,19 @@ export function setup(options: Options = {}) {
     ),
     find: jest.fn(() => chain(options.tabs ?? [])),
     countDocuments: jest.fn(() => done(options.left ?? 2)),
+    // Text turns (tab-text-turns.ts) are taken unless `textTurn` says not.
     updateOne: jest.fn((filter: Filter, update: Filter) =>
       done({
         update,
         modifiedCount:
-          filter.order === undefined ? (options.removed ?? 1) : moves.shift(),
+          '$push' in update || '$pull' in update
+            ? (options.textTurn ?? 1)
+            : filter.order === undefined
+              ? (options.removed ?? 1)
+              : moves.shift(),
       }),
     ),
+    exists: jest.fn(() => done(options.stillLive ? { _id: 1 } : null)),
   };
   const blocks = (options.blocks ?? [
     {

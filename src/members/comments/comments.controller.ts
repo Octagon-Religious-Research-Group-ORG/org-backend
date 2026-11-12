@@ -43,6 +43,7 @@ export class CommentThreadsController {
   constructor(
     private readonly members: MembersService,
     private readonly comments: CommentsService,
+    private readonly writers: CommentWritersService,
   ) {}
 
   @Get()
@@ -51,11 +52,13 @@ export class CommentThreadsController {
     @Param('slug') slug: string,
     @Query() query: ThreadQueryDto,
   ) {
+    const viewer = await this.members.resolveViewer(request);
     return this.comments.thread(
       slug,
-      await this.members.resolveViewer(request),
+      viewer,
       query.tab,
       query.after,
+      await this.writers.writeStatus(viewer),
     );
   }
 

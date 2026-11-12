@@ -18,7 +18,9 @@ import {
   OWNER,
   profileId,
   setup,
+  tabChanges,
 } from './member-page-editor.mocks-spec';
+import { NO_TEXT_TURNS } from './tab-text-turns';
 
 const CLEAR_DEAD = [
   { ...OWNED, 'removalTurns.at': { $lt: expect.any(Date) } },
@@ -83,13 +85,21 @@ describe('removing a belief', () => {
       { $inc: { liveTabCount: -1 }, $pull: { removalTurns: { id } } },
     ]);
     expect(tabModel.updateOne).toHaveBeenCalledWith(
-      { profileId, tabId: 'tab_a', removedAt: { $exists: false } },
+      {
+        profileId,
+        tabId: 'tab_a',
+        removedAt: { $exists: false },
+        ...NO_TEXT_TURNS,
+      },
       { $set: { removedAt: expect.any(Date) } },
     );
     // Crash-safe order: the counter goes down only after the tab is gone.
     const [decrement] = counterDecrements(profileModel);
+    const removal = tabModel.updateOne.mock.calls.findIndex(
+      ([, update]) => '$set' in (update as object),
+    );
     expect(decrement).toBeGreaterThan(
-      tabModel.updateOne.mock.invocationCallOrder[0],
+      tabModel.updateOne.mock.invocationCallOrder[removal],
     );
     expect(blockModel.updateMany).not.toHaveBeenCalled();
   });
@@ -239,7 +249,7 @@ describe('removing a belief', () => {
       removedAt: { $exists: false },
     });
     const removedAt = (
-      tabModel.updateOne.mock.calls[0][1] as { $set: { removedAt: Date } }
+      tabChanges(tabModel)[0][1] as { $set: { removedAt: Date } }
     ).$set.removedAt;
     expect(tabModel.updateOne).toHaveBeenLastCalledWith(
       { profileId, tabId: 'tab_a', removedAt },
@@ -249,6 +259,16 @@ describe('removing a belief', () => {
       ...dropOnly(turnId(profileModel)),
     );
     expect(counterDecrements(profileModel)).toEqual([]);
+  });
+
+  it('says to try again while a text or title edit holds the belief (review item 5)', async () => {
+    const { service, profileModel } = setup({ removed: 0, stillLive: true });
+    await expect(service.removeTab(OWNER, 'tab_a')).rejects.toThrow(
+      new ConflictException(REMOVAL_BUSY),
+    );
+    expect(profileModel.updateOne).toHaveBeenLastCalledWith(
+      ...dropOnly(turnId(profileModel)),
+    );
   });
 
   it('says not found, and drops its turn, when another window removed it first', async () => {

@@ -56,7 +56,7 @@ describe('SuggestionsService', () => {
         h.commentsService['versions'].verify(commentId),
       ).resolves.toMatchObject({ valid: true, length: 1 });
 
-      const forOwner = await h.commentsService.thread(
+      const forOwner = await h.thread(
         'open-page',
         await h.viewer(U.owner),
         'tab_a',
@@ -78,7 +78,7 @@ describe('SuggestionsService', () => {
         viewerMayComment: true,
         viewerMaySuggest: false,
       });
-      const forAuthor = await h.commentsService.thread(
+      const forAuthor = await h.thread(
         'open-page',
         await h.viewer(U.named),
         'tab_a',
@@ -260,7 +260,7 @@ describe('SuggestionsService', () => {
           expect.anything(),
         ],
       });
-      const thread = await h.commentsService.thread(
+      const thread = await h.thread(
         'open-page',
         await h.viewer(U.owner),
         'tab_a',
@@ -281,7 +281,7 @@ describe('SuggestionsService', () => {
       );
       expect(row(h, commentId).suggestion).toMatchObject({ status: 'pending' });
       expect(row(h, commentId).suggestion).not.toHaveProperty('lockId');
-      const thread = await h.commentsService.thread(
+      const thread = await h.thread(
         'open-page',
         await h.viewer(U.owner),
         'tab_a',
@@ -399,9 +399,11 @@ describe('SuggestionsService', () => {
         status: 'accepted',
         resultSeq: 2,
       });
-      await expect(h.suggestions.accept(U.owner, commentId)).rejects.toThrow(
-        new ConflictException(SUGGESTION_ALREADY_DECIDED),
-      );
+      // Accepting again is no error: the version naming it is the answer.
+      await expect(h.suggestions.accept(U.owner, commentId)).resolves.toEqual({
+        accepted: true,
+        seq: 2,
+      });
     });
 
     it('waits for an accept holding the lock, and takes over a dead one', async () => {
@@ -421,7 +423,7 @@ describe('SuggestionsService', () => {
         h.commentsService.remove(U.named, commentId),
       ).rejects.toThrow(new ConflictException(DECIDED_SUGGESTION));
       // Read as pending meanwhile.
-      const thread = await h.commentsService.thread(
+      const thread = await h.thread(
         'open-page',
         await h.viewer(U.owner),
         'tab_a',
@@ -506,11 +508,7 @@ describe('SuggestionsService', () => {
       await expect(
         h.commentsService.remove(U.named, commentId),
       ).rejects.toThrow(new ConflictException(DECIDED_SUGGESTION));
-      const thread = await h.commentsService.thread(
-        'open-page',
-        await h.viewer(),
-        'tab_a',
-      );
+      const thread = await h.thread('open-page', await h.viewer(), 'tab_a');
       expect(thread.comments[0].suggestion).toEqual({
         proposedText: 'Synthetic belief A, reworded.',
         baseSeq: 1,
@@ -524,7 +522,7 @@ describe('SuggestionsService', () => {
       await expect(
         h.commentsService.remove(U.named, commentId),
       ).resolves.toEqual({ removed: true });
-      const thread = await h.commentsService.thread(
+      const thread = await h.thread(
         'open-page',
         await h.viewer(U.owner),
         'tab_a',

@@ -63,6 +63,23 @@ describe('Comments API (e2e)', () => {
       expect(JSON.stringify(body)).not.toMatch(/authorUserId|profileId|_id/);
     });
 
+    it('never names an author whose page the reader may not see (review item 1)', async () => {
+      // An admin whose own page is still pending writes as an admin.
+      ctx.models.profiles.docs.find(
+        (p) => p.ownerUserId === U.adminWithPage,
+      )!.reviewStatus = 'pending';
+      await post(U.adminWithPage, {
+        slug: 'open-page',
+        body: 'From an admin with a pending page.',
+      }).expect(201);
+      const { body } = await call(
+        'get',
+        '/members/profiles/open-page/comments',
+      ).expect(200);
+      expect(body.comments[0].author).toEqual({ kind: 'admin' });
+      expect(JSON.stringify(body)).not.toContain('admin-page');
+    });
+
     it('gives a signed-in reader private, no-store JSON', async () => {
       const { headers } = await call(
         'get',
@@ -305,6 +322,29 @@ describe('Comments API (e2e)', () => {
         .expect(413);
     });
   });
+
+  it.each([
+    ['post', '/me/comments'],
+    ['put', '/me/comments/cmt_x'],
+    ['delete', '/me/comments/cmt_x'],
+    ['post', '/me/suggestions'],
+    ['post', '/me/member-page/suggestions/cmt_x/accept'],
+    ['post', '/me/member-page/suggestions/cmt_x/decline'],
+  ] as const)(
+    'rations %s %s per visitor (WriteThrottle)',
+    async (method, path) => {
+      const once = () =>
+        request(app.getHttpServer())
+          [method](`/api/v1${path}`)
+          .set('X-Forwarded-For', '203.0.113.201')
+          .set('Authorization', `Bearer ${U.named}`)
+          .send({});
+      for (let i = 0; i < 10; i++) {
+        expect((await once()).status).not.toBe(429);
+      }
+      await once().expect(429);
+    },
+  );
 
   it('rations writes per visitor', async () => {
     const fixed = () =>

@@ -20,6 +20,7 @@ import {
   CommentWritesController,
 } from '../src/members/comments/comments.controller';
 import { CommentsService } from '../src/members/comments/comments.service';
+import { CommentStore } from '../src/members/comments/comment-store';
 import { SuggestionsService } from '../src/members/comments/suggestions.service';
 import {
   seedBlocks,
@@ -105,6 +106,7 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       MemberHistoryService,
       MemberWriteThrottleGuard,
       CommentsService,
+      CommentStore,
       SuggestionsService,
       CommentAuthorsService,
       CommentWritersService,

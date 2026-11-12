@@ -20,6 +20,7 @@ import {
 import { Comment, CommentSchema } from '../social/schemas/comment.schema';
 import { SocialModule } from '../social/social.module';
 import { CommentAuthorsService } from './comments/comment-authors.service';
+import { CommentStore } from './comments/comment-store';
 import { CommentWritersService } from './comments/comment-writers';
 import {
   CommentThreadsController,
@@ -74,6 +75,7 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
     PictureStore,
     MemberWriteThrottleGuard,
     CommentsService,
+    CommentStore,
     SuggestionsService,
     CommentAuthorsService,
     CommentWritersService,

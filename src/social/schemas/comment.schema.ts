@@ -157,6 +157,17 @@ export class Comment {
   @Prop({ type: SuggestionSchema })
   suggestion?: Suggestion;
 
+  /**
+   * Edits holding a turn on this comment (Chunk 9 review): a removal waits
+   * for them, so no version is written after a removal. Each is cleared when
+   * its edit ends, or after five minutes if the edit died.
+   */
+  @Prop({
+    type: [{ _id: false, id: { type: String }, at: { type: Date } }],
+    default: undefined,
+  })
+  editTurns?: Array<{ id: string; at: Date }>;
+
   @Prop({ type: Date })
   legacyCreatedAt?: Date;
 
@@ -199,6 +210,8 @@ CommentSchema.pre('validate', function () {
 
 CommentSchema.index({ commentId: 1 }, { unique: true });
 CommentSchema.index({ profileId: 1, tabId: 1, createdAt: 1 });
+// A thread page: top-level comments after a (createdAt, _id) cursor (Chunk 9).
+CommentSchema.index({ profileId: 1, tabId: 1, createdAt: 1, _id: 1 });
 CommentSchema.index(
   { parentCommentId: 1 },
   { partialFilterExpression: { parentCommentId: { $type: 'string' } } },

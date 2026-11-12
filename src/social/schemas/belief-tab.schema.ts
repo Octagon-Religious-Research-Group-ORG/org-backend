@@ -67,6 +67,16 @@ export class BeliefTab {
   @Prop({ type: Date })
   removedAt?: Date;
 
+  /**
+   * Text and title edits in progress (Chunk 9 review): the tab cannot be
+   * removed while one is held. See `members/tab-text-turns.ts`.
+   */
+  @Prop({
+    type: [{ _id: false, id: { type: String }, at: { type: Date } }],
+    default: undefined,
+  })
+  textTurns?: Array<{ id: string; at: Date }>;
+
   createdAt?: Date;
   updatedAt?: Date;
 }

@@ -131,7 +131,10 @@ export interface FakeModel {
   docs: Doc[];
   find: (filter?: Filter) => FakeQuery;
   findOne: (filter?: Filter) => FakeQuery;
-  exists: (filter: Filter) => Promise<{ _id: unknown } | null>;
+  exists: (filter: Filter) => Promise<{ _id: unknown } | null> & {
+    exec: () => Promise<{ _id: unknown } | null>;
+  };
+  deleteOne: (filter: Filter) => FakeResult;
   countDocuments: (filter?: Filter) => { exec: () => Promise<number> };
   create: (doc: Doc) => Promise<Doc>;
   updateOne: (filter: Filter, update: Doc) => FakeResult;
@@ -242,8 +245,20 @@ export function fakeModel(
     findOne: (filter) => query((found) => found[0] ?? null, filter),
     exists: (filter) => {
       const [doc] = matching(filter);
-      return Promise.resolve(doc ? { _id: doc._id } : null);
+      const answer = Promise.resolve(doc ? { _id: doc._id } : null);
+      return Object.assign(answer, { exec: () => answer });
     },
+    deleteOne: (filter) => ({
+      exec: () => {
+        options.beforeWrite?.('deleteOne', filter);
+        const [doc] = matching(filter);
+        if (doc) docs.splice(docs.indexOf(doc), 1);
+        return Promise.resolve({
+          matchedCount: doc ? 1 : 0,
+          modifiedCount: doc ? 1 : 0,
+        });
+      },
+    }),
     countDocuments: (filter) => ({
       exec: () => Promise.resolve(matching(filter).length),
     }),
