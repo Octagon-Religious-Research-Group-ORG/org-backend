@@ -137,6 +137,7 @@ export class CommentsService {
     const replies = await this.store.replies(
       profile._id,
       page.roots.map((root) => root.commentId),
+      page.imported,
     );
     const all = [...page.roots, ...[...replies.values()].flat()];
     const views = await this.views(all, viewer, profile._id, access.isOwner);

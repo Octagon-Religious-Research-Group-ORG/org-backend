@@ -59,7 +59,17 @@ function threadFilter(tabId: string | undefined) {
   return tabId === undefined ? { $exists: false } : tabId;
 }
 
-/** The light fields of a page's imported comments, for the thread index. */
+/** A page's imported comments, light, and their thread index. */
+export interface ImportedIndex {
+  rows: CommentSkeleton[];
+  index: ReturnType<typeof indexThreads>;
+}
+
+/**
+ * The light fields of a page's imported comments, for the thread index.
+ * Read whole, once per thread page: the Apple Pages import is a fixed set
+ * per page, so its size does not grow with use.
+ */
 async function importedIndex(
   commentModel: Model<CommentDocument>,
   profileId: Types.ObjectId,
@@ -87,7 +97,10 @@ export async function commentCounts(
   commentModel: Model<CommentDocument>,
   profileId: Types.ObjectId,
 ): Promise<Map<string, number>> {
-  const [native, imported] = await Promise.all([
+  const [native, imported]: [
+    Array<{ _id?: string | null; n: number }>,
+    ImportedIndex,
+  ] = await Promise.all([
     commentModel
       .aggregate<{ _id?: string | null; n: number }>([
         {
@@ -193,8 +206,12 @@ export class CommentStore {
     profileId: Types.ObjectId,
     tabId: string | undefined,
     after?: string,
-  ): Promise<{ roots: StoredComment[]; more: boolean } | undefined> {
-    const { rows, index } = await importedIndex(this.commentModel, profileId);
+  ): Promise<
+    | { roots: StoredComment[]; more: boolean; imported: ImportedIndex }
+    | undefined
+  > {
+    const imported = await importedIndex(this.commentModel, profileId);
+    const { rows, index } = imported;
     const importedRoots = rows
       .filter(
         (row) =>
@@ -235,6 +252,7 @@ export class CommentStore {
     return {
       roots: found.slice(0, THREAD_PAGE_SIZE),
       more: found.length > THREAD_PAGE_SIZE,
+      imported,
     };
   }
 
@@ -248,14 +266,17 @@ export class CommentStore {
   async replies(
     profileId: Types.ObjectId,
     rootIds: string[],
+    imported?: ImportedIndex,
   ): Promise<Map<string, StoredComment[]>> {
     const byRoot = new Map<string, StoredComment[]>(
       rootIds.map((id) => [id, []]),
     );
     if (rootIds.length === 0) return byRoot;
-    const { index } = await importedIndex(this.commentModel, profileId);
+    // The thread page read it already; read it here only when called alone.
+    const { index } =
+      imported ?? (await importedIndex(this.commentModel, profileId));
     const importedIds = rootIds.flatMap((id) => index.repliesOf.get(id) ?? []);
-    const [native, imported] = await Promise.all([
+    const [native, importedReplies] = await Promise.all([
       this.commentModel
         .find({
           parentCommentId: { $type: 'string', $in: rootIds },
@@ -273,7 +294,7 @@ export class CommentStore {
         reply,
       );
     }
-    for (const reply of imported) {
+    for (const reply of importedReplies) {
       const root = index.rootOf.get(reply.commentId) as string;
       (byRoot.get(root) as StoredComment[]).push(reply);
     }
