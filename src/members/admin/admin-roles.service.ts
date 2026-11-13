@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   HttpException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
@@ -90,6 +91,12 @@ export const DEMOTION_UNKNOWN =
   'The sign-in service did not confirm the removal, so the admin role may or may not have been removed. Role changes are paused for up to 5 minutes; then check the list, and if the role is gone, withdraw any invitations they sent.';
 export const FOLLOW_UP_UNKNOWN =
   'The role was removed, but the sign-in service did not confirm whether one of their pending admin invitations was withdrawn. Role changes are paused for up to 5 minutes; then check the invitation list.';
+export const DEMOTION_AUDIT_INCOMPLETE =
+  'The role was removed, but the audit record is incomplete: it shows the change as requested, not applied.';
+export const INVITE_AUDIT_INCOMPLETE =
+  'The invitation was sent, but the audit record is incomplete.';
+export const REVOKE_AUDIT_INCOMPLETE =
+  'The invitation was withdrawn, but the audit record is incomplete.';
 export const FOLLOW_UP_WARNING =
   'The role was removed, but their pending admin invitations could not all be checked or withdrawn. Check the invitation list.';
 
@@ -119,11 +126,12 @@ class LockLost extends ServiceUnavailableException {
 /**
  * Whether a failed write is KNOWN not to have changed anything in Clerk (or
  * known to have been applied), so the lock may be released: marked by the
- * layer that knew (`write-outcome.ts`), or the fence stopped it before the
- * send. Everything else is an unknown outcome.
+ * layer that knew (`write-outcome.ts`). Everything else is an unknown
+ * outcome. (The fence runs before these writes, so a LockLost never gets
+ * here.)
  */
 function isKnownOutcome(error: unknown): boolean {
-  return settledAs(error) !== undefined || error instanceof LockLost;
+  return settledAs(error) !== undefined;
 }
 
 function isDuplicateKey(error: unknown): boolean {
@@ -331,6 +339,7 @@ export class AdminRolesService {
       const others = holders.filter((holder) => holder.userId !== userId);
       if (others.length === 0) throw new ConflictException(LAST_ADMIN);
       await change.check();
+      let auditGap = false;
       try {
         await this.roles.setRole({
           actorUserId: adminId,
@@ -340,21 +349,26 @@ export class AdminRolesService {
           onUnknown: () => change.unknown(),
         });
       } catch (error) {
-        if (isKnownOutcome(error)) throw error;
-        change.unknown();
-        // Harmless either way: it only makes the next check ask Clerk.
-        await this.forgetRole(userId);
-        throw new ServiceUnavailableException(DEMOTION_UNKNOWN);
+        // Applied, only the audit entry failed: the follow-ups still run.
+        if (settledAs(error) === 'applied') auditGap = true;
+        else if (isKnownOutcome(error)) throw error;
+        else {
+          change.unknown();
+          // Harmless either way: it only makes the next check ask Clerk.
+          await this.forgetRole(userId);
+          throw new ServiceUnavailableException(DEMOTION_UNKNOWN);
+        }
       }
       const done = await this.afterDemotion(change, adminId, userId);
+      const warnings = [
+        ...(auditGap ? [DEMOTION_AUDIT_INCOMPLETE] : []),
+        ...(done === 'done'
+          ? []
+          : [done === 'unknown' ? FOLLOW_UP_UNKNOWN : FOLLOW_UP_WARNING]),
+      ];
       return {
         role: null,
-        ...(done === 'done'
-          ? {}
-          : {
-              followUpWarning:
-                done === 'unknown' ? FOLLOW_UP_UNKNOWN : FOLLOW_UP_WARNING,
-            }),
+        ...(warnings.length ? { followUpWarning: warnings.join(' ') } : {}),
       };
     });
   }
@@ -407,7 +421,10 @@ export class AdminRolesService {
       });
       let invitation: PendingInvitation;
       try {
-        await change.check();
+        // A failure of the fence read itself sent nothing either.
+        await change.check().catch((error: unknown) => {
+          throw error instanceof LockLost ? error : settle(error, 'not-sent');
+        });
         invitation = await this.directory.invite(
           email,
           as === 'admin' ? 'admin' : null,
@@ -419,7 +436,9 @@ export class AdminRolesService {
         // code after the send included) is unknown. Marked before anything
         // else can fail.
         const unknown = !(
-          settledAs(error) === 'refused' || error instanceof LockLost
+          settledAs(error) === 'refused' ||
+          settledAs(error) === 'not-sent' ||
+          error instanceof LockLost
         );
         if (unknown) change.unknown();
         await this.recordOrReport({
@@ -430,18 +449,30 @@ export class AdminRolesService {
         if (unknown) throw new ServiceUnavailableException(OUTCOME_UNKNOWN);
         throw error;
       }
-      await this.log.record({
-        ...entry,
-        action: 'invitation.sent',
-        details: {
-          as,
-          ...hidden,
-          attemptId,
-          invitationId: invitation.invitationId,
-          invitedBy: adminId,
-          ...(as === 'admin' ? { expiresInDays: ADMIN_INVITATION_DAYS } : {}),
-        },
-      });
+      try {
+        await this.log.record({
+          ...entry,
+          action: 'invitation.sent',
+          details: {
+            as,
+            ...hidden,
+            attemptId,
+            invitationId: invitation.invitationId,
+            invitedBy: adminId,
+            ...(as === 'admin' ? { expiresInDays: ADMIN_INVITATION_DAYS } : {}),
+          },
+        });
+      } catch (error) {
+        // Sent: the lock is released, and the admin is told what is missing.
+        // A later cleanup still finds it, through the open "requested" row.
+        this.logger.error(
+          `Invitation ${invitation.invitationId} was sent, but its audit entry failed: ${describe(error)}`,
+        );
+        throw settle(
+          new InternalServerErrorException(INVITE_AUDIT_INCOMPLETE),
+          'applied',
+        );
+      }
       return invitation;
     });
   }
@@ -466,6 +497,12 @@ export class AdminRolesService {
       } catch (error) {
         if (error instanceof ClerkOutcomeUnknown) {
           throw new ServiceUnavailableException(OUTCOME_UNKNOWN);
+        }
+        if (settledAs(error) === 'applied') {
+          throw settle(
+            new InternalServerErrorException(REVOKE_AUDIT_INCOMPLETE),
+            'applied',
+          );
         }
         throw error;
       }
@@ -514,7 +551,12 @@ export class AdminRolesService {
         await this.directory.pendingInvitations();
       if (!complete) done = false;
       for (const invitation of invitations) {
-        if (!isTheirs(invitation, sentIds, openWindows)) continue;
+        if (!isTheirs(invitation, sentIds, openWindows)) {
+          // Undated, so its window cannot be checked, but its address
+          // matches an attempt with no known outcome: say so (round 6).
+          if (isUndatedSuspect(invitation, openWindows)) done = false;
+          continue;
+        }
         try {
           await change.check();
           await this.revokeLogged(
@@ -525,9 +567,15 @@ export class AdminRolesService {
           );
         } catch (error) {
           done = false;
-          // Refused: try the next. Not sent (lock, deadline, log): stop.
-          // Anything else is an unknown outcome: stop, the lock is kept.
-          if (settledAs(error) === 'refused') continue;
+          // Refused, or withdrawn with only its audit entry failing: try
+          // the next. Not sent (lock, deadline, log): stop. Anything else is
+          // an unknown outcome: stop, the lock is kept.
+          if (
+            settledAs(error) === 'refused' ||
+            settledAs(error) === 'applied'
+          ) {
+            continue;
+          }
           if (!(error instanceof LockLost || settledAs(error) === 'not-sent')) {
             unknown = true;
           }
@@ -595,7 +643,18 @@ export class AdminRolesService {
       }
       throw error;
     }
-    await this.log.record({ ...entry, action: 'invitation.revoke.applied' });
+    try {
+      await this.log.record({
+        ...entry,
+        action: 'invitation.revoke.applied',
+      });
+    } catch (error) {
+      // Withdrawn: only the audit entry is missing.
+      this.logger.error(
+        `Invitation ${invitationId} was withdrawn, but its audit entry failed: ${describe(error)}`,
+      );
+      throw settle(error, 'applied');
+    }
   }
 
   /** An audit entry that must never replace the outcome being recorded. */
@@ -776,6 +835,20 @@ export function invitationLeads(rows: InvitationRow[]) {
     }
   }
   return { sentIds, openWindows };
+}
+
+/**
+ * A waiting admin invitation with no creation time whose address matches an
+ * attempt with no known outcome: it cannot be placed in that attempt's
+ * window, so it is neither withdrawn nor silently passed over (round 6).
+ */
+export function isUndatedSuspect(
+  invitation: PendingInvitation,
+  openWindows: Array<{ hash: string }>,
+): boolean {
+  if (invitation.role !== 'admin' || invitation.createdAt) return false;
+  const hash = emailForLog(invitation.email).emailHash;
+  return openWindows.some((window) => window.hash === hash);
 }
 
 /** Whether a waiting invitation is one the demoted admin sent or may have. */

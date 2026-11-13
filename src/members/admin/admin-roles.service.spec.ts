@@ -1,13 +1,15 @@
 import {
   ConflictException,
   ForbiddenException,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { settle } from '../../auth/write-outcome';
+import { ROLE_AUDIT_INCOMPLETE_MESSAGE } from '../../auth/roles.service';
+import { settle, settledAs } from '../../auth/write-outcome';
 import { ClerkTimedOut } from '../../auth/clerk-user-info.service';
 import {
   ADMIN_INVITATION_DAYS,
@@ -19,7 +21,10 @@ import {
   emailForLog,
   invitationLeads,
   isTheirs,
+  DEMOTION_AUDIT_INCOMPLETE,
   FOLLOW_UP_UNKNOWN,
+  INVITE_AUDIT_INCOMPLETE,
+  REVOKE_AUDIT_INCOMPLETE,
   FOLLOW_UP_WARNING,
   INVITATION_MATCH_SLACK_MS,
   LAST_ADMIN,
@@ -582,6 +587,215 @@ describe('AdminRolesService', () => {
       );
       expect(order).toContain('lock-bumped');
       expect(order).not.toContain('lock-bumped-WRONG');
+    });
+
+    it('an applied demotion whose audit entry failed still clears the cache and withdraws (round 6, MEDIUM-1)', async () => {
+      const { service, roles, adminAccess, logModel, directory, settingModel } =
+        build({ identity: { role: 'admin' } });
+      roles.setRole.mockRejectedValueOnce(
+        settle(
+          new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE),
+          'applied',
+        ),
+      );
+      logModel.find.mockReturnValueOnce(
+        chain([
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+        ]),
+      );
+      directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [{ invitationId: 'inv_a', email: 'a@example.org' }],
+        complete: true,
+      });
+      await expect(service.demote(ADMIN, OTHER, 'r')).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: DEMOTION_AUDIT_INCOMPLETE,
+      });
+      expect(adminAccess.forgetRole).toHaveBeenCalledWith(OTHER);
+      expect(directory.revoke).toHaveBeenCalledWith('inv_a');
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      // Together with a follow-up warning.
+      const both = build({ identity: { role: 'admin' } });
+      both.roles.setRole.mockRejectedValueOnce(
+        settle(
+          new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE),
+          'applied',
+        ),
+      );
+      both.logModel.find.mockReturnValueOnce(
+        chain([{ action: 'invitation.sent', at: new Date(), details: {} }]),
+      );
+      both.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [],
+        complete: false,
+      });
+      await expect(
+        both.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: `${DEMOTION_AUDIT_INCOMPLETE} ${FOLLOW_UP_WARNING}`,
+      });
+    });
+
+    it('an applied promotion whose audit entry failed frees the lock and says so (round 6, M2b)', async () => {
+      const { service, roles, settingModel } = build();
+      roles.setRole.mockRejectedValueOnce(
+        settle(
+          new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE),
+          'applied',
+        ),
+      );
+      await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
+        new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE),
+      );
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      expect(settingModel.updateOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('warns about an undated admin invitation to an address with an open attempt (round 6, MEDIUM-2: M27, M28)', async () => {
+      const at = new Date();
+      const hash = emailForLog('x@example.org').emailHash;
+      const open = [
+        {
+          action: 'invitation.requested',
+          at,
+          details: { emailHash: hash, attemptId: 'a1' },
+        },
+      ];
+      const run = async (invitations: unknown[]) => {
+        const ctx = build({ identity: { role: 'admin' } });
+        ctx.logModel.find.mockReturnValueOnce(chain(open));
+        ctx.directory.pendingInvitations.mockResolvedValueOnce({
+          invitations,
+          complete: true,
+        });
+        const answer = await ctx.service.demote(ADMIN, OTHER, 'r');
+        return { answer, revoke: ctx.directory.revoke };
+      };
+      // Undated, admin, same address: warned about, not withdrawn (M27).
+      const suspect = await run([
+        { invitationId: 'inv_u', email: 'x@example.org', role: 'admin' },
+      ]);
+      expect(suspect.answer).toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
+      });
+      expect(suspect.revoke).not.toHaveBeenCalled();
+      // Undated but another address, or a member invitation: no warning (M28).
+      const other = await run([
+        { invitationId: 'inv_o', email: 'y@example.org', role: 'admin' },
+        { invitationId: 'inv_m', email: 'x@example.org' },
+      ]);
+      expect(other.answer).toStrictEqual({ role: null });
+      // Dated and inside the window: withdrawn as before.
+      const dated = await run([
+        {
+          invitationId: 'inv_d',
+          email: 'x@example.org',
+          role: 'admin',
+          createdAt: at.toISOString(),
+        },
+      ]);
+      expect(dated.answer).toStrictEqual({ role: null });
+      expect(dated.revoke).toHaveBeenCalledWith('inv_d');
+    });
+
+    it('a withdrawal applied but not logged moves on to the next and frees the lock (round 6, LOW-3)', async () => {
+      const errorLog = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      const ctx = build({ identity: { role: 'admin' } });
+      ctx.logModel.find.mockReturnValueOnce(
+        chain([
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_b' },
+          },
+        ]),
+      );
+      ctx.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [
+          { invitationId: 'inv_a', email: 'a@example.org' },
+          { invitationId: 'inv_b', email: 'b@example.org' },
+        ],
+        complete: true,
+      });
+      let applied = 0;
+      ctx.log.record.mockImplementation((entry: { action: string }) =>
+        entry.action === 'invitation.revoke.applied' && applied++ === 0
+          ? Promise.reject(new Error('mongo down'))
+          : Promise.resolve({}),
+      );
+      await expect(
+        ctx.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
+      });
+      expect(ctx.directory.revoke.mock.calls).toEqual([['inv_a'], ['inv_b']]);
+      expect(ctx.settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      // Withdrawn by an admin, the same failure: said plainly, lock freed.
+      const single = build();
+      single.log.record.mockImplementation((entry: { action: string }) =>
+        entry.action === 'invitation.revoke.applied'
+          ? Promise.reject(new Error('mongo down'))
+          : Promise.resolve({}),
+      );
+      const error = await single.service
+        .revokeInvitation(ADMIN, 'inv_1')
+        .catch((e: unknown) => e);
+      expect(error).toEqual(
+        new InternalServerErrorException(REVOKE_AUDIT_INCOMPLETE),
+      );
+      expect(single.settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      errorLog.mockRestore();
+    });
+
+    it('an invitation sent but not logged is said plainly, and frees the lock (round 6, LOW-4)', async () => {
+      const errorLog = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      const { service, log, settingModel } = build();
+      log.record.mockImplementation((entry: { action: string }) =>
+        entry.action === 'invitation.sent'
+          ? Promise.reject(new Error('mongo down'))
+          : Promise.resolve({}),
+      );
+      const error = await service
+        .invite(ADMIN, 'a@example.org', 'admin', undefined)
+        .catch((e: unknown) => e);
+      expect(error).toEqual(
+        new InternalServerErrorException(INVITE_AUDIT_INCOMPLETE),
+      );
+      expect(settledAs(error)).toBe('applied');
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      errorLog.mockRestore();
+    });
+
+    it('a fence that cannot be read before an invitation sent nothing (round 6, LOW-5)', async () => {
+      const { service, settingModel, log, directory } = build();
+      settingModel.exists.mockReturnValueOnce({
+        exec: () => Promise.reject(new Error('fence read failed')),
+      });
+      await expect(
+        service.invite(ADMIN, 'a@example.org', 'admin', undefined),
+      ).rejects.toThrow('fence read failed');
+      expect(directory.invite).not.toHaveBeenCalled();
+      expect(log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'invitation.failed' }),
+      );
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      expect(settingModel.updateOne).toHaveBeenCalledTimes(1);
     });
 
     it('passes a write Clerk refused on, and frees the lock', async () => {
