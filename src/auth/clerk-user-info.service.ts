@@ -8,6 +8,35 @@ import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
 import { type MemberRole, parseRole } from './roles';
 
+/**
+ * Longest wait for one Clerk call (Chunk 12, review round 2). Clerk's client
+ * has no timeout of its own; past this the caller gets a 503, so work that a
+ * caller stopped waiting for still settles soon, well inside the role lock's
+ * stale window.
+ */
+export const CLERK_TIMEOUT_MS = 10_000;
+
+/** `work`, or a rejection after `ms`; the timer never outlives it. */
+export async function withClerkTimeout<T>(
+  work: Promise<T>,
+  ms = CLERK_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Clerk did not answer in time.')),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface ClerkIdentity {
   /** Normalised primary email; absent for username-only accounts. */
   email?: string;
@@ -59,9 +88,11 @@ export class ClerkUserInfoService {
    */
   async setRole(userId: string, role: MemberRole | null): Promise<void> {
     try {
-      await this.clerk.users.updateUserMetadata(userId, {
-        publicMetadata: { role },
-      });
+      await withClerkTimeout(
+        this.clerk.users.updateUserMetadata(userId, {
+          publicMetadata: { role },
+        }),
+      );
     } catch (error) {
       throw this.translate(error);
     }
@@ -69,7 +100,7 @@ export class ClerkUserInfoService {
 
   private async fetchUser(userId: string) {
     try {
-      return await this.clerk.users.getUser(userId);
+      return await withClerkTimeout(this.clerk.users.getUser(userId));
     } catch (error) {
       throw this.translate(error);
     }

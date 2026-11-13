@@ -68,6 +68,9 @@ export class AdminAccessService {
 
   async synchronizeProfile(request: AuthenticatedRequest) {
     const authProviderId = getUserSub(request);
+    // When the read STARTED, not when it ended: a demotion between the two
+    // (forgetRole's `roleRevokedAt`) makes this answer stale at once.
+    const checkedAt = new Date();
     const identity = await this.clerkUserInfo.getIdentity(authProviderId);
     const authEmail = identity.email?.trim().toLowerCase();
     const authEmailVerified = identity.emailVerified === true;
@@ -98,7 +101,7 @@ export class AdminAccessService {
             authEmailVerified,
             ...(authRole ? { authRole } : {}),
             ...(accessTokenHash ? { authEmailTokenHash: accessTokenHash } : {}),
-            authRoleCheckedAt: new Date(),
+            authRoleCheckedAt: checkedAt,
             isAdmin,
           },
           ...(Object.keys(unset).length ? { $unset: unset } : {}),
@@ -123,7 +126,10 @@ export class AdminAccessService {
         .lean()
         .exec();
 
-      if (profile && this.roleIsFresh(profile.authRoleCheckedAt)) {
+      if (
+        profile &&
+        this.roleIsFresh(profile.authRoleCheckedAt, profile.roleRevokedAt)
+      ) {
         const isAdmin = this.decideAdmin(
           authProviderId,
           profile.authRole,
@@ -213,7 +219,9 @@ export class AdminAccessService {
         { authProviderId: userId },
         {
           $unset: { authRoleCheckedAt: 1, authEmailTokenHash: 1 },
-          $set: { isAdmin: false },
+          // A sync whose Clerk read began before this moment cannot make its
+          // answer count afterwards, whenever it writes.
+          $set: { isAdmin: false, roleRevokedAt: new Date() },
         },
       )
       .exec();
@@ -273,10 +281,19 @@ export class AdminAccessService {
     });
   }
 
-  private roleIsFresh(checkedAt: Date | undefined): boolean {
+  /**
+   * A cached role is trusted only while young, and only if it was read after
+   * the last demotion of this account (review round 2, LOW 1).
+   */
+  private roleIsFresh(
+    checkedAt: Date | undefined,
+    revokedAt: Date | undefined,
+  ): boolean {
     return (
       checkedAt !== undefined &&
-      Date.now() - new Date(checkedAt).getTime() < ROLE_CACHE_MAX_AGE_MS
+      Date.now() - new Date(checkedAt).getTime() < ROLE_CACHE_MAX_AGE_MS &&
+      (revokedAt === undefined ||
+        new Date(checkedAt).getTime() > new Date(revokedAt).getTime())
     );
   }
 

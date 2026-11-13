@@ -60,6 +60,13 @@ export class MemberProfile {
   @Prop({ type: Date })
   authRoleCheckedAt?: Date;
 
+  /**
+   * When this account last lost a role (Chunk 12): a role cached from a
+   * Clerk read that began earlier is never trusted again.
+   */
+  @Prop({ type: Date })
+  roleRevokedAt?: Date;
+
   @Prop({ type: String, default: '' })
   preferredName: string;
 

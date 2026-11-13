@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
+import { withClerkTimeout } from './clerk-user-info.service';
 import { type MemberRole, parseRole } from './roles';
 
 /** Users read per Clerk request (Clerk's maximum page). */
@@ -90,23 +91,26 @@ export class ClerkAdminDirectoryService {
   }
 
   /**
-   * The accounts whose primary address is one of `emails` (at most
-   * {@link CLERK_PAGE}), with their role and whether the address is
-   * verified: for the switch-over allowlist's admins (Chunk 12).
+   * The accounts whose primary address is one of `emails`, with their role
+   * and whether the address is verified: for the switch-over allowlist's
+   * admins (Chunk 12). Asked {@link CLERK_PAGE} addresses at a time.
    */
   async usersByEmail(
     emails: string[],
   ): Promise<
     Array<{ holder: RoleHolder; role?: MemberRole; emailVerified: boolean }>
   > {
-    if (emails.length === 0) return [];
-    const { data } = await this.call(() =>
-      this.clerk.users.getUserList({
-        emailAddress: emails.slice(0, CLERK_PAGE),
-        limit: CLERK_PAGE,
-      }),
-    );
-    return data.map((user) => {
+    const users: Array<ClerkUserRow & { publicMetadata: unknown }> = [];
+    for (let start = 0; start < emails.length; start += CLERK_PAGE) {
+      const { data } = await this.call(() =>
+        this.clerk.users.getUserList({
+          emailAddress: emails.slice(start, start + CLERK_PAGE),
+          limit: CLERK_PAGE,
+        }),
+      );
+      users.push(...data);
+    }
+    return users.map((user) => {
       const { holder, emailVerified } = holderView(user);
       const role = parseRole(user.publicMetadata);
       return { holder, ...(role ? { role } : {}), emailVerified };
@@ -194,7 +198,8 @@ export class ClerkAdminDirectoryService {
     mode: ClerkCallMode = 'read',
   ): Promise<T> {
     try {
-      return await run();
+      // Bounded, so work a caller stopped waiting for still settles soon.
+      return await withClerkTimeout(run());
     } catch (error) {
       throw translate(error, mode);
     }

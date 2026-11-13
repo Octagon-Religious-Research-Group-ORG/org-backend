@@ -16,6 +16,8 @@ import {
   CLERK_CALL_TIMEOUT_MS,
   CLERK_TOO_SLOW,
   emailForLog,
+  FOLLOW_UP_WARNING,
+  INVITATION_MATCH_SLACK_MS,
   LAST_ADMIN,
   NO_LONGER_ADMIN,
   NOT_A_MEMBER,
@@ -149,6 +151,12 @@ function build(
 }
 
 describe('AdminRolesService', () => {
+  it('words the follow-up warning for the admin', () => {
+    expect(FOLLOW_UP_WARNING).toContain(
+      'could not all be checked or withdrawn',
+    );
+  });
+
   afterEach(() => jest.useRealTimers());
 
   describe('admins', () => {
@@ -223,7 +231,14 @@ describe('AdminRolesService', () => {
         'role@example.org',
       ]);
       expect(admins).toEqual([
-        { userId: ADMIN, email: 'a@example.org', isYou: true },
+        // A Clerk admin also on the allowlist: the dashboard cannot remove
+        // them (round 2, LOW 3).
+        {
+          userId: ADMIN,
+          email: 'a@example.org',
+          isYou: true,
+          allowlisted: true,
+        },
         {
           userId: 'user_list',
           email: 'list@example.org',
@@ -231,6 +246,26 @@ describe('AdminRolesService', () => {
           viaAllowlist: true,
         },
       ]);
+    });
+
+    it('still lists the Clerk admins when the allowlist cannot be read (round 2, LOW 3)', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      const { service, directory } = build({ allowlisted: ['a@example.org'] });
+      directory.usersByEmail.mockRejectedValueOnce(new Error('clerk down'));
+      await expect(service.admins(ADMIN)).resolves.toEqual({
+        admins: [
+          { userId: ADMIN, isYou: true },
+          { userId: OTHER, isYou: false },
+        ],
+        complete: true,
+        allowlistUnknown: true,
+      });
+      directory.usersByEmail.mockRejectedValueOnce('raw');
+      await service.admins(ADMIN);
+      expect(warn).toHaveBeenCalledTimes(2);
+      warn.mockRestore();
     });
   });
 
@@ -539,31 +574,91 @@ describe('AdminRolesService', () => {
       expect(adminAccess.forgetRole).not.toHaveBeenCalled();
     });
 
-    it('withdraws the waiting admin invitations the demoted admin sent (MEDIUM-3)', async () => {
+    it('withdraws the waiting admin invitations the demoted admin sent or may have sent (MEDIUM-3, round 2)', async () => {
       const { service, logModel, directory, log, order } = build({
         identity: { role: 'admin' },
       });
+      const askedAt = new Date('2026-11-13T10:00:00Z');
+      const hash = emailForLog('timed-out@example.org').emailHash;
       logModel.find.mockReturnValueOnce(
         chain([
-          { details: { invitationId: 'inv_theirs' } },
-          { details: { invitationId: 'inv_accepted' } },
+          {
+            action: 'invitation.sent',
+            at: askedAt,
+            details: { invitationId: 'inv_theirs', emailHash: 'h1' },
+          },
+          {
+            action: 'invitation.sent',
+            at: askedAt,
+            details: { invitationId: 'inv_accepted', emailHash: 'h2' },
+          },
+          // A request that timed out: Clerk created it anyway.
+          {
+            action: 'invitation.requested',
+            at: askedAt,
+            details: { emailHash: hash },
+          },
+          {
+            action: 'invitation.unknown',
+            at: new Date(askedAt.getTime() + 5),
+            details: { emailHash: hash },
+          },
         ]),
       );
       directory.pendingInvitations.mockResolvedValueOnce({
         invitations: [
-          { invitationId: 'inv_theirs' },
-          { invitationId: 'inv_someone_else' },
+          {
+            invitationId: 'inv_theirs',
+            email: 'x@example.org',
+            createdAt: askedAt.toISOString(),
+          },
+          {
+            invitationId: 'inv_someone_else',
+            email: 'y@example.org',
+            role: 'admin',
+            createdAt: askedAt.toISOString(),
+          },
+          {
+            invitationId: 'inv_lost',
+            email: 'timed-out@example.org',
+            role: 'admin',
+            createdAt: new Date(askedAt.getTime() + 2_000).toISOString(),
+          },
+          // Same address, but as a member, or long before: not theirs.
+          {
+            invitationId: 'inv_member',
+            email: 'timed-out@example.org',
+            createdAt: askedAt.toISOString(),
+          },
+          {
+            invitationId: 'inv_old',
+            email: 'timed-out@example.org',
+            role: 'admin',
+            createdAt: new Date(
+              askedAt.getTime() - INVITATION_MATCH_SLACK_MS - 1,
+            ).toISOString(),
+          },
         ],
         complete: true,
       });
-      await service.demote(ADMIN, OTHER, 'r');
+      await expect(service.demote(ADMIN, OTHER, 'r')).resolves.toEqual({
+        role: null,
+      });
       expect(logModel.find).toHaveBeenCalledWith({
-        action: 'invitation.sent',
         actorUserId: OTHER,
+        action: {
+          $in: [
+            'invitation.sent',
+            'invitation.requested',
+            'invitation.unknown',
+          ],
+        },
         'details.as': 'admin',
       });
-      expect(directory.revoke).toHaveBeenCalledTimes(1);
-      expect(directory.revoke).toHaveBeenCalledWith('inv_theirs');
+      expect(directory.revoke.mock.calls).toEqual([
+        ['inv_theirs'],
+        ['inv_lost'],
+      ]);
       expect(log.record).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'invitation.revoke.applied',
@@ -576,7 +671,7 @@ describe('AdminRolesService', () => {
       );
     });
 
-    it('never fails a done demotion over the follow-ups, and says so', async () => {
+    it('still demotes when a follow-up fails, and says so in the answer (round 2, LOW 2)', async () => {
       const errorLog = jest
         .spyOn(Logger.prototype, 'error')
         .mockImplementation(() => undefined);
@@ -584,29 +679,120 @@ describe('AdminRolesService', () => {
         identity: { role: 'admin' },
       });
       adminAccess.forgetRole.mockRejectedValueOnce(new Error('cache'));
-      logModel.find.mockReturnValueOnce(chain([{ details: {} }]));
+      logModel.find.mockReturnValueOnce(
+        chain([{ action: 'invitation.sent', at: new Date(), details: {} }]),
+      );
       directory.pendingInvitations.mockRejectedValueOnce(new Error('list'));
-      await expect(service.demote(ADMIN, OTHER, 'r')).resolves.toEqual({
+      await expect(service.demote(ADMIN, OTHER, 'r')).resolves.toStrictEqual({
         role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
       });
       expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('cache'));
       expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('list'));
-      // A single revoke failing does not stop the others.
+      // A single revoke failing does not stop the others, and warns.
       const second = build({ identity: { role: 'admin' } });
       second.logModel.find.mockReturnValueOnce(
         chain([
-          { details: { invitationId: 'inv_a' } },
-          { details: { invitationId: 'inv_b' } },
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_b' },
+          },
         ]),
       );
       second.directory.pendingInvitations.mockResolvedValueOnce({
-        invitations: [{ invitationId: 'inv_a' }, { invitationId: 'inv_b' }],
+        invitations: [
+          {
+            invitationId: 'inv_a',
+            email: 'a@example.org',
+            createdAt: new Date().toISOString(),
+          },
+          {
+            invitationId: 'inv_b',
+            email: 'b@example.org',
+            createdAt: new Date().toISOString(),
+          },
+        ],
         complete: true,
       });
       second.directory.revoke.mockRejectedValueOnce(new Error('gone'));
-      await second.service.demote(ADMIN, OTHER, 'r');
+      await expect(
+        second.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
+      });
       expect(second.directory.revoke).toHaveBeenCalledTimes(2);
+      // An invitation list cut short is a warning too.
+      const third = build({ identity: { role: 'admin' } });
+      third.logModel.find.mockReturnValueOnce(
+        chain([{ action: 'invitation.sent', at: new Date(), details: {} }]),
+      );
+      third.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [],
+        complete: false,
+      });
+      await expect(
+        third.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
+      });
       errorLog.mockRestore();
+    });
+
+    it('keeps the lock until a timed-out role write settles (round 2, the probe order)', async () => {
+      jest.useFakeTimers();
+      const { service, roles, order, settingModel } = build({
+        identity: { role: 'admin' },
+      });
+      let landWrite: () => void = () => undefined;
+      roles.setRole.mockImplementationOnce(() => {
+        order.push('CLERK-WRITE');
+        return new Promise<void>((resolve) => {
+          landWrite = () => {
+            order.push('CLERK-WRITE-LANDED');
+            resolve();
+          };
+        });
+      });
+      const caught = service
+        .demote(ADMIN, OTHER, 'r')
+        .catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(ROLE_WRITE_TIMEOUT_MS + 1);
+      expect(await caught).toEqual(
+        new ServiceUnavailableException(CLERK_TOO_SLOW),
+      );
+      // The answer is back, but the write may still land: no unlock yet.
+      expect(order).toEqual([
+        'lock',
+        'actor-check',
+        'CLERK-WRITE',
+        'role.change.timeout',
+      ]);
+      expect(settingModel.deleteOne).not.toHaveBeenCalled();
+      landWrite();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(order.slice(-2)).toEqual(['CLERK-WRITE-LANDED', 'unlock']);
+    });
+
+    it('never releases early for a write that never settles: the lock goes stale', async () => {
+      jest.useFakeTimers();
+      const { service, roles, settingModel } = build({
+        identity: { role: 'admin' },
+      });
+      roles.setRole.mockReturnValueOnce(new Promise(() => undefined));
+      const caught = service
+        .demote(ADMIN, OTHER, 'r')
+        .catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(ROLE_LOCK_STALE_MS);
+      expect(await caught).toBeInstanceOf(ServiceUnavailableException);
+      expect(settingModel.deleteOne).not.toHaveBeenCalled();
     });
   });
 
@@ -701,6 +887,46 @@ describe('AdminRolesService', () => {
       expect(log.record).toHaveBeenLastCalledWith(
         expect.objectContaining({ reason: 'Admin invited a new member.' }),
       );
+    });
+
+    it('logs a timed-out invitation as unknown, and keeps the lock until it settles (round 2)', async () => {
+      jest.useFakeTimers();
+      const { service, directory, log, settingModel } = build();
+      let land: () => void = () => undefined;
+      directory.invite.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            land = () =>
+              resolve({
+                invitationId: 'inv_late',
+                email: 'late@example.org',
+                createdAt: '2026-11-13T00:00:00.000Z',
+              });
+          }),
+      );
+      const caught = service
+        .invite(ADMIN, 'late@example.org', 'admin', undefined)
+        .catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(CLERK_CALL_TIMEOUT_MS + 1);
+      expect(await caught).toEqual(
+        new ServiceUnavailableException(CLERK_TOO_SLOW),
+      );
+      expect(log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          action: 'invitation.unknown',
+          details: expect.objectContaining({
+            as: 'admin',
+            emailHash: emailForLog('late@example.org').emailHash,
+          }) as unknown,
+        }),
+      );
+      expect(JSON.stringify(log.record.mock.calls)).not.toContain(
+        'late@example.org',
+      );
+      expect(settingModel.deleteOne).not.toHaveBeenCalled();
+      land();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
     });
 
     it('logs a failed or lost invitation and passes the refusal on', async () => {

@@ -49,12 +49,30 @@ export const ROLE_WRITE_TIMEOUT_MS = 15_000;
 export const ROLE_CHANGE_DEADLINE_MS = 90_000;
 /**
  * A lock this old belongs to a change that died, and is taken over. Far
- * longer than {@link ROLE_CHANGE_DEADLINE_MS}, so a live change has always
- * given up before anyone can take its lock (review MEDIUM-1).
+ * longer than {@link ROLE_CHANGE_DEADLINE_MS} and than any Clerk call can
+ * run (each has its own timeout, `CLERK_TIMEOUT_MS`), so a change and every
+ * call it started have settled before anyone can take its lock.
  */
 export const ROLE_LOCK_STALE_MS = 300_000;
 /** Admin invitations expire after this many days (Clerk's default is 30). */
 export const ADMIN_INVITATION_DAYS = 3;
+/**
+ * An invitation Clerk created at most this long before its `requested` log
+ * entry is still the one that entry asked for (clocks differ a little).
+ */
+export const INVITATION_MATCH_SLACK_MS = 60_000;
+
+/**
+ * The timings in force. Production uses the constants above; a test may
+ * shorten them to reproduce a slow Clerk in real time.
+ */
+export const ROLE_TIMING = {
+  clerkCallMs: CLERK_CALL_TIMEOUT_MS,
+  listMs: CLERK_LIST_TIMEOUT_MS,
+  writeMs: ROLE_WRITE_TIMEOUT_MS,
+  deadlineMs: ROLE_CHANGE_DEADLINE_MS,
+  staleMs: ROLE_LOCK_STALE_MS,
+};
 
 export const NOT_A_MEMBER = 'That account does not exist.';
 export const ALREADY_ADMIN = 'That person is already an admin.';
@@ -76,6 +94,8 @@ export const ROLE_CHANGE_LOST =
   'This change took too long and was stopped before anything was changed. Please try again.';
 export const CLERK_TOO_SLOW =
   'The sign-in service took too long to answer. Please try again; check the moderation log first.';
+export const FOLLOW_UP_WARNING =
+  'The role was removed, but their pending admin invitations could not all be checked or withdrawn. Check the invitation list.';
 
 /** An admin as the dashboard lists it. */
 export interface AdminView extends RoleHolder {
@@ -87,6 +107,8 @@ export interface AdminView extends RoleHolder {
    * removed from the server configuration, never from the dashboard.
    */
   viaAllowlist?: true;
+  /** A Clerk admin whose address is also on the allowlist. */
+  allowlisted?: true;
 }
 
 export type InviteAs = 'admin' | 'member';
@@ -132,24 +154,29 @@ export function emailForLog(email: string) {
   };
 }
 
-/** A role change's hold on the lock; `check` throws once it is lost. */
-interface Fence {
+/**
+ * One role change's hold on the lock.
+ * - `check` throws once the lock is lost or the deadline has passed;
+ * - `timed` waits for a Clerk call at most `ms`; a call it stops waiting for
+ *   is remembered, and the lock is kept until that call settles too (review
+ *   round 2): a write still in flight must never run beside the next change.
+ */
+interface Change {
   check(): Promise<void>;
+  timed<T>(work: Promise<T>, ms: number): Promise<T>;
 }
 
 /**
  * The Roles section of the admin dashboard (Chunk 12).
  *
  * - Every change (promote, demote, invite, withdraw) runs under one lock, and
- *   first asks Clerk, with no cache, whether the ACTOR is still an admin: a
- *   demoted admin's cached role must not let them act (review HIGH-1).
+ *   first asks Clerk, with no cache, whether the ACTOR is still an admin.
  * - Nobody changes their own role, and the last admin cannot be removed.
- * - Clerk calls have timeouts and the whole change a deadline far inside the
- *   lock's stale window; right before each Clerk write the change checks it
- *   still holds the lock (a fencing token), so a lock taken over can never
- *   let two changes write (review MEDIUM-1).
+ * - Clerk calls have timeouts; the change has a deadline; right before each
+ *   Clerk write it checks it still holds the lock (a fencing token); and the
+ *   lock is released only once every call the change started has settled.
  * - A demotion clears the target's cached role and withdraws the admin
- *   invitations they sent that are still waiting (review MEDIUM-3).
+ *   invitations they sent or may have sent that are still waiting.
  * - The switch-over allowlist's admins are listed, but changed only in the
  *   server configuration; they never count towards "the last admin".
  * - There is deliberately no password tool (plan §2b item 1).
@@ -176,25 +203,40 @@ export class AdminRolesService {
     this.appUrl = config.getOrThrow<string>('PUBLIC_APP_URL');
   }
 
-  async admins(
-    adminId: string,
-  ): Promise<{ admins: AdminView[]; complete: boolean }> {
+  async admins(adminId: string): Promise<{
+    admins: AdminView[];
+    complete: boolean;
+    /** The allowlist could not be read; its admins may be missing. */
+    allowlistUnknown?: true;
+  }> {
     const { holders, complete } = await this.directory.holdersOf('admin');
     const clerkAdmins = new Set(holders.map((holder) => holder.userId));
     const allowlisted = new Set(this.adminAccess.allowlist());
-    const allowlistOnly = (
-      await this.directory.usersByEmail([...allowlisted])
-    ).filter(
-      ({ holder, role, emailVerified }) =>
-        emailVerified &&
-        role !== 'admin' &&
-        holder.email !== undefined &&
-        allowlisted.has(holder.email) &&
-        !clerkAdmins.has(holder.userId),
-    );
+    let onList: Array<{ holder: RoleHolder; role?: string }> = [];
+    let allowlistUnknown = false;
+    try {
+      onList = (await this.directory.usersByEmail([...allowlisted])).filter(
+        ({ holder, emailVerified }) =>
+          emailVerified &&
+          holder.email !== undefined &&
+          allowlisted.has(holder.email),
+      );
+    } catch (error) {
+      allowlistUnknown = true;
+      this.logger.warn(
+        `Could not read the allowlist's accounts: ${describe(error)}`,
+      );
+    }
+    const listedIds = new Set(onList.map(({ holder }) => holder.userId));
     const everyone = [
       ...holders.map((holder) => ({ holder, viaAllowlist: false })),
-      ...allowlistOnly.map(({ holder }) => ({ holder, viaAllowlist: true })),
+      ...onList
+        // A Clerk admin the list read missed is not "allowlist only".
+        .filter(
+          ({ holder, role }) =>
+            !clerkAdmins.has(holder.userId) && role !== 'admin',
+        )
+        .map(({ holder }) => ({ holder, viaAllowlist: true })),
     ];
     const pages = await this.profileModel
       .find({
@@ -216,9 +258,13 @@ export class AdminRolesService {
             : {}),
           isYou: holder.userId === adminId,
           ...(viaAllowlist ? { viaAllowlist: true as const } : {}),
+          ...(!viaAllowlist && listedIds.has(holder.userId)
+            ? { allowlisted: true as const }
+            : {}),
         };
       }),
       complete,
+      ...(allowlistUnknown ? { allowlistUnknown: true as const } : {}),
     };
   }
 
@@ -230,17 +276,19 @@ export class AdminRolesService {
    */
   async promote(adminId: string, userId: string, reason: string) {
     if (userId === adminId) throw new ForbiddenException(OWN_PROMOTION);
-    return this.withRoleLock(adminId, async (fence) => {
-      await this.requireActorAdmin(adminId);
-      const identity = await this.identityOf(userId);
+    return this.withRoleLock(adminId, async (change) => {
+      await this.requireActorAdmin(change, adminId);
+      const identity = await this.identityOf(change, userId);
       if (identity.role === 'admin') throw new ConflictException(ALREADY_ADMIN);
-      await fence.check();
-      await this.setRole(adminId, userId, 'admin', reason);
+      await change.check();
+      await this.setRole(change, adminId, userId, 'admin', reason);
       return { role: 'admin' as const };
     });
   }
 
   /**
+   * @returns the new role, and a warning when a follow-up (clearing the
+   *   cached role, withdrawing their invitations) did not fully happen
    * @throws ForbiddenException for yourself, or an actor no longer an admin
    * @throws ConflictException for the last admin, someone not an admin, an
    *   allowlist admin, or another role change running
@@ -248,9 +296,9 @@ export class AdminRolesService {
    */
   async demote(adminId: string, userId: string, reason: string) {
     if (userId === adminId) throw new ForbiddenException(OWN_DEMOTION);
-    return this.withRoleLock(adminId, async (fence) => {
-      await this.requireActorAdmin(adminId);
-      const identity = await this.identityOf(userId);
+    return this.withRoleLock(adminId, async (change) => {
+      await this.requireActorAdmin(change, adminId);
+      const identity = await this.identityOf(change, userId);
       if (
         this.adminAccess.isAllowlisted(identity.email, identity.emailVerified)
       ) {
@@ -258,17 +306,21 @@ export class AdminRolesService {
       }
       if (identity.role !== 'admin') throw new ConflictException(NOT_ADMIN);
       const { holders, complete } = await this.clerkCall(
+        change,
         this.directory.holdersOf('admin'),
-        CLERK_LIST_TIMEOUT_MS,
+        ROLE_TIMING.listMs,
       );
       if (!complete) throw new ServiceUnavailableException(ADMINS_UNCOUNTABLE);
       // Clerk roles only: an allowlist admin may vanish with a config change.
       const others = holders.filter((holder) => holder.userId !== userId);
       if (others.length === 0) throw new ConflictException(LAST_ADMIN);
-      await fence.check();
-      await this.setRole(adminId, userId, null, reason);
-      await this.afterDemotion(adminId, userId);
-      return { role: null };
+      await change.check();
+      await this.setRole(change, adminId, userId, null, reason);
+      const done = await this.afterDemotion(change, adminId, userId);
+      return {
+        role: null,
+        ...(done ? {} : { followUpWarning: FOLLOW_UP_WARNING }),
+      };
     });
   }
 
@@ -286,6 +338,8 @@ export class AdminRolesService {
    * @throws ForbiddenException for an actor no longer an admin
    * @throws ConflictException / BadRequestException from Clerk, after the
    *   `failed` entry is written
+   * @throws ServiceUnavailableException when Clerk does not answer in time,
+   *   after an `unknown` entry: the invitation may exist
    */
   async invite(
     adminId: string,
@@ -306,8 +360,8 @@ export class AdminRolesService {
       targetId: `email-sha256:${hidden.emailHash.slice(0, 32)}`,
       reason,
     };
-    return this.withRoleLock(adminId, async (fence) => {
-      await this.requireActorAdmin(adminId);
+    return this.withRoleLock(adminId, async (change) => {
+      await this.requireActorAdmin(change, adminId);
       await this.log.record({
         ...entry,
         action: 'invitation.requested',
@@ -315,22 +369,30 @@ export class AdminRolesService {
       });
       let invitation: PendingInvitation;
       try {
-        await fence.check();
-        invitation = await this.clerkCall(
+        await change.check();
+        invitation = await change.timed(
           this.directory.invite(
             email,
             as === 'admin' ? 'admin' : null,
             `${this.appUrl.replace(/\/+$/, '')}/community`,
             as === 'admin' ? ADMIN_INVITATION_DAYS : undefined,
           ),
-          CLERK_CALL_TIMEOUT_MS,
+          ROLE_TIMING.clerkCallMs,
         );
       } catch (error) {
+        // Timed out: Clerk may still create it, so the outcome is unknown,
+        // and a later demotion of this admin looks for it by address hash.
+        const unknown = error instanceof TimedOut;
         await this.log.record({
           ...entry,
-          action: 'invitation.failed',
-          details: { as, ...hidden, error: describe(error) },
+          action: unknown ? 'invitation.unknown' : 'invitation.failed',
+          details: {
+            as,
+            ...hidden,
+            error: unknown ? 'Clerk did not answer in time.' : describe(error),
+          },
         });
+        if (unknown) throw new ServiceUnavailableException(CLERK_TOO_SLOW);
         throw error;
       }
       await this.log.record({
@@ -353,69 +415,118 @@ export class AdminRolesService {
    * @throws NotFoundException when it is unknown or no longer waiting
    */
   async revokeInvitation(adminId: string, invitationId: string) {
-    return this.withRoleLock(adminId, async (fence) => {
-      await this.requireActorAdmin(adminId);
+    return this.withRoleLock(adminId, async (change) => {
+      await this.requireActorAdmin(change, adminId);
       await this.revokeLogged(
+        change,
         adminId,
         invitationId,
         'Admin withdrew an invitation.',
-        fence,
+        true,
       );
       return { revoked: true };
     });
   }
 
   /**
-   * After a demotion: no cached role of theirs survives here, and the admin
-   * invitations they sent stop working. Neither undoes the demotion, so a
-   * failure is logged rather than thrown.
+   * After a demotion: no cached role of theirs survives, and the admin
+   * invitations they sent, or may have sent (a timed-out request), stop
+   * working. Neither undoes the demotion, so a failure is logged and
+   * reported as a warning rather than thrown.
+   *
+   * @returns false when something could not be done or checked
    */
-  private async afterDemotion(adminId: string, userId: string) {
+  private async afterDemotion(
+    change: Change,
+    adminId: string,
+    userId: string,
+  ): Promise<boolean> {
+    let done = true;
     try {
       await this.adminAccess.forgetRole(userId);
     } catch (error) {
+      done = false;
       this.logger.error(
         `Could not clear the cached role of ${userId}: ${describe(error)}`,
       );
     }
     try {
-      const sent = await this.logModel
+      const rows = (await this.logModel
         .find({
-          action: 'invitation.sent',
           actorUserId: userId,
+          action: {
+            $in: [
+              'invitation.sent',
+              'invitation.requested',
+              'invitation.unknown',
+            ],
+          },
           'details.as': 'admin',
         })
-        .select({ details: 1 })
+        .select({ action: 1, at: 1, details: 1 })
         .lean()
-        .exec();
-      const theirs = new Set(
-        sent.map((row) => String(row.details?.invitationId)),
+        .exec()) as unknown as Array<{
+        action: string;
+        at: Date;
+        details?: Record<string, unknown>;
+      }>;
+      if (rows.length === 0) return done;
+      const sentIds = new Set(
+        rows.flatMap((row) =>
+          row.action === 'invitation.sent'
+            ? [String(row.details?.invitationId)]
+            : [],
+        ),
       );
-      if (theirs.size === 0) return;
-      const { invitations } = await this.clerkCall(
+      // Asked for, whatever came of it: the earliest time per address hash.
+      const askedSince = new Map<string, number>();
+      for (const row of rows) {
+        const hash = String(row.details?.emailHash);
+        const at = new Date(row.at).getTime();
+        askedSince.set(hash, Math.min(askedSince.get(hash) ?? at, at));
+      }
+      const { invitations, complete } = await this.clerkCall(
+        change,
         this.directory.pendingInvitations(),
-        CLERK_LIST_TIMEOUT_MS,
+        ROLE_TIMING.listMs,
       );
+      if (!complete) done = false;
       for (const invitation of invitations) {
-        if (!theirs.has(invitation.invitationId)) continue;
-        await this.revokeLogged(
-          adminId,
-          invitation.invitationId,
-          'The admin who sent this invitation is no longer an admin.',
-        ).catch(() => undefined);
+        const since = askedSince.get(emailForLog(invitation.email).emailHash);
+        const theirs =
+          sentIds.has(invitation.invitationId) ||
+          (invitation.role === 'admin' &&
+            since !== undefined &&
+            new Date(invitation.createdAt).getTime() >=
+              since - INVITATION_MATCH_SLACK_MS);
+        if (!theirs) continue;
+        try {
+          await this.revokeLogged(
+            change,
+            adminId,
+            invitation.invitationId,
+            'The admin who sent this invitation is no longer an admin.',
+            false,
+          );
+        } catch {
+          done = false;
+        }
       }
     } catch (error) {
+      done = false;
       this.logger.error(
         `Could not withdraw the invitations ${userId} sent: ${describe(error)}`,
       );
     }
+    return done;
   }
 
   private async revokeLogged(
+    change: Change,
     adminId: string,
     invitationId: string,
     reason: string,
-    fence?: Fence,
+    fenced: boolean,
   ) {
     const entry = {
       actorUserId: adminId,
@@ -425,10 +536,11 @@ export class AdminRolesService {
     };
     await this.log.record({ ...entry, action: 'invitation.revoke.requested' });
     try {
-      await fence?.check();
+      if (fenced) await change.check();
       await this.clerkCall(
+        change,
         this.directory.revoke(invitationId),
-        CLERK_CALL_TIMEOUT_MS,
+        ROLE_TIMING.clerkCallMs,
       );
     } catch (error) {
       await this.log.record({
@@ -446,12 +558,13 @@ export class AdminRolesService {
    *
    * @throws ForbiddenException when they are no longer an admin
    */
-  private async requireActorAdmin(adminId: string) {
+  private async requireActorAdmin(change: Change, adminId: string) {
     let isAdmin: boolean;
     try {
       isAdmin = await this.clerkCall(
+        change,
         this.adminAccess.isAdminNow(adminId),
-        CLERK_CALL_TIMEOUT_MS,
+        ROLE_TIMING.clerkCallMs,
       );
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === 401) {
@@ -465,23 +578,25 @@ export class AdminRolesService {
   /**
    * RolesService writes `requested` before Clerk, then `applied`/`failed`.
    * When Clerk does not answer in time, a `timeout` entry says the outcome is
-   * unknown, so the log never claims a result it does not have.
+   * unknown, so the log never claims a result it does not have; the lock is
+   * kept until the write settles.
    */
   private async setRole(
+    change: Change,
     adminId: string,
     userId: string,
     role: 'admin' | null,
     reason: string,
   ) {
     try {
-      await within(
+      await change.timed(
         this.roles.setRole({
           actorUserId: adminId,
           targetUserId: userId,
           role,
           reason,
         }),
-        ROLE_WRITE_TIMEOUT_MS,
+        ROLE_TIMING.writeMs,
       );
     } catch (error) {
       if (!(error instanceof TimedOut)) throw error;
@@ -498,9 +613,13 @@ export class AdminRolesService {
   }
 
   /** A Clerk call with a timeout, in words an admin can act on. */
-  private async clerkCall<T>(work: Promise<T>, ms: number): Promise<T> {
+  private async clerkCall<T>(
+    change: Change,
+    work: Promise<T>,
+    ms: number,
+  ): Promise<T> {
     try {
-      return await within(work, ms);
+      return await change.timed(work, ms);
     } catch (error) {
       if (error instanceof TimedOut) {
         throw new ServiceUnavailableException(CLERK_TOO_SLOW);
@@ -510,11 +629,12 @@ export class AdminRolesService {
   }
 
   /** Clerk's "no such user" (401 from the identity lookup) is a 404 here. */
-  private async identityOf(userId: string) {
+  private async identityOf(change: Change, userId: string) {
     try {
       return await this.clerkCall(
+        change,
         this.clerk.getIdentity(userId),
-        CLERK_CALL_TIMEOUT_MS,
+        ROLE_TIMING.clerkCallMs,
       );
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === 401) {
@@ -527,21 +647,23 @@ export class AdminRolesService {
   /**
    * One role change at a time, across every server instance: the lock is a
    * row with a unique key, taken over only once it is older than any live
-   * change can be. The change gets a fence: right before each Clerk write it
-   * checks the row still carries its token and its deadline has not passed.
+   * change can be. The change gets a fence (its token and deadline, checked
+   * before each Clerk write), and the lock is released only once every Clerk
+   * call it started has settled; one that never settles leaves the lock to
+   * go stale.
    */
   private async withRoleLock<T>(
     adminId: string,
-    work: (fence: Fence) => Promise<T>,
+    work: (change: Change) => Promise<T>,
   ): Promise<T> {
     const token = randomUUID();
-    const deadline = Date.now() + ROLE_CHANGE_DEADLINE_MS;
+    const deadline = Date.now() + ROLE_TIMING.deadlineMs;
     try {
       await this.settingModel
         .updateOne(
           {
             key: ROLE_LOCK_KEY,
-            updatedAt: { $lt: new Date(Date.now() - ROLE_LOCK_STALE_MS) },
+            updatedAt: { $lt: new Date(Date.now() - ROLE_TIMING.staleMs) },
           },
           { $set: { value: token, updatedBy: adminId } },
           { upsert: true },
@@ -551,7 +673,8 @@ export class AdminRolesService {
       if (isDuplicateKey(error)) throw new ConflictException(ROLE_CHANGE_BUSY);
       throw error;
     }
-    const fence: Fence = {
+    const abandoned: Array<Promise<unknown>> = [];
+    const change: Change = {
       check: async () => {
         const held =
           Date.now() < deadline &&
@@ -560,10 +683,16 @@ export class AdminRolesService {
             .exec()) !== null;
         if (!held) throw new ServiceUnavailableException(ROLE_CHANGE_LOST);
       },
+      timed: async <R>(call: Promise<R>, ms: number) => {
+        try {
+          return await within(call, ms);
+        } catch (error) {
+          if (error instanceof TimedOut) abandoned.push(call);
+          throw error;
+        }
+      },
     };
-    try {
-      return await work(fence);
-    } finally {
+    const release = async () => {
       try {
         await this.settingModel
           .deleteOne({ key: ROLE_LOCK_KEY, value: token })
@@ -574,6 +703,17 @@ export class AdminRolesService {
         this.logger.error(
           `Could not release the role lock: ${describe(error)}`,
         );
+      }
+    };
+    try {
+      return await work(change);
+    } finally {
+      if (abandoned.length === 0) {
+        await release();
+      } else {
+        // A call this change stopped waiting for may still change Clerk:
+        // the lock is kept until it settles, in the background.
+        void Promise.allSettled(abandoned).then(release);
       }
     }
   }

@@ -3,7 +3,11 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/backend';
-import { ClerkUserInfoService } from './clerk-user-info.service';
+import {
+  CLERK_TIMEOUT_MS,
+  ClerkUserInfoService,
+  withClerkTimeout,
+} from './clerk-user-info.service';
 
 jest.mock('@clerk/backend', () => ({
   createClerkClient: jest.fn(),
@@ -184,5 +188,28 @@ describe('ClerkUserInfoService', () => {
     await expect(build().setRole('user_123', 'admin')).rejects.toBeInstanceOf(
       type,
     );
+  });
+});
+
+describe('Clerk timeouts (Chunk 12, review round 2)', () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('stops waiting for a Clerk call that hangs, and says the service is unavailable', async () => {
+    jest.useFakeTimers();
+    getUser.mockReturnValue(new Promise(() => undefined));
+    updateUserMetadata.mockReturnValue(new Promise(() => undefined));
+    const service = build();
+    const read = service.getIdentity('user_1').catch((e: unknown) => e);
+    const write = service.setRole('user_1', null).catch((e: unknown) => e);
+    await jest.advanceTimersByTimeAsync(CLERK_TIMEOUT_MS + 1);
+    expect(await read).toBeInstanceOf(ServiceUnavailableException);
+    expect(await write).toBeInstanceOf(ServiceUnavailableException);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('leaves no timer behind when Clerk answers', async () => {
+    jest.useFakeTimers();
+    await expect(withClerkTimeout(Promise.resolve(7), 50)).resolves.toBe(7);
+    expect(jest.getTimerCount()).toBe(0);
   });
 });

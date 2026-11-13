@@ -627,13 +627,14 @@ describe('how long a cached role is trusted', () => {
   const NOW = new Date('2026-11-08T12:00:00.000Z').getTime();
   const config = { get: jest.fn(() => '') };
 
-  function setup(checkedAt: Date | undefined) {
+  function setup(checkedAt: Date | undefined, revokedAt?: Date) {
     const cached = {
       authProviderId: 'user_member',
       authRole: 'admin',
       authEmailVerified: true,
       isAdmin: true,
       authRoleCheckedAt: checkedAt,
+      ...(revokedAt ? { roleRevokedAt: revokedAt } : {}),
     };
     // Clerk no longer lists the role, which is what a removal looks like.
     const identity = {
@@ -670,6 +671,45 @@ describe('how long a cached role is trusted', () => {
     const { service, identity } = setup(at);
     await expect(service.hasAdminAccess(request())).resolves.toBe(false);
     expect(identity.getIdentity).toHaveBeenCalledWith('user_member');
+  });
+
+  it('never trusts a role read that began before the last demotion (round 2, LOW 1)', async () => {
+    // A sync read Clerk at NOW-10s, the demotion landed at NOW-5s, and the
+    // sync's write arrived after it: the cache is young but older than the
+    // revocation.
+    const { service, identity } = setup(
+      new Date(NOW - 10_000),
+      new Date(NOW - 5_000),
+    );
+    await expect(service.hasAdminAccess(request())).resolves.toBe(false);
+    expect(identity.getIdentity).toHaveBeenCalled();
+    // Read after the demotion: trusted as usual.
+    const later = setup(new Date(NOW - 1_000), new Date(NOW - 5_000));
+    await expect(later.service.hasAdminAccess(request())).resolves.toBe(true);
+    expect(later.identity.getIdentity).not.toHaveBeenCalled();
+  });
+
+  it('dates a sync by when its Clerk read began, not when it ended', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const identity = {
+      getIdentity: jest.fn(() => new Promise((resolve) => (answer = resolve))),
+    };
+    const model = {
+      findOneAndUpdate: jest.fn<unknown, any[]>(() => query({})),
+    };
+    const service = new AdminAccessService(
+      config as never,
+      identity as never,
+      model as never,
+    );
+    const sync = service.synchronizeProfile(request());
+    jest.setSystemTime(NOW + 30_000);
+    answer({ role: 'admin' });
+    await sync;
+    const update = model.findOneAndUpdate.mock.calls[0][1] as {
+      $set: { authRoleCheckedAt: Date };
+    };
+    expect(update.$set.authRoleCheckedAt.getTime()).toBe(NOW);
   });
 });
 
@@ -741,7 +781,7 @@ describe('role changes (Chunk 12, review HIGH-1 / MEDIUM-2)', () => {
       { authProviderId: 'user_member' },
       {
         $unset: { authRoleCheckedAt: 1, authEmailTokenHash: 1 },
-        $set: { isAdmin: false },
+        $set: { isAdmin: false, roleRevokedAt: expect.any(Date) },
       },
     );
   });

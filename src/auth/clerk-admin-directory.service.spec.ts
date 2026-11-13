@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/backend';
+import { CLERK_TIMEOUT_MS } from './clerk-user-info.service';
 import {
   ALREADY_INVITED,
   CLERK_PAGE,
@@ -274,6 +275,35 @@ describe('usersByEmail (MEDIUM-2)', () => {
       emailAddress: ['a@example.org', 'b@example.org'],
       limit: CLERK_PAGE,
     });
+  });
+
+  it('asks a hundred addresses at a time, all of them (round 2, LOW 3)', async () => {
+    getUserList
+      .mockResolvedValueOnce({ data: [user('user_a')] })
+      .mockResolvedValueOnce({ data: [user('user_b')] });
+    const emails = Array.from(
+      { length: CLERK_PAGE + 1 },
+      (_, i) => `${i}@example.org`,
+    );
+    const found = await build().usersByEmail(emails);
+    expect(found.map((f) => f.holder.userId)).toEqual(['user_a', 'user_b']);
+    expect(getUserList).toHaveBeenNthCalledWith(2, {
+      emailAddress: [`${CLERK_PAGE}@example.org`],
+      limit: CLERK_PAGE,
+    });
+  });
+
+  it('stops waiting for a Clerk call that hangs', async () => {
+    jest.useFakeTimers();
+    getUserList.mockReturnValue(new Promise(() => undefined));
+    const result = build()
+      .usersByEmail(['a@example.org'])
+      .catch((e: unknown) => e);
+    await jest.advanceTimersByTimeAsync(CLERK_TIMEOUT_MS + 1);
+    expect(await result).toEqual(
+      new ServiceUnavailableException(CLERK_UNAVAILABLE),
+    );
+    jest.useRealTimers();
   });
 
   it('asks nothing for an empty list', async () => {

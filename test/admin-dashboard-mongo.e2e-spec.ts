@@ -19,9 +19,11 @@ import {
   AdminRolesService,
   NO_LONGER_ADMIN,
   OWN_PROMOTION,
+  CLERK_TOO_SLOW,
   ROLE_CHANGE_BUSY,
   ROLE_CHANGE_LOST,
   ROLE_LOCK_KEY,
+  ROLE_TIMING,
 } from '../src/members/admin/admin-roles.service';
 import { EamRequestsService } from '../src/members/admin/eam-requests.service';
 import { MembersService } from '../src/members/members.service';
@@ -295,8 +297,14 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
       admins.map((id) => [id, 'admin']),
     );
     const gates: Record<string, Promise<void> | undefined> = {};
-    const pending: Array<{ invitationId: string }> = [];
+    const pending: Array<{
+      invitationId: string;
+      email: string;
+      role?: string;
+      createdAt: string;
+    }> = [];
     const revoked: string[] = [];
+    const events: string[] = [];
     const log = new ModerationLogService(m.ModerationLogEntry);
     const service = new AdminRolesService(
       { getOrThrow: () => 'https://org.example' } as never,
@@ -309,14 +317,15 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
           await gates.holdersOf;
           return { holders, complete: true };
         },
-        invite: (email: string) => {
-          const invitationId = `inv_${pending.length + revoked.length + 1}`;
-          pending.push({ invitationId });
-          return Promise.resolve({
-            invitationId,
+        invite: (email: string, role: string | null) => {
+          const invitation = {
+            invitationId: `inv_${pending.length + revoked.length + 1}`,
             email,
+            ...(role ? { role } : {}),
             createdAt: new Date().toISOString(),
-          });
+          };
+          pending.push(invitation);
+          return Promise.resolve(invitation);
         },
         pendingInvitations: () =>
           Promise.resolve({ invitations: [...pending], complete: true }),
@@ -334,9 +343,14 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
           Promise.resolve(roles.get(id) ? { role: roles.get(id) } : {}),
       } as never,
       {
-        setRole: (change: { targetUserId: string; role: string | null }) => {
+        setRole: async (change: {
+          targetUserId: string;
+          role: string | null;
+        }) => {
+          // A slow Clerk: the write lands only when the gate opens.
+          await gates.setRole;
           roles.set(change.targetUserId, change.role ?? undefined);
-          return Promise.resolve();
+          events.push(`landed:${change.targetUserId}`);
         },
       } as never,
       log,
@@ -352,7 +366,7 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     );
     const adminsLeft = () =>
       [...roles].filter(([, role]) => role === 'admin').length;
-    return { service, roles, gates, adminsLeft, pending, revoked };
+    return { service, roles, gates, adminsLeft, pending, revoked, events };
   };
 
   it('refuses self-promotion, and any change by an admin no longer one in Clerk (HIGH-1)', async () => {
@@ -404,6 +418,46 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     expect(world.roles.get('user_B')).toBe('admin');
   });
 
+  it('keeps the lock while a timed-out Clerk write may still land (round 2, the probe)', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const saved = { ...ROLE_TIMING };
+    ROLE_TIMING.writeMs = 200;
+    try {
+      const world = clerkWorld(['user_A', 'user_B']);
+      let land: () => void = () => undefined;
+      world.gates.setRole = new Promise<void>((resolve) => (land = resolve));
+      // A demotes B; Clerk is slow, so A gives up waiting.
+      await expect(
+        world.service.demote('user_A', 'user_B', 'r'),
+      ).rejects.toThrow(CLERK_TOO_SLOW);
+      world.gates.setRole = undefined;
+      // B, still an admin in Clerk for now, tries to demote A: refused,
+      // because A's write may still land.
+      await expect(
+        world.service.demote('user_B', 'user_A', 'r'),
+      ).rejects.toThrow(ROLE_CHANGE_BUSY);
+      expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(1);
+      // A's write lands; only then is the lock freed.
+      land();
+      for (let i = 0; i < 50; i++) {
+        if ((await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })) === 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(0);
+      expect(world.events).toEqual(['landed:user_B']);
+      // B is no longer an admin, so it cannot demote A now either.
+      await expect(
+        world.service.demote('user_B', 'user_A', 'r'),
+      ).rejects.toThrow(NO_LONGER_ADMIN);
+      expect(world.adminsLeft()).toBe(1);
+      expect(world.roles.get('user_A')).toBe('admin');
+    } finally {
+      Object.assign(ROLE_TIMING, saved);
+    }
+  });
+
   it('runs one role change at a time, and frees the lock', async () => {
     await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
     const world = clerkWorld(['user_A', 'user_B', 'user_C']);
@@ -452,7 +506,9 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     );
     await world.service.demote('user_boss', 'user_inviter', 'r');
     expect(world.revoked).toEqual([admin.invitationId]);
-    expect(world.pending).toEqual([{ invitationId: member.invitationId }]);
+    expect(world.pending.map((p) => p.invitationId)).toEqual([
+      member.invitationId,
+    ]);
     // The log keeps no readable address (LOW-4).
     const rows = await m.ModerationLogEntry.find({
       targetType: 'invitation',
