@@ -66,6 +66,9 @@ describeWithMongo('claims on a real MongoDB', () => {
   let gatedClaims: ClaimsService;
   let gatedPageWrites: Model<any>;
   let arrive: (() => Promise<void>) | undefined;
+  let loggingFails: ClaimsService;
+  let claimWriteHeld: ClaimsService;
+  let holdClaimWrite: (() => Promise<void>) | undefined;
   /** Lets `count` callers through together, once all have arrived. */
   /**
    * Lets `count` callers through together, once all have arrived, or after
@@ -200,6 +203,50 @@ describeWithMongo('claims on a real MongoDB', () => {
       log,
     );
     gatedPageWrites = gatedPages;
+    // Review round 2: the approval's log write fails AFTER the bind.
+    loggingFails = new ClaimsService(
+      m.Claim,
+      m.SocialProfile,
+      members,
+      writers,
+      clerk as never,
+      {
+        record: (entry: { action: string }, session?: unknown) =>
+          entry.action === 'claim.approved'
+            ? Promise.reject(new Error('synthetic log failure'))
+            : log.record(entry as never, session as never),
+      } as never,
+    );
+    // Review round 2: the approval waits BEFORE its claim write.
+    const claimsHeld = new Proxy(m.Claim, {
+      get(target, prop) {
+        if (prop === 'updateOne') {
+          return (...args: unknown[]) => {
+            const query = target.updateOne(
+              ...(args as Parameters<typeof target.updateOne>),
+            );
+            return {
+              exec: async () => {
+                if (holdClaimWrite) await holdClaimWrite();
+                return query.exec();
+              },
+            };
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function'
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      },
+    });
+    claimWriteHeld = new ClaimsService(
+      claimsHeld,
+      m.SocialProfile,
+      members,
+      writers,
+      clerk as never,
+      log,
+    );
     const orgPages = new OrgPagesService(m.WebsitePage);
     const tallies = new VoteTalliesService(
       m.VoteTally,
@@ -396,7 +443,6 @@ describeWithMongo('claims on a real MongoDB', () => {
         'rejected',
       ]);
       expect(rows.find((r) => r.status === 'approved').userId).toBe(owner);
-      expect(rows.every((r) => r.approvingAt === undefined)).toBe(true);
     }
     // Which side wins depends on timing; the invariant above must hold either way.
     expect(winners.first + winners.second).toBe(15);
@@ -569,17 +615,26 @@ describeWithMongo('claims on a real MongoDB', () => {
     for (let round = 0; round < 15; round++) {
       const target = await importedPage();
       const asked = await ask(`user_vs_${round}`, target.slug);
-      await Promise.allSettled([
+      const [approved, rejected] = await Promise.allSettled([
         claims.approve('user_admin_one', asked.claimId),
         claims.reject('user_admin_two', asked.claimId, 'Synthetic reason'),
       ]);
       const row = await m.Claim.findOne({ _id: asked.claimId }).lean();
       const owner = await owners(target._id);
+      const approvedLogs = await m.ModerationLogEntry.countDocuments({
+        targetId: asked.claimId,
+        action: 'claim.approved',
+      });
+      // Approve answered success if and only if the claim is approved.
+      expect(approved.status === 'fulfilled').toBe(row.status === 'approved');
+      expect(rejected.status === 'fulfilled').toBe(row.status === 'rejected');
       if (row.status === 'approved') {
         expect(owner).toBe(`user_vs_${round}`);
+        expect(approvedLogs).toBe(1);
       } else {
         expect(row.status).toBe('rejected');
         expect(owner).toBeUndefined();
+        expect(approvedLogs).toBe(0);
       }
     }
   });
@@ -598,14 +653,21 @@ describeWithMongo('claims on a real MongoDB', () => {
         ownerUserId: who,
         source: 'native',
       });
-      await Promise.allSettled([claims.approve(U.admin, asked.claimId), join]);
+      const [approved] = await Promise.allSettled([
+        claims.approve(U.admin, asked.claimId),
+        join,
+      ]);
       expect(await m.SocialProfile.countDocuments({ ownerUserId: who })).toBe(
         1,
       );
       const row = await m.Claim.findOne({ _id: asked.claimId }).lean();
-      // A refused approval lets go of its lock, so an admin can decide again.
-      expect(row.approvingAt).toBeUndefined();
-      expect(['approved', 'pending']).toContain(row.status);
+      // A refused approval rolled back: still pending, for an admin to decide.
+      expect(row.status).toBe(
+        approved.status === 'fulfilled' ? 'approved' : 'pending',
+      );
+      expect(await owners(target._id)).toBe(
+        approved.status === 'fulfilled' ? who : undefined,
+      );
     }
   });
 
@@ -732,5 +794,67 @@ describeWithMongo('claims on a real MongoDB', () => {
     expect(
       (await m.Comment.findOne({ commentId: 'cmt_imp2' }).lean()).linkedUserId,
     ).toBeUndefined();
+  });
+
+  it('review round 2: the bind is inside the transaction: a failed approval log leaves the page unbound and the claim pending', async () => {
+    const target = await importedPage();
+    const who = 'user_log_fails';
+    const asked = await ask(who, target.slug);
+    await expect(loggingFails.approve(U.admin, asked.claimId)).rejects.toThrow(
+      'synthetic log failure',
+    );
+    expect(await owners(target._id)).toBeUndefined();
+    expect((await m.Claim.findOne({ _id: asked.claimId }).lean()).status).toBe(
+      'pending',
+    );
+    // And it can still be approved properly afterwards.
+    await expect(claims.approve(U.admin, asked.claimId)).resolves.toEqual({
+      approved: true,
+    });
+    expect(await owners(target._id)).toBe(who);
+  });
+
+  it('review round 2: an approval held before its claim write loses to a rejection that lands first', async () => {
+    const target = await importedPage();
+    const asked = await ask('user_held_early', target.slug);
+    let letGo: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (letGo = resolve));
+    let reached: () => void = () => undefined;
+    const atClaimWrite = new Promise<void>((resolve) => (reached = resolve));
+    holdClaimWrite = async () => {
+      holdClaimWrite = undefined;
+      reached();
+      await held;
+    };
+    try {
+      const approving = claimWriteHeld
+        .approve('user_admin_one', asked.claimId)
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error: String(error) }),
+        );
+      await atClaimWrite;
+      await expect(
+        claims.reject('user_admin_two', asked.claimId, 'Synthetic'),
+      ).resolves.toEqual({ rejected: true });
+      letGo();
+      const outcome = await approving;
+      expect(outcome).toEqual({
+        error: 'ConflictException: This request has already been decided.',
+      });
+      expect(await owners(target._id)).toBeUndefined();
+      expect(
+        (await m.Claim.findOne({ _id: asked.claimId }).lean()).status,
+      ).toBe('rejected');
+      expect(
+        await m.ModerationLogEntry.countDocuments({
+          targetId: asked.claimId,
+          action: 'claim.approved',
+        }),
+      ).toBe(0);
+    } finally {
+      holdClaimWrite = undefined;
+      letGo();
+    }
   });
 });

@@ -17,6 +17,7 @@ import {
 import { CANNOT_CHECK_ACCOUNT } from '../comments/comment-writers';
 import {
   CLAIM_DECIDED,
+  CLAIMS_NEED_REPLICA_SET,
   CLAIM_MESSAGE_EMPTY,
   CLAIM_MESSAGE_TOO_LONG,
   CLAIM_NOT_FOUND,
@@ -28,6 +29,7 @@ import {
   HAS_PAGE,
   HAS_PENDING,
   isDuplicateKey,
+  isTransactionUnsupported,
   NOT_CLAIMABLE,
   OWN_CLAIM,
   PAGE_GONE,
@@ -784,5 +786,139 @@ describe('ClaimsService.reject', () => {
     await expect(service.reject(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       CLAIM_DECIDED,
     );
+  });
+});
+
+describe('review round 2', () => {
+  it('a committed approval stays approved when rejecting the others fails', async () => {
+    const { service, claimModel, session } = build();
+    const failing = chain([]);
+    failing.exec = () => Promise.reject(new Error('list down'));
+    claimModel.find.mockReturnValueOnce(failing);
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).resolves.toEqual({
+      approved: true,
+    });
+
+    claimModel.find.mockReturnValueOnce(
+      chain([
+        claimRow({ _id: OTHER_CLAIM_ID, userId: 'user_b' }),
+        claimRow({ _id: new Types.ObjectId(), userId: 'user_c' }),
+      ]),
+    );
+    claimModel.updateOne
+      .mockReturnValueOnce(modified(1)) // the approval
+      .mockReturnValueOnce({
+        exec: () => Promise.reject(new Error('write down')),
+      })
+      .mockReturnValueOnce(modified(1)); // the next one is still tried
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).resolves.toEqual({
+      approved: true,
+    });
+    expect(claimModel.updateOne).toHaveBeenCalledTimes(4);
+    expect(session.endSession).toHaveBeenCalled();
+    expect(jest.spyOn(Logger.prototype, 'warn')).toHaveBeenCalledWith(
+      expect.stringMatching(/Could not list the other requests/),
+    );
+    expect(jest.spyOn(Logger.prototype, 'warn')).toHaveBeenCalledWith(
+      expect.stringMatching(/Could not reject request .* write down/),
+    );
+  });
+
+  it('a request inserted after the page was bound is rejected by the site at once', async () => {
+    const { service, profileModel, claimModel, log } = build();
+    // First the claimant's own page (none), then the page, now owned.
+    profileModel.findOne
+      .mockReturnValueOnce(chain(null))
+      .mockReturnValueOnce(chain({ ownerUserId: 'user_b' }));
+    const view = await service.request(viewer, 'imported-page', 'Mine.');
+    expect(view).toMatchObject({
+      status: 'rejected',
+      reason: SITE_REASON_TAKEN,
+      decidedAt: expect.any(String) as unknown,
+    });
+    const [filter, update] = claimModel.updateOne.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+      { $set: Record<string, unknown> },
+    ];
+    expect(filter).toEqual({ _id: CLAIM_ID, status: 'pending' });
+    expect(update.$set).toMatchObject({
+      status: 'rejected',
+      decidedBy: SYSTEM_CLAIMS_ACTOR,
+    });
+    expect(log.record).toHaveBeenLastCalledWith(
+      expect.objectContaining({ action: 'claim.rejected' }),
+      expect.anything(),
+    );
+  });
+
+  it('leaves that request pending when it was decided meanwhile, or the rejection fails', async () => {
+    const { service, profileModel, claimModel } = build();
+    // First the claimant's own page (none), then the page, now owned.
+    profileModel.findOne
+      .mockReturnValueOnce(chain(null))
+      .mockReturnValueOnce(chain({ ownerUserId: 'user_b' }));
+    claimModel.updateOne.mockReturnValueOnce(modified(0));
+    expect(
+      (await service.request(viewer, 'imported-page', 'Mine.')).status,
+    ).toBe('pending');
+    // First the claimant's own page (none), then the page, now owned.
+    profileModel.findOne
+      .mockReturnValueOnce(chain(null))
+      .mockReturnValueOnce(chain({ ownerUserId: 'user_b' }));
+    claimModel.updateOne.mockReturnValueOnce({
+      // Not an Error on purpose: the log line must still read.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      exec: () => Promise.reject('odd'),
+    });
+    expect(
+      (await service.request(viewer, 'imported-page', 'Mine.')).status,
+    ).toBe('pending');
+    expect(jest.spyOn(Logger.prototype, 'warn')).toHaveBeenCalledWith(
+      expect.stringMatching(/Could not reject request .* odd/),
+    );
+  });
+
+  it('answers 503, plainly, when the database cannot run transactions', async () => {
+    const { service, session } = build();
+    const standalone = Object.assign(
+      new Error(
+        'Transaction numbers are only allowed on a replica set member or mongos',
+      ),
+      { code: 20 },
+    );
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    for (const decide of [
+      () => service.approve(ADMIN, String(CLAIM_ID)),
+      () => service.reject(ADMIN, String(CLAIM_ID)),
+      () => service.withdraw(CLAIMANT, String(CLAIM_ID)),
+    ]) {
+      session.withTransaction.mockRejectedValueOnce(standalone);
+      await expect(decide()).rejects.toThrow(
+        new ServiceUnavailableException(CLAIMS_NEED_REPLICA_SET),
+      );
+    }
+    expect(error).toHaveBeenCalledTimes(3);
+  });
+
+  it('recognises an unsupported transaction by its code or its words only', () => {
+    expect(isTransactionUnsupported({ code: 20 })).toBe(true);
+    expect(
+      isTransactionUnsupported(
+        new Error('This MongoDB deployment does not support retryable writes.'),
+      ),
+    ).toBe(true);
+    expect(
+      isTransactionUnsupported(
+        new Error(
+          'Transaction numbers are only allowed on a replica set member or mongos',
+        ),
+      ),
+    ).toBe(true);
+    expect(isTransactionUnsupported(new Error('E11000'))).toBe(false);
+    expect(isTransactionUnsupported({ code: 11000, message: 1 })).toBe(false);
+    expect(isTransactionUnsupported(null)).toBe(false);
+    expect(isTransactionUnsupported('odd')).toBe(false);
   });
 });

@@ -31,6 +31,23 @@
 $ npm install
 ```
 
+### Local MongoDB must be a replica set
+
+Claim decisions (approve, reject, withdraw) run in transactions, which
+MongoDB allows only on a replica set or a sharded cluster. Atlas always is
+one. A local single-node replica set is enough:
+
+```bash
+mongod --replSet rs0 --dbpath ./data/db
+mongosh --eval "rs.initiate()"   # once
+```
+
+and point the app at it with `?replicaSet=rs0`, for example
+`MONGODB_URI=mongodb://127.0.0.1:27017/org?replicaSet=rs0`. On a standalone
+server the app still starts and logs one warning; claim decisions then
+answer 503. The real-database e2e suites need the same: set
+`MONGO_TEST_URI=mongodb://127.0.0.1:27017/org-test?replicaSet=rs0`.
+
 ### MongoDB Atlas DNS
 
 The backend normally uses the operating system's DNS configuration. If a local

@@ -74,6 +74,9 @@ export const CLAIMANT_UNVERIFIED =
 export const CLAIMANT_HAS_PAGE =
   'The person asking already has a member page of their own. Reject this request, or ask them first.';
 
+export const CLAIMS_NEED_REPLICA_SET =
+  "Claims need a replica-set database, and this server's database is not one. Please tell the site's maintainer.";
+
 /** What the claimant reads when the site, not an admin, rejected a request. */
 export const SITE_REASON_TAKEN = 'This page now belongs to another member.';
 export const SITE_REASON_GONE = 'This page no longer exists.';
@@ -88,6 +91,24 @@ const CLAIM_PAGE_FIELDS = { slug: 1, displayName: 1, deletedAt: 1 };
 
 /** Thrown inside the approval to abort it: the page cannot be bound. */
 class PageNotBindable extends Error {}
+
+/**
+ * The database cannot run transactions: a standalone server (code 20,
+ * IllegalOperation: "Transaction numbers are only allowed on a replica set
+ * member or mongos"), or retryable writes unsupported. Claim decisions need
+ * them, so they refuse plainly instead of failing with a bare 500.
+ */
+export function isTransactionUnsupported(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return (
+    code === 20 ||
+    (typeof message === 'string' &&
+      /replica set member or mongos|does not support retryable writes/i.test(
+        message,
+      ))
+  );
+}
 
 /** MongoDB duplicate-key error (unique index violation). */
 export function isDuplicateKey(error: unknown): boolean {
@@ -219,11 +240,63 @@ export class ClaimsService {
         .catch(() => undefined);
       throw error;
     }
-    return myClaimView(row, {
+    const page = {
       _id: profile._id,
       slug: profile.slug,
       displayName: profile.displayName,
-    });
+    };
+    // An approval of another request may have committed, and rejected the
+    // page's other requests, between the check above and this insert
+    // (review round 2): this one would then wait for ever on an owned page.
+    if (await this.pageNowOwned(profile._id)) {
+      const rejected = await this.rejectBySiteSafely(row, SITE_REASON_TAKEN);
+      if (rejected) {
+        return myClaimView(
+          {
+            ...row,
+            status: 'rejected',
+            decidedAt: rejected,
+            reason: SITE_REASON_TAKEN,
+          },
+          page,
+        );
+      }
+    }
+    return myClaimView(row, page);
+  }
+
+  private async pageNowOwned(profileId: Types.ObjectId) {
+    const now = await this.profileModel
+      .findOne({ _id: profileId })
+      .select({ ownerUserId: 1 })
+      .lean()
+      .exec();
+    return Boolean(now?.ownerUserId);
+  }
+
+  /**
+   * The site's rejection of one waiting request, never failing its caller:
+   * a failure is logged, and the request stays for an admin (approving it
+   * then finds the page taken and rejects it).
+   *
+   * @returns when it was rejected, or nothing when it was not
+   */
+  private async rejectBySiteSafely(
+    claim: ClaimRow,
+    reason: string,
+  ): Promise<Date | undefined> {
+    try {
+      let at: Date | undefined;
+      await this.inTransaction(async (session) => {
+        at = await this.rejectBySite(claim, reason, session);
+      });
+      return at;
+    } catch (error) {
+      this.logger.warn(
+        `Could not reject request ${String(claim._id)} for a taken page: ${describeFailure(error)}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -385,13 +458,13 @@ export class ClaimsService {
 
     if (refusal) {
       const gone = refusal === 'gone';
-      await this.inTransaction((session) =>
-        this.rejectBySite(
+      await this.inTransaction(async (session) => {
+        await this.rejectBySite(
           claim,
           gone ? SITE_REASON_GONE : SITE_REASON_TAKEN,
           session,
-        ),
-      );
+        );
+      });
       throw new ConflictException(gone ? PAGE_GONE : PAGE_TAKEN);
     }
     await this.rejectOthers(claim);
@@ -407,18 +480,25 @@ export class ClaimsService {
    * taken and rejects it then.
    */
   private async rejectOthers(claim: ClaimRow) {
-    const others = (await this.claimModel
-      .find({
-        profileId: claim.profileId,
-        status: 'pending',
-        _id: { $ne: claim._id },
-      })
-      .lean()
-      .exec()) as unknown as ClaimRow[];
-    for (const other of others) {
-      await this.inTransaction((session) =>
-        this.rejectBySite(other, SITE_REASON_TAKEN, session),
+    // The approval has committed: nothing here may turn it into an error.
+    let others: ClaimRow[];
+    try {
+      others = (await this.claimModel
+        .find({
+          profileId: claim.profileId,
+          status: 'pending',
+          _id: { $ne: claim._id },
+        })
+        .lean()
+        .exec()) as unknown as ClaimRow[];
+    } catch (error) {
+      this.logger.warn(
+        `Could not list the other requests for page ${String(claim.profileId)}: ${describeFailure(error)}`,
       );
+      return;
+    }
+    for (const other of others) {
+      await this.rejectBySiteSafely(other, SITE_REASON_TAKEN);
     }
   }
 
@@ -521,7 +601,8 @@ export class ClaimsService {
     claim: ClaimRow,
     reason: string,
     session: ClientSession,
-  ) {
+  ): Promise<Date | undefined> {
+    const decidedAt = new Date();
     const result = await this.claimModel
       .updateOne(
         { _id: claim._id, status: 'pending' },
@@ -529,22 +610,22 @@ export class ClaimsService {
           $set: {
             status: 'rejected',
             decidedBy: SYSTEM_CLAIMS_ACTOR,
-            decidedAt: new Date(),
+            decidedAt,
             reason,
           },
         },
         { session },
       )
       .exec();
-    if (result.modifiedCount === 1) {
-      await this.record(
-        SYSTEM_CLAIMS_ACTOR,
-        'claim.rejected',
-        claim,
-        reason,
-        session,
-      );
-    }
+    if (result.modifiedCount !== 1) return undefined;
+    await this.record(
+      SYSTEM_CLAIMS_ACTOR,
+      'claim.rejected',
+      claim,
+      reason,
+      session,
+    );
+    return decidedAt;
   }
 
   /**
@@ -555,6 +636,14 @@ export class ClaimsService {
     const session = await this.claimModel.db.startSession();
     try {
       await session.withTransaction(() => work(session));
+    } catch (error) {
+      if (isTransactionUnsupported(error)) {
+        this.logger.error(
+          `Claims need a replica-set database: ${describeFailure(error)}`,
+        );
+        throw new ServiceUnavailableException(CLAIMS_NEED_REPLICA_SET);
+      }
+      throw error;
     } finally {
       await session.endSession();
     }

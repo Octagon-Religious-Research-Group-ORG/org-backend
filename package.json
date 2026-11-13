@@ -118,6 +118,7 @@
       "social/append-only.ts",
       "db/index-setup.ts",
       "db/managed-indexes.service.ts",
+      "db/replica-set-check.service.ts",
       "import/import-guard.ts",
       "import/pages/docx-numbering.ts",
       "import/pages/docx-reader.ts",
