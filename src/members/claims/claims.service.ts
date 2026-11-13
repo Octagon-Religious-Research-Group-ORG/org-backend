@@ -9,7 +9,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { type ClientSession, Model, Types } from 'mongoose';
 import { ClerkUserInfoService } from '../../auth/clerk-user-info.service';
 import {
   cleanMemberParagraphs,
@@ -62,25 +62,21 @@ export const HAS_PAGE =
 export const HAS_PENDING =
   'You already have a request waiting. Withdraw it first to ask for another page.';
 export const CLAIM_DECIDED = 'This request has already been decided.';
-export const CLAIM_BUSY =
-  'This request is being approved right now. Reload in a moment.';
 export const OWN_CLAIM = 'Another admin must decide your own request.';
 export const PAGE_GONE =
   'That page no longer exists, so the request was rejected.';
 export const PAGE_TAKEN =
   'That page now belongs to another member, so the request was rejected.';
+export const CLAIMANT_GONE =
+  'The account that asked no longer exists. Reject this request.';
+export const CLAIMANT_UNVERIFIED =
+  'The person asking no longer has a confirmed email address. Ask them to confirm it, or reject this request.';
 export const CLAIMANT_HAS_PAGE =
   'The person asking already has a member page of their own. Reject this request, or ask them first.';
 
 /** What the claimant reads when the site, not an admin, rejected a request. */
 export const SITE_REASON_TAKEN = 'This page now belongs to another member.';
 export const SITE_REASON_GONE = 'This page no longer exists.';
-
-/**
- * An approval holding its lock this long without finishing died; another
- * decision may then take over, after checking whether it bound the page.
- */
-export const APPROVE_LOCK_STALE_MS = 2 * 60_000;
 
 /** A claimant's newest requests shown; older ones stay in the log. */
 export const MY_CLAIMS_SHOWN = 20;
@@ -89,6 +85,9 @@ export const MY_CLAIMS_SHOWN = 20;
 export const ADMIN_CLAIMS_SHOWN = 200;
 
 const CLAIM_PAGE_FIELDS = { slug: 1, displayName: 1, deletedAt: 1 };
+
+/** Thrown inside the approval to abort it: the page cannot be bound. */
+class PageNotBindable extends Error {}
 
 /** MongoDB duplicate-key error (unique index violation). */
 export function isDuplicateKey(error: unknown): boolean {
@@ -108,21 +107,6 @@ export function parseClaimId(value: string): Types.ObjectId {
   return new Types.ObjectId(value);
 }
 
-function staleLockCutoff() {
-  return new Date(Date.now() - APPROVE_LOCK_STALE_MS);
-}
-
-/** Matches a pending claim no live approval holds. */
-function unlockedPending() {
-  return {
-    status: 'pending' as const,
-    $or: [
-      { approvingAt: { $exists: false } },
-      { approvingAt: { $lt: staleLockCutoff() } },
-    ],
-  };
-}
-
 /**
  * Claims on imported member pages (plan D5, Chunk 11).
  *
@@ -134,10 +118,11 @@ function unlockedPending() {
  *   no owner, that the claimant can see at least by name. Anything else the
  *   claimant may not see is the same 404 as a page that does not exist.
  * - Who decides: an admin (the real Clerk role), never on their own request.
- * - Approving binds the page with a conditional write that only succeeds
- *   while the page has no owner, and the partial unique index on
- *   `ownerUserId` refuses a login that already owns a page. Whatever the
- *   timing, a page gets one owner and a login one page.
+ * - Approving binds the page, in one transaction with the claim's move to
+ *   approved, with a conditional write that only succeeds while the page has
+ *   no owner; the partial unique index on `ownerUserId` refuses a login that
+ *   already owns a page. Whatever the timing, a page gets one owner, a login
+ *   one page, and a bound page always has its approved claim.
  * - Every step is in the append-only moderation log.
  */
 @Injectable()
@@ -245,28 +230,16 @@ export class ClaimsService {
    * The claimant takes back a request that is still waiting.
    *
    * @throws NotFoundException unless it is theirs
-   * @throws ConflictException when it was decided, or is being approved
+   * @throws ConflictException when it was decided
    */
   async withdraw(userId: string, claimId: string) {
     const id = parseClaimId(claimId);
     const claim = await this.readClaim(id);
     if (claim?.userId !== userId) throw new NotFoundException(CLAIM_NOT_FOUND);
-    await this.settleStaleApproval(claim);
-    const now = new Date();
-    const result = await this.claimModel
-      .updateOne(
-        { _id: id, userId, ...unlockedPending() },
-        {
-          $set: { status: 'withdrawn', decidedBy: userId, decidedAt: now },
-          $unset: { approvingAt: 1 },
-        },
-      )
-      .exec();
-    if (result.modifiedCount !== 1) await this.refuseUndecidable(id);
-    await this.record(
-      userId,
-      'claim.withdrawn',
+    await this.decideAlone(
       claim,
+      { status: 'withdrawn', decidedBy: userId },
+      'claim.withdrawn',
       'Withdrawn by the member.',
     );
     return { withdrawn: true };
@@ -298,16 +271,11 @@ export class ClaimsService {
         );
       }
     }
-    const fresh = staleLockCutoff();
     return {
       claims: rows.map(
         (row): AdminClaimView => ({
           claimId: String(row._id),
           status: row.status,
-          approving:
-            row.status === 'pending' &&
-            row.approvingAt !== undefined &&
-            row.approvingAt >= fresh,
           message: row.message,
           requestedAt: row.createdAt.toISOString(),
           ...(row.decidedAt ? { decidedAt: row.decidedAt.toISOString() } : {}),
@@ -321,78 +289,143 @@ export class ClaimsService {
   }
 
   /**
-   * Approves a request: the page becomes the claimant's. The other requests
-   * waiting for that page are rejected by the site.
+   * Approves a request: the page becomes the claimant's, and the page's other
+   * waiting requests are rejected by the site.
    *
-   * Order: take the claim's short lock; bind the page only while it has no
-   * owner; mark the claim approved; record it; reject the rest. An approval
-   * that dies after binding is finished by the next decision on that claim
-   * (`settleStaleApproval`), so a bound page always ends with an approved
-   * claim.
+   * ONE transaction (review round 1, HIGH): the claim moves pending →
+   * approved, the page is bound only while it is an approved imported page
+   * with no owner, and the approval is logged (the page's other requests
+   * are rejected right after it commits). Either all of it lands or none of it: a page is never bound to a
+   * claim that is not approved, and "approved" is answered only when this
+   * call's own change committed. A rejection or withdrawal racing it is a
+   * write conflict: one of the two commits and the other finds the claim
+   * decided. Needs a replica set (Atlas always is one).
+   *
+   * Before it, the claimant's account is checked again: it must still exist
+   * and still have a confirmed email.
    *
    * @throws NotFoundException for no such request
    * @throws ForbiddenException on the admin's own request
-   * @throws ConflictException when decided, busy, or the page or the claimant
-   *   can no longer be bound
+   * @throws ConflictException when decided, when the claimant can no longer
+   *   own it, or when the page went to someone else or is gone (the request
+   *   is then rejected by the site)
+   * @throws ServiceUnavailableException when the account cannot be checked
    */
   async approve(adminId: string, claimId: string) {
     const id = parseClaimId(claimId);
     const claim = await this.decidableClaim(adminId, id);
-    if (await this.settleStaleApproval(claim)) {
-      throw new ConflictException(CLAIM_DECIDED);
-    }
-    const lockAt = new Date();
-    const locked = await this.claimModel
-      .updateOne(
-        { _id: id, ...unlockedPending() },
-        { $set: { approvingAt: lockAt } },
-      )
-      .exec();
-    if (locked.modifiedCount !== 1) await this.refuseUndecidable(id);
+    await this.requireClaimantStillEligible(claim.userId);
 
-    let bound: { modifiedCount: number };
-    try {
-      bound = await this.profileModel
-        .updateOne(
-          {
-            _id: claim.profileId,
-            source: 'migrated',
-            ownerUserId: { $exists: false },
-            deletedAt: { $exists: false },
-          },
-          { $set: { ownerUserId: claim.userId } },
-        )
-        .exec();
-    } catch (error) {
-      await this.releaseLock(id, lockAt);
-      if (isDuplicateKey(error)) throw new ConflictException(CLAIMANT_HAS_PAGE);
-      throw error;
-    }
-    if (bound.modifiedCount !== 1) {
-      const page = await this.profileModel
-        .findOne({ _id: claim.profileId })
-        .select({ ownerUserId: 1, deletedAt: 1 })
-        .lean()
-        .exec();
-      // Already the claimant's (an earlier approval bound it): just finish.
-      if (page?.ownerUserId !== claim.userId) {
-        const gone = !page || Boolean(page.deletedAt);
-        await this.rejectBySite(
+    let refusal: 'taken' | 'gone' | undefined;
+    await this.inTransaction(async (session) => {
+      refusal = undefined;
+      const now = new Date();
+      let decided: { modifiedCount: number };
+      try {
+        decided = await this.claimModel
+          .updateOne(
+            { _id: id, status: 'pending' },
+            {
+              $set: { status: 'approved', decidedBy: adminId, decidedAt: now },
+            },
+            { session },
+          )
+          .exec();
+      } catch (error) {
+        // The page already has an approved claim (its unique index).
+        if (!isDuplicateKey(error)) throw error;
+        refusal = 'taken';
+        throw new PageNotBindable();
+      }
+      if (decided.modifiedCount !== 1) {
+        throw new ConflictException(CLAIM_DECIDED);
+      }
+      let bound: { modifiedCount: number };
+      try {
+        bound = await this.profileModel
+          .updateOne(
+            {
+              _id: claim.profileId,
+              source: 'migrated',
+              reviewStatus: 'approved',
+              ownerUserId: { $exists: false },
+              deletedAt: { $exists: false },
+            },
+            { $set: { ownerUserId: claim.userId } },
+            { session },
+          )
+          .exec();
+      } catch (error) {
+        if (isDuplicateKey(error)) {
+          throw new ConflictException(CLAIMANT_HAS_PAGE);
+        }
+        throw error;
+      }
+      if (bound.modifiedCount !== 1) {
+        const page = await this.profileModel
+          .findOne({ _id: claim.profileId })
+          .select({ deletedAt: 1 })
+          .session(session)
+          .lean()
+          .exec();
+        refusal = !page || page.deletedAt ? 'gone' : 'taken';
+        // Abort: the claim's change above must not commit either.
+        throw new PageNotBindable();
+      }
+      await this.record(
+        adminId,
+        'claim.approved',
+        claim,
+        'The page now belongs to the member who asked.',
+        session,
+      );
+    }).catch((error: unknown) => {
+      if (!(error instanceof PageNotBindable)) throw error;
+    });
+
+    if (refusal) {
+      const gone = refusal === 'gone';
+      await this.inTransaction((session) =>
+        this.rejectBySite(
           claim,
           gone ? SITE_REASON_GONE : SITE_REASON_TAKEN,
-          { approvingAt: lockAt },
-        );
-        throw new ConflictException(gone ? PAGE_GONE : PAGE_TAKEN);
-      }
+          session,
+        ),
+      );
+      throw new ConflictException(gone ? PAGE_GONE : PAGE_TAKEN);
     }
-    await this.finishApproval(claim, adminId);
+    await this.rejectOthers(claim);
     return { approved: true };
+  }
+
+  /**
+   * After an approval committed, the page's other waiting requests are
+   * rejected by the site, each in its own small transaction. Not inside the
+   * approval: two approvals each writing the other's claim would hold each
+   * other's documents and retry for ever (measured on a real replica set).
+   * If this stops part-way, a later approval of one of them finds the page
+   * taken and rejects it then.
+   */
+  private async rejectOthers(claim: ClaimRow) {
+    const others = (await this.claimModel
+      .find({
+        profileId: claim.profileId,
+        status: 'pending',
+        _id: { $ne: claim._id },
+      })
+      .lean()
+      .exec()) as unknown as ClaimRow[];
+    for (const other of others) {
+      await this.inTransaction((session) =>
+        this.rejectBySite(other, SITE_REASON_TAKEN, session),
+      );
+    }
   }
 
   /**
    * @throws NotFoundException for no such request
    * @throws ForbiddenException on the admin's own request
-   * @throws ConflictException when decided, or while it is being approved
+   * @throws ConflictException when decided
    * @throws BadRequestException for a reason over its limit
    */
   async reject(adminId: string, claimId: string, rawReason?: string) {
@@ -402,31 +435,45 @@ export class ClaimsService {
       throw new BadRequestException(CLAIM_REASON_TOO_LONG);
     }
     const claim = await this.decidableClaim(adminId, id);
-    if (await this.settleStaleApproval(claim)) {
-      throw new ConflictException(CLAIM_DECIDED);
-    }
-    const result = await this.claimModel
-      .updateOne(
-        { _id: id, ...unlockedPending() },
-        {
-          $set: {
-            status: 'rejected',
-            decidedBy: adminId,
-            decidedAt: new Date(),
-            ...(hasVisibleText(reason) ? { reason } : {}),
-          },
-          $unset: { approvingAt: 1 },
-        },
-      )
-      .exec();
-    if (result.modifiedCount !== 1) await this.refuseUndecidable(id);
-    await this.record(
-      adminId,
-      'claim.rejected',
+    const given = hasVisibleText(reason);
+    await this.decideAlone(
       claim,
-      hasVisibleText(reason) ? reason : 'Rejected without a reason.',
+      {
+        status: 'rejected',
+        decidedBy: adminId,
+        ...(given ? { reason } : {}),
+      },
+      'claim.rejected',
+      given ? reason : 'Rejected without a reason.',
     );
     return { rejected: true };
+  }
+
+  /**
+   * A decision that binds nothing (reject, withdraw): the claim moves from
+   * pending, and its log entry is written, in one transaction.
+   *
+   * @throws ConflictException when the claim was decided meanwhile
+   */
+  private async decideAlone(
+    claim: ClaimRow,
+    change: { status: ClaimStatus; decidedBy: string; reason?: string },
+    action: string,
+    logReason: string,
+  ) {
+    await this.inTransaction(async (session) => {
+      const result = await this.claimModel
+        .updateOne(
+          { _id: claim._id, status: 'pending' },
+          { $set: { ...change, decidedAt: new Date() } },
+          { session },
+        )
+        .exec();
+      if (result.modifiedCount !== 1) {
+        throw new ConflictException(CLAIM_DECIDED);
+      }
+      await this.record(change.decidedBy, action, claim, logReason, session);
+    });
   }
 
   /** @throws NotFoundException / ForbiddenException / ConflictException */
@@ -446,70 +493,38 @@ export class ClaimsService {
   }
 
   /**
-   * A claim whose approval died: if that approval bound the page, finish it
-   * (the page is the claimant's whatever the claim row says).
+   * The claimant's account, checked again at approval (review LOW b): it
+   * still exists and its email is still confirmed. A confirmed answer may be
+   * up to a minute old (the Chunk 9 cache); an unconfirmed one never is.
    *
-   * @returns true when it finished an approval here
+   * @throws ConflictException when the account is gone or unconfirmed
+   * @throws ServiceUnavailableException when Clerk cannot be asked
    */
-  private async settleStaleApproval(claim: ClaimRow): Promise<boolean> {
-    if (claim.status !== 'pending' || claim.approvingAt === undefined) {
-      return false;
-    }
-    if (claim.approvingAt >= staleLockCutoff()) return false;
-    const page = await this.profileModel
-      .findOne({ _id: claim.profileId })
-      .select({ ownerUserId: 1 })
-      .lean()
-      .exec();
-    if (page?.ownerUserId !== claim.userId) return false;
-    await this.finishApproval(claim, SYSTEM_CLAIMS_ACTOR);
-    return true;
-  }
-
-  /** Marks a bound claim approved, records it, rejects the page's others. */
-  private async finishApproval(claim: ClaimRow, decidedBy: string) {
-    const done = await this.claimModel
-      .updateOne(
-        { _id: claim._id, status: 'pending' },
-        {
-          $set: { status: 'approved', decidedBy, decidedAt: new Date() },
-          $unset: { approvingAt: 1 },
-        },
-      )
-      .exec();
-    if (done.modifiedCount === 1) {
-      await this.record(
-        decidedBy,
-        'claim.approved',
-        claim,
-        'The page now belongs to the member who asked.',
+  private async requireClaimantStillEligible(userId: string) {
+    let verified: boolean;
+    try {
+      verified = await this.writers.emailVerified(userId);
+    } catch (error) {
+      if (error instanceof HttpException && error.getStatus() === 401) {
+        throw new ConflictException(CLAIMANT_GONE);
+      }
+      this.logger.warn(
+        `Could not check a claimant's account: ${describeFailure(error)}`,
       );
+      throw new ServiceUnavailableException(CANNOT_CHECK_ACCOUNT);
     }
-    const others = (await this.claimModel
-      .find({
-        profileId: claim.profileId,
-        status: 'pending',
-        _id: { $ne: claim._id },
-      })
-      .lean()
-      .exec()) as unknown as ClaimRow[];
-    for (const other of others) {
-      await this.rejectBySite(other, SITE_REASON_TAKEN, {});
-    }
+    if (!verified) throw new ConflictException(CLAIMANT_UNVERIFIED);
   }
 
-  /**
-   * Rejects a waiting claim on the site's behalf. `lock` names the lock this
-   * caller holds, or `{}` for a claim nobody is approving.
-   */
+  /** Rejects a waiting claim on the site's behalf, inside a transaction. */
   private async rejectBySite(
     claim: ClaimRow,
     reason: string,
-    lock: { approvingAt?: Date },
+    session: ClientSession,
   ) {
     const result = await this.claimModel
       .updateOne(
-        { _id: claim._id, status: 'pending', ...lock },
+        { _id: claim._id, status: 'pending' },
         {
           $set: {
             status: 'rejected',
@@ -517,30 +532,32 @@ export class ClaimsService {
             decidedAt: new Date(),
             reason,
           },
-          $unset: { approvingAt: 1 },
         },
+        { session },
       )
       .exec();
     if (result.modifiedCount === 1) {
-      await this.record(SYSTEM_CLAIMS_ACTOR, 'claim.rejected', claim, reason);
+      await this.record(
+        SYSTEM_CLAIMS_ACTOR,
+        'claim.rejected',
+        claim,
+        reason,
+        session,
+      );
     }
   }
 
-  /** Lets go of this approval's lock, only if it is still ours. */
-  private async releaseLock(id: Types.ObjectId, lockAt: Date) {
-    await this.claimModel
-      .updateOne(
-        { _id: id, status: 'pending', approvingAt: lockAt },
-        { $unset: { approvingAt: 1 } },
-      )
-      .exec();
-  }
-
-  /** Why a decision on a claim that existed a moment ago did not land. */
-  private async refuseUndecidable(id: Types.ObjectId): Promise<never> {
-    const now = await this.readClaim(id);
-    if (now?.status === 'pending') throw new ConflictException(CLAIM_BUSY);
-    throw new ConflictException(CLAIM_DECIDED);
+  /**
+   * Runs `work` in one transaction; the driver retries it on a transient
+   * conflict, so `work` must start from the database each time.
+   */
+  private async inTransaction(work: (session: ClientSession) => Promise<void>) {
+    const session = await this.claimModel.db.startSession();
+    try {
+      await session.withTransaction(() => work(session));
+    } finally {
+      await session.endSession();
+    }
   }
 
   private async record(
@@ -548,15 +565,19 @@ export class ClaimsService {
     action: string,
     claim: ClaimRow,
     reason: string,
+    session?: ClientSession,
   ) {
-    await this.log.record({
-      actorUserId,
-      action,
-      targetType: 'claim',
-      targetId: String(claim._id),
-      reason,
-      details: { profileId: String(claim.profileId), userId: claim.userId },
-    });
+    await this.log.record(
+      {
+        actorUserId,
+        action,
+        targetType: 'claim',
+        targetId: String(claim._id),
+        reason,
+        details: { profileId: String(claim.profileId), userId: claim.userId },
+      },
+      session,
+    );
   }
 
   /** The claimed pages, by id. */

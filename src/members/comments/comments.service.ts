@@ -295,7 +295,9 @@ export class CommentsService {
     const importedAuthor = (row: CommentRow): CommentAuthorView => {
       // The import always writes one ("Unknown (Apple Pages)" at worst).
       const name = String(row.legacyAuthorName);
-      const linked = row.linkedUserId ? authorOf(row.linkedUserId) : undefined;
+      const linked = row.linkedUserId
+        ? authorOf(row.linkedUserId, false, true)
+        : undefined;
       return linked?.kind === 'member' && linked.displayName !== undefined
         ? {
             kind: 'imported',

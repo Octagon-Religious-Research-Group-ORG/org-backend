@@ -17,6 +17,7 @@ const AUTHOR_PAGE_FIELDS = {
   reviewStatus: 1,
   ownerUserId: 1,
   deletedAt: 1,
+  anonymous: 1,
 };
 
 /**
@@ -34,6 +35,10 @@ const AUTHOR_PAGE_FIELDS = {
  *
  * The page is looked up by owner whatever its review status (an account has
  * at most one page), and the status is decided here, not in the query.
+ *
+ * For an imported comment linked to a member (Chunk 11, `linkedImport`),
+ * a page under a nickname names no one: "Pages Name (now Nickname)" would
+ * unmask the member (review round 1).
  */
 @Injectable()
 export class CommentAuthorsService {
@@ -49,7 +54,13 @@ export class CommentAuthorsService {
   async resolve(
     userIds: readonly string[],
     viewer: Viewer,
-  ): Promise<(userId: string, writtenAsAdmin?: boolean) => CommentAuthorView> {
+  ): Promise<
+    (
+      userId: string,
+      writtenAsAdmin?: boolean,
+      linkedImport?: boolean,
+    ) => CommentAuthorView
+  > {
     const wanted = [...new Set(userIds)];
     const pages =
       wanted.length === 0
@@ -59,8 +70,13 @@ export class CommentAuthorsService {
             .select(AUTHOR_PAGE_FIELDS)
             .lean()
             .exec()) as unknown as ProfileRow[]);
-    const pageOf = new Map(pages.map((page) => [page.ownerUserId, page]));
-    return (userId, writtenAsAdmin) => {
+    const pageOf = new Map(
+      (pages as Array<ProfileRow & { anonymous?: boolean }>).map((page) => [
+        page.ownerUserId,
+        page,
+      ]),
+    );
+    return (userId, writtenAsAdmin, linkedImport) => {
       const unnamed: CommentAuthorView = writtenAsAdmin
         ? { kind: 'admin' }
         : { kind: 'member' };
@@ -70,6 +86,7 @@ export class CommentAuthorsService {
       if (!page || (page.reviewStatus ?? 'approved') !== 'approved') {
         return unnamed;
       }
+      if (linkedImport && page.anonymous) return unnamed;
       const level = decideProfileAccess(viewer, page).level;
       if (level === 'none') return unnamed;
       return {

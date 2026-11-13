@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import type { ClientSession, Model } from 'mongoose';
 import {
   ModerationLogEntry,
   type ModerationLogEntryDocument,
@@ -16,7 +16,14 @@ export class ModerationLogService {
     private readonly logModel: Model<ModerationLogEntryDocument>,
   ) {}
 
-  record(entry: NewModerationLogEntry) {
-    return this.logModel.create({ ...entry, at: new Date() });
+  /**
+   * @param session - write inside this transaction, so the entry exists if
+   *   and only if the change it records does (Chunk 11 claims)
+   */
+  async record(entry: NewModerationLogEntry, session?: ClientSession) {
+    const row = { ...entry, at: new Date() };
+    if (!session) return this.logModel.create(row);
+    const [written] = await this.logModel.create([row], { session });
+    return written;
   }
 }

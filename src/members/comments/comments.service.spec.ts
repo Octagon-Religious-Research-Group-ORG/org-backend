@@ -110,7 +110,8 @@ describe('CommentsService', () => {
           .exec();
       await link('cmt_imp1', U.named);
       await link('cmt_imp2', U.waiting);
-      await link('cmt_imp3', U.anon);
+      await link('cmt_imp3', U.membersOwner);
+      await link('cmt_imp4', U.anon);
       const page = await h.thread('imported-page', await h.viewer(), 'tab_i');
       const [root] = page.comments;
       // The Pages name stays; the linked member is added, never substituted.
@@ -128,9 +129,20 @@ describe('CommentsService', () => {
       expect(root.replies?.[1].author).toEqual({
         kind: 'imported',
         name: 'Synthetic Pages Author',
-        member: { displayName: 'Name of anon-writer' },
+        member: { displayName: 'Name of members-page' },
       });
       expect(root.body).toBe('An imported synthetic comment.');
+      // Review round 1: a page under a nickname names no one here, so the
+      // Pages name (perhaps a real name) is never set beside the nickname.
+      const pageThread = await h.thread(
+        'imported-page',
+        await h.viewer(U.named),
+        undefined,
+      );
+      expect(pageThread.comments[0].author).toEqual({
+        kind: 'imported',
+        name: 'Synthetic Pages Author',
+      });
     });
 
     it('lists comments with no tab in the page thread', async () => {

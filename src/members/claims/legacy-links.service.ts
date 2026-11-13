@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -22,12 +23,14 @@ import {
   type LegacyCommentView,
   pageView,
 } from './claim-views';
-import { CLAIM_NOT_FOUND, parseClaimId } from './claims.service';
+import { CLAIM_NOT_FOUND, OWN_CLAIM, parseClaimId } from './claims.service';
 
 export const LINK_NEEDS_APPROVAL =
   'Imported comments can be linked once the request is approved.';
 export const LINK_PAGE_GONE =
   'The claimed page no longer belongs to this member.';
+export const LINK_ANONYMOUS =
+  "This member's page uses a nickname. Linking would show their Pages name next to it, so it is off.";
 
 /** Most imported comments listed at once; ORG has fewer than a hundred. */
 export const MAX_LEGACY_LISTED = 2_000;
@@ -70,15 +73,37 @@ export class LegacyLinksService {
    * Imported comments not linked to anyone else, those already linked to
    * this claimant first, then those whose Pages name reads like the page's.
    *
-   * @throws NotFoundException / ConflictException as {@link ownerOf}
+   * When linking is off (the page uses a nickname, or is gone) only the
+   * comments already linked to this claimant are listed, so a link can
+   * still be taken back.
+   *
+   * @throws NotFoundException / ForbiddenException / ConflictException as
+   *   {@link approvedClaim}
    */
-  async candidates(claimId: string): Promise<LegacyCommentList> {
-    const { userId, page } = await this.ownerOf(claimId);
+  async candidates(
+    adminId: string,
+    claimId: string,
+  ): Promise<LegacyCommentList> {
+    const claim = await this.approvedClaim(adminId, claimId);
+    const userId = claim.userId;
+    const page = await this.livePage(claim);
+    const linkingOff = !page
+      ? 'page-gone'
+      : page.anonymous
+        ? 'anonymous'
+        : undefined;
     const rows = (await this.commentModel
       .find({
         source: 'migrated',
-        removedAt: { $exists: false },
-        $or: [{ linkedUserId: { $exists: false } }, { linkedUserId: userId }],
+        $or: linkingOff
+          ? [{ linkedUserId: userId }]
+          : [
+              { linkedUserId: userId },
+              {
+                linkedUserId: { $exists: false },
+                removedAt: { $exists: false },
+              },
+            ],
       })
       .select({
         commentId: 1,
@@ -111,14 +136,24 @@ export class LegacyLinksService {
           : {}),
         excerpt: row.body.slice(0, EXCERPT_LENGTH),
         linked: row.linkedUserId === userId,
-        nameMatches: isNearDuplicateName(name, page.displayName),
+        nameMatches:
+          page !== null && isNearDuplicateName(name, page.displayName),
       };
     });
     const rank = (view: LegacyCommentView) =>
       view.linked ? 0 : view.nameMatches ? 1 : 2;
     comments.sort((a, b) => rank(a) - rank(b));
     return {
-      owner: { slug: page.slug, displayName: page.displayName },
+      ...(page
+        ? {
+            owner: {
+              slug: page.slug,
+              displayName: page.displayName,
+              anonymous: Boolean(page.anonymous),
+            },
+          }
+        : {}),
+      ...(linkingOff ? { linkingOff } : {}),
       comments,
       hasMore: rows.length > MAX_LEGACY_LISTED,
     };
@@ -129,7 +164,12 @@ export class LegacyLinksService {
    * (to anyone), removed, or not imported is skipped and named.
    */
   async link(adminId: string, claimId: string, commentIds: string[]) {
-    const { userId, claim } = await this.ownerOf(claimId);
+    const claim = await this.approvedClaim(adminId, claimId);
+    const userId = claim.userId;
+    const page = await this.livePage(claim);
+    if (!page) throw new ConflictException(LINK_PAGE_GONE);
+    // Review round 1: "Real Name (now Nickname)" would unmask the member.
+    if (page.anonymous) throw new ConflictException(LINK_ANONYMOUS);
     const linked: string[] = [];
     const skipped: string[] = [];
     for (const commentId of new Set(commentIds)) {
@@ -160,9 +200,13 @@ export class LegacyLinksService {
     return { linked, skipped };
   }
 
-  /** Takes a link back: a wrong link must not stay. */
+  /**
+   * Takes a link back: a wrong link must not stay, so this needs only the
+   * approved claim, even once the member's page is gone or anonymous.
+   */
   async unlink(adminId: string, claimId: string, commentIds: string[]) {
-    const { userId, claim } = await this.ownerOf(claimId);
+    const claim = await this.approvedClaim(adminId, claimId);
+    const userId = claim.userId;
     const unlinked: string[] = [];
     const skipped: string[] = [];
     for (const commentId of new Set(commentIds)) {
@@ -183,32 +227,36 @@ export class LegacyLinksService {
   }
 
   /**
-   * The approved claim and the page it bound.
+   * An approved claim another admin may act on.
    *
    * @throws NotFoundException for no such request
-   * @throws ConflictException unless it is approved and the page is still the
-   *   claimant's
+   * @throws ForbiddenException on the admin's own request (review round 1)
+   * @throws ConflictException unless it is approved
    */
-  private async ownerOf(claimId: string) {
+  private async approvedClaim(adminId: string, claimId: string) {
     const claim = await this.claimModel
       .findOne({ _id: parseClaimId(claimId) })
       .lean()
       .exec();
     if (!claim) throw new NotFoundException(CLAIM_NOT_FOUND);
+    if (claim.userId === adminId) throw new ForbiddenException(OWN_CLAIM);
     if (claim.status !== 'approved') {
       throw new ConflictException(LINK_NEEDS_APPROVAL);
     }
-    const page = (await this.profileModel
+    return claim;
+  }
+
+  /** The page the claim bound, while it is still the claimant's and live. */
+  private async livePage(claim: { profileId: Types.ObjectId; userId: string }) {
+    return (await this.profileModel
       .findOne({
         _id: claim.profileId,
         ownerUserId: claim.userId,
         deletedAt: { $exists: false },
       })
-      .select({ slug: 1, displayName: 1 })
+      .select({ slug: 1, displayName: 1, anonymous: 1 })
       .lean()
-      .exec()) as unknown as ClaimPageRow | null;
-    if (!page) throw new ConflictException(LINK_PAGE_GONE);
-    return { userId: claim.userId, page, claim };
+      .exec()) as unknown as (ClaimPageRow & { anonymous?: boolean }) | null;
   }
 
   private async record(

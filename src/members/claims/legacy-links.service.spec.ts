@@ -1,8 +1,10 @@
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Types } from 'mongoose';
-import { CLAIM_NOT_FOUND } from './claims.service';
+import { CLAIM_NOT_FOUND, OWN_CLAIM } from './claims.service';
 import {
   EXCERPT_LENGTH,
   LegacyLinksService,
+  LINK_ANONYMOUS,
   LINK_NEEDS_APPROVAL,
   LINK_PAGE_GONE,
   MAX_LEGACY_LISTED,
@@ -37,6 +39,11 @@ const approvedClaim = {
   userId: CLAIMANT,
   status: 'approved',
 };
+const ownedPage = {
+  _id: PROFILE_ID,
+  slug: 'imported-page',
+  displayName: 'Synthia Example',
+};
 
 function build() {
   const claimModel = { findOne: jest.fn(() => chain(approvedClaim)) };
@@ -45,13 +52,7 @@ function build() {
     updateOne: jest.fn(() => modified(1)),
   };
   const profileModel = {
-    findOne: jest.fn(() =>
-      chain({
-        _id: PROFILE_ID,
-        slug: 'imported-page',
-        displayName: 'Synthia Example',
-      }),
-    ),
+    findOne: jest.fn(() => chain(ownedPage)),
     find: jest.fn(() => chain([])),
   };
   const log = { record: jest.fn(() => Promise.resolve({})) };
@@ -101,12 +102,14 @@ describe('LegacyLinksService.candidates', () => {
       ]),
     );
 
-    const list = await service.candidates(String(CLAIM_ID));
+    const list = await service.candidates(ADMIN, String(CLAIM_ID));
 
     expect(list.owner).toEqual({
       slug: 'imported-page',
       displayName: 'Synthia Example',
+      anonymous: false,
     });
+    expect(list).not.toHaveProperty('linkingOff');
     expect(list.hasMore).toBe(false);
     expect(list.comments.map((c) => c.commentId)).toEqual([
       'c_linked',
@@ -134,8 +137,10 @@ describe('LegacyLinksService.candidates', () => {
     ];
     expect(filter).toEqual({
       source: 'migrated',
-      removedAt: { $exists: false },
-      $or: [{ linkedUserId: { $exists: false } }, { linkedUserId: CLAIMANT }],
+      $or: [
+        { linkedUserId: CLAIMANT },
+        { linkedUserId: { $exists: false }, removedAt: { $exists: false } },
+      ],
     });
   });
 
@@ -148,28 +153,68 @@ describe('LegacyLinksService.candidates', () => {
         ),
       ),
     );
-    const list = await service.candidates(String(CLAIM_ID));
+    const list = await service.candidates(ADMIN, String(CLAIM_ID));
     expect(list.hasMore).toBe(true);
     expect(list.comments).toHaveLength(MAX_LEGACY_LISTED);
   });
 
-  it('needs an approved claim whose page is still the claimant’s', async () => {
-    const { service, claimModel, profileModel } = build();
+  it('turns linking off for a nickname page or a gone one, listing only existing links', async () => {
+    const { service, profileModel, commentModel } = build();
+    profileModel.findOne.mockReturnValueOnce(
+      chain({ ...ownedPage, anonymous: true }),
+    );
+    expect(await service.candidates(ADMIN, String(CLAIM_ID))).toEqual({
+      owner: {
+        slug: 'imported-page',
+        displayName: 'Synthia Example',
+        anonymous: true,
+      },
+      linkingOff: 'anonymous',
+      comments: [],
+      hasMore: false,
+    });
+    expect(commentModel.find).toHaveBeenLastCalledWith({
+      source: 'migrated',
+      $or: [{ linkedUserId: CLAIMANT }],
+    });
+
+    profileModel.findOne.mockReturnValueOnce(chain(null));
+    commentModel.find.mockReturnValueOnce(
+      chain([
+        comment('c_linked', {
+          linkedUserId: CLAIMANT,
+          legacyAuthorName: 'Synthia Example',
+        }),
+      ]),
+    );
+    const gone = await service.candidates(ADMIN, String(CLAIM_ID));
+    expect(gone).not.toHaveProperty('owner');
+    expect(gone.linkingOff).toBe('page-gone');
+    // With no page there is no name to match against.
+    expect(gone.comments[0]).toMatchObject({
+      linked: true,
+      nameMatches: false,
+    });
+  });
+
+  it('needs an approved claim decided by someone else', async () => {
+    const { service, claimModel } = build();
     claimModel.findOne.mockReturnValueOnce(chain(null));
-    await expect(service.candidates(String(CLAIM_ID))).rejects.toThrow(
+    await expect(service.candidates(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       CLAIM_NOT_FOUND,
     );
     claimModel.findOne.mockReturnValueOnce(
       chain({ ...approvedClaim, status: 'pending' }),
     );
-    await expect(service.candidates(String(CLAIM_ID))).rejects.toThrow(
+    await expect(service.candidates(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       LINK_NEEDS_APPROVAL,
     );
-    profileModel.findOne.mockReturnValueOnce(chain(null));
-    await expect(service.candidates(String(CLAIM_ID))).rejects.toThrow(
-      LINK_PAGE_GONE,
+    await expect(service.candidates(ADMIN, 'bad')).rejects.toThrow(
+      CLAIM_NOT_FOUND,
     );
-    await expect(service.candidates('bad')).rejects.toThrow(CLAIM_NOT_FOUND);
+    await expect(
+      service.candidates(CLAIMANT, String(CLAIM_ID)),
+    ).rejects.toThrow(new ForbiddenException(OWN_CLAIM));
   });
 });
 
@@ -215,22 +260,50 @@ describe('LegacyLinksService.link / unlink', () => {
     );
   });
 
-  it('unlinks only comments linked to this claimant', async () => {
-    const { service, commentModel, log } = build();
+  it('refuses to link to the admin’s own account, a nickname page or a gone page', async () => {
+    const { service, profileModel, commentModel } = build();
+    await expect(
+      service.link(CLAIMANT, String(CLAIM_ID), ['c1']),
+    ).rejects.toThrow(new ForbiddenException(OWN_CLAIM));
+    profileModel.findOne.mockReturnValueOnce(
+      chain({ ...ownedPage, anonymous: true }),
+    );
+    await expect(service.link(ADMIN, String(CLAIM_ID), ['c1'])).rejects.toThrow(
+      new ConflictException(LINK_ANONYMOUS),
+    );
+    profileModel.findOne.mockReturnValueOnce(chain(null));
+    await expect(service.link(ADMIN, String(CLAIM_ID), ['c1'])).rejects.toThrow(
+      new ConflictException(LINK_PAGE_GONE),
+    );
+    expect(commentModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('unlinks only comments linked to this claimant, even with the page gone', async () => {
+    const { service, commentModel, profileModel, log } = build();
     commentModel.updateOne
       .mockReturnValueOnce(modified(0))
       .mockReturnValueOnce(modified(1));
+    profileModel.findOne.mockReturnValue(chain(null));
     const result = await service.unlink(ADMIN, String(CLAIM_ID), ['c1', 'c2']);
     expect(result).toEqual({ unlinked: ['c2'], skipped: ['c1'] });
     expect(commentModel.updateOne).toHaveBeenCalledWith(
       { commentId: 'c2', source: 'migrated', linkedUserId: CLAIMANT },
       { $unset: { linkedUserId: 1, linkedAt: 1, linkedBy: 1 } },
     );
+    expect(profileModel.findOne).not.toHaveBeenCalled();
     expect(log.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'comment.legacy-unlinked',
         reason: 'Took back the link of an imported comment.',
       }),
     );
+  });
+
+  it('refuses an admin unlinking their own claim', async () => {
+    const { service, commentModel } = build();
+    await expect(
+      service.unlink(CLAIMANT, String(CLAIM_ID), ['c1']),
+    ).rejects.toThrow(new ForbiddenException(OWN_CLAIM));
+    expect(commentModel.updateOne).not.toHaveBeenCalled();
   });
 });

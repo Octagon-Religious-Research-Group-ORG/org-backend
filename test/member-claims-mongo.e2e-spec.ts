@@ -10,8 +10,13 @@ import { MANAGED_SCHEMAS } from '../src/db/managed-schemas';
 import {
   ClaimsService,
   NOT_CLAIMABLE,
+  OWN_CLAIM,
 } from '../src/members/claims/claims.service';
-import { LegacyLinksService } from '../src/members/claims/legacy-links.service';
+import {
+  LINK_ANONYMOUS,
+  LINK_PAGE_GONE,
+  LegacyLinksService,
+} from '../src/members/claims/legacy-links.service';
 import { CommentWritersService } from '../src/members/comments/comment-writers';
 import {
   seedBlocks,
@@ -27,7 +32,11 @@ import {
   PROFILE_NOT_FOUND,
 } from '../src/members/members.service';
 import { OrgPagesService } from '../src/members/org-pages/org-pages.service';
-import { OWN_BELIEF, VotersService } from '../src/members/votes/voters.service';
+import {
+  NEEDS_APPROVED_PAGE_TO_VOTE,
+  OWN_BELIEF,
+  VotersService,
+} from '../src/members/votes/voters.service';
 import { VoteTalliesService } from '../src/members/votes/vote-tallies.service';
 import { VotesService } from '../src/members/votes/votes.service';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
@@ -44,6 +53,8 @@ const request = (userId?: string) =>
   }) as never;
 
 describeWithMongo('claims on a real MongoDB', () => {
+  // Races retry transactions and wait at barriers: seconds, not milliseconds.
+  jest.setTimeout(30_000);
   let conn: mongoose.Connection;
   const m = {} as Record<string, Model<any>>;
   let members: MembersService;
@@ -56,13 +67,22 @@ describeWithMongo('claims on a real MongoDB', () => {
   let gatedPageWrites: Model<any>;
   let arrive: (() => Promise<void>) | undefined;
   /** Lets `count` callers through together, once all have arrived. */
+  /**
+   * Lets `count` callers through together, once all have arrived, or after
+   * 500 ms: under a transaction the second may be held back earlier (by the
+   * claims' unique "one approved per page" index) and never arrive.
+   */
   const barrier = (count: number) => {
     let arrived = 0;
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
+    const timer = setTimeout(() => release(), 500);
     return async () => {
       arrived += 1;
-      if (arrived >= count) release();
+      if (arrived >= count) {
+        clearTimeout(timer);
+        release();
+      }
       await gate;
     };
   };
@@ -152,8 +172,11 @@ describeWithMongo('claims on a real MongoDB', () => {
     const gatedPages = new Proxy(pages, {
       get(target, prop) {
         if (prop === 'updateOne') {
-          return (filter: unknown, update: unknown) => {
-            const query = target.updateOne(filter as never, update as never);
+          return (...args: unknown[]) => {
+            // Every argument, the session included, reaches the real write.
+            const query = target.updateOne(
+              ...(args as Parameters<typeof target.updateOne>),
+            );
             return {
               exec: async () => {
                 if (arrive) await arrive();
@@ -246,6 +269,17 @@ describeWithMongo('claims on a real MongoDB', () => {
   it('a request, then an approval, binds the page and the owner gets the owner tools', async () => {
     const claimant = 'user_claim_flow';
     expect((await claims.mine(claimant)).mayClaim).toBe(true);
+    // Review LOW c: before the binding the claimant has no page, so no vote
+    // of theirs on these beliefs can exist to be counted.
+    const before = await viewer(claimant);
+    await expect(
+      votes.cast(before, {
+        slug: 'imported-page',
+        tabId: 'tab_i',
+        value: 'agree',
+        baseSeq: 1,
+      }),
+    ).rejects.toThrow(NEEDS_APPROVED_PAGE_TO_VOTE);
     const asked = await ask(claimant, 'imported-page');
     expect(asked.status).toBe('pending');
     expect(await claims.mine(claimant)).toMatchObject({
@@ -293,6 +327,9 @@ describeWithMongo('claims on a real MongoDB', () => {
       }),
     ).rejects.toThrow(OWN_BELIEF);
 
+    expect(await m.BeliefVote.countDocuments({ voterUserId: claimant })).toBe(
+      0,
+    );
     expect(await claims.mine(claimant)).toMatchObject({
       mayClaim: false,
       block: 'has-page',
@@ -380,9 +417,10 @@ describeWithMongo('claims on a real MongoDB', () => {
         arrive = undefined;
         const refused = results.filter((r) => r.status === 'rejected');
         expect(refused).toHaveLength(1);
-        // The loser reached the bind and found the page taken.
+        // The loser found the page taken, or its claim already rejected by
+        // the winner (which rejects the page's other requests on commit).
         expect(String(refused[0].reason)).toMatch(
-          /now belongs to another member/,
+          /now belongs to another member|already been decided/,
         );
         const rows = await m.Claim.find({ profileId: target._id }).lean();
         expect(rows.map((r) => r.status).sort()).toEqual([
@@ -426,6 +464,87 @@ describeWithMongo('claims on a real MongoDB', () => {
       arrive = undefined;
     }
   });
+
+  // Review round 1 (HIGH): an approval stalled at its page write past any
+  // lock age, while another admin rejects or the claimant withdraws. The
+  // page must never end bound to a claim that is not approved, and the
+  // approval must not answer "approved" unless its own change landed.
+  for (const later of ['reject', 'withdraw'] as const) {
+    it(`a stalled approval and a later ${later}: bound if and only if approved`, async () => {
+      const target = await importedPage();
+      const who = `user_stall_${later}`;
+      const asked = await ask(who, target.slug);
+      const other = await ask(`user_stall_other_${later}`, target.slug);
+      let letGo: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (letGo = resolve));
+      let reached: () => void = () => undefined;
+      const atBind = new Promise<void>((resolve) => (reached = resolve));
+      arrive = async () => {
+        reached();
+        await held;
+      };
+      try {
+        const approving = gatedClaims
+          .approve('user_admin_one', asked.claimId)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error: String(error) }),
+          );
+        await atBind;
+        // The stall outlives any lock: age it as a slow server would.
+        // Neither write is awaited first: under a transaction they wait for it.
+        const decision = m.Claim.collection
+          .updateOne(
+            { _id: new Types.ObjectId(asked.claimId) },
+            { $set: { approvingAt: new Date(Date.now() - 10 * 60_000) } },
+          )
+          .then(
+            (): Promise<unknown> =>
+              later === 'reject'
+                ? claims.reject('user_admin_two', asked.claimId, 'Synthetic')
+                : claims.withdraw(who, asked.claimId),
+          )
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error: String(error) }),
+          );
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        letGo();
+        const [approved, decided] = await Promise.all([approving, decision]);
+        arrive = undefined;
+
+        const owner = await owners(target._id);
+        const row = await m.Claim.findOne({ _id: asked.claimId }).lean();
+        const otherRow = await m.Claim.findOne({ _id: other.claimId }).lean();
+        const approvedLogs = await m.ModerationLogEntry.countDocuments({
+          targetId: asked.claimId,
+          action: 'claim.approved',
+        });
+        console.warn(
+          `stall ${later}: ${JSON.stringify({ approved, decided, owner, status: row.status })}`,
+        );
+        // Exactly one decision won.
+        expect('value' in approved).not.toBe('value' in decided);
+        if (row.status === 'approved') {
+          expect('value' in approved).toBe(true);
+          expect(owner).toBe(who);
+          expect(approvedLogs).toBe(1);
+          expect(otherRow.status).toBe('rejected');
+        } else {
+          expect(row.status).toBe(
+            later === 'reject' ? 'rejected' : 'withdrawn',
+          );
+          expect('value' in approved).toBe(false);
+          expect(owner).toBeUndefined();
+          expect(approvedLogs).toBe(0);
+          expect(otherRow.status).toBe('pending');
+        }
+      } finally {
+        arrive = undefined;
+        letGo();
+      }
+    });
+  }
 
   it('the same request approved twice at once: one approval, one record', async () => {
     for (let round = 0; round < 10; round++) {
@@ -508,13 +627,13 @@ describeWithMongo('claims on a real MongoDB', () => {
     });
     const who = 'user_linker';
     const asked = await ask(who, target.slug);
-    await expect(links.candidates(asked.claimId)).rejects.toThrow(
+    await expect(links.candidates(U.admin, asked.claimId)).rejects.toThrow(
       /once the request is approved/,
     );
     await claims.approve(U.admin, asked.claimId);
 
     const before = await m.Comment.findOne({ commentId: 'cmt_imp4' }).lean();
-    const list = await links.candidates(asked.claimId);
+    const list = await links.candidates(U.admin, asked.claimId);
     expect(list.comments.find((c) => c.commentId === 'cmt_imp4')).toMatchObject(
       { nameMatches: true, linked: false },
     );
@@ -533,7 +652,9 @@ describeWithMongo('claims on a real MongoDB', () => {
       expect(after[field]).toEqual(before[field]);
     }
     // Linked to one member, it cannot be linked to another.
-    expect((await links.candidates(asked.claimId)).comments[0]).toMatchObject({
+    expect(
+      (await links.candidates(U.admin, asked.claimId)).comments[0],
+    ).toMatchObject({
       commentId: 'cmt_imp4',
       linked: true,
     });
@@ -553,5 +674,63 @@ describeWithMongo('claims on a real MongoDB', () => {
       'comment.legacy-linked',
       'comment.legacy-unlinked',
     ]);
+  });
+
+  it('review round 1: an admin cannot link comments to their own claim', async () => {
+    const target = await importedPage({ displayName: 'Synthetic Admin Page' });
+    const adminClaimant = 'user_admin_self';
+    const asked = await ask(adminClaimant, target.slug);
+    await claims.approve(U.admin, asked.claimId);
+    await expect(
+      links.candidates(adminClaimant, asked.claimId),
+    ).rejects.toThrow(OWN_CLAIM);
+    await expect(
+      links.link(adminClaimant, asked.claimId, ['cmt_imp1']),
+    ).rejects.toThrow(OWN_CLAIM);
+    await expect(
+      links.unlink(adminClaimant, asked.claimId, ['cmt_imp1']),
+    ).rejects.toThrow(OWN_CLAIM);
+    expect(
+      (await m.Comment.findOne({ commentId: 'cmt_imp1' }).lean()).linkedUserId,
+    ).toBeUndefined();
+  });
+
+  it('review round 1: no linking to a page under a nickname; a link can be undone after the page is gone', async () => {
+    const nickname = await importedPage({ anonymous: true });
+    const hidden = 'user_nickname_owner';
+    const asked = await ask(hidden, nickname.slug);
+    await claims.approve(U.admin, asked.claimId);
+    await expect(
+      links.link(U.admin, asked.claimId, ['cmt_imp2']),
+    ).rejects.toThrow(LINK_ANONYMOUS);
+    expect(await links.candidates(U.admin, asked.claimId)).toMatchObject({
+      owner: { anonymous: true },
+      linkingOff: 'anonymous',
+      comments: [],
+    });
+
+    const named = await importedPage();
+    const who = 'user_page_will_go';
+    const second = await ask(who, named.slug);
+    await claims.approve(U.admin, second.claimId);
+    await links.link(U.admin, second.claimId, ['cmt_imp2']);
+    await m.SocialProfile.collection.updateOne(
+      { _id: named._id },
+      { $set: { deletedAt: new Date() } },
+    );
+    expect(await links.candidates(U.admin, second.claimId)).toMatchObject({
+      linkingOff: 'page-gone',
+      comments: [{ commentId: 'cmt_imp2', linked: true }],
+    });
+    await expect(
+      links.link(U.admin, second.claimId, ['cmt_imp3']),
+    ).rejects.toThrow(LINK_PAGE_GONE);
+    expect(await links.unlink(U.admin, second.claimId, ['cmt_imp2'])).toEqual({
+      unlinked: ['cmt_imp2'],
+      skipped: [],
+    });
+    expect(
+      (await m.Comment.findOne({ commentId: 'cmt_imp2' }).lean()).linkedUserId,
+    ).toBeUndefined();
   });
 });

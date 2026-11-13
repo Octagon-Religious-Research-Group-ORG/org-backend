@@ -73,8 +73,10 @@ describe('claims controllers', () => {
     expect(claims.adminList).toHaveBeenCalledWith('pending');
     await reads.list({ status: 'approved' });
     expect(claims.adminList).toHaveBeenLastCalledWith('approved');
-    await expect(reads.legacyComments('abc')).resolves.toBe('candidates');
-    expect(links.candidates).toHaveBeenCalledWith('abc');
+    await expect(
+      reads.legacyComments(request('user_admin'), 'abc'),
+    ).resolves.toBe('candidates');
+    expect(links.candidates).toHaveBeenCalledWith('user_admin', 'abc');
 
     const writes = new AdminClaimWritesController(service, linkService);
     const admin = request('user_admin');

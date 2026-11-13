@@ -2,8 +2,7 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
 /**
- * - `pending`: waiting for an admin; while an approval is being written it
- *   carries `approvingAt` and nothing else may decide it;
+ * - `pending`: waiting for an admin;
  * - `approved`: the page now belongs to the claimant (`socialprofiles.ownerUserId`);
  * - `rejected`: by an admin, or by the site when the page went to someone
  *   else or no longer exists (`decidedBy` is then `system:claims`);
@@ -28,7 +27,8 @@ export const SYSTEM_CLAIMS_ACTOR = 'system:claims';
 /**
  * A request to own an imported member page (plan D5, Chunk 11). Imported
  * pages belong to no login; a signed-in member asks, an admin approves, and
- * approving binds the page to that login.
+ * approving binds the page to that login, in the same transaction that
+ * marks the claim approved.
  *
  * This row is the claim's current state. Every step (requested, approved,
  * rejected, withdrawn) is also written to the append-only `moderationlog`,
@@ -62,13 +62,6 @@ export class Claim {
     default: 'pending',
   })
   status: ClaimStatus;
-
-  /**
-   * An approval is being written (a short lock): a rejection or a withdrawal
-   * in another window waits. One that died is taken over once it is old.
-   */
-  @Prop({ type: Date })
-  approvingAt?: Date;
 
   /** Clerk user id of the admin, or {@link SYSTEM_CLAIMS_ACTOR}. */
   @Prop({ type: String })

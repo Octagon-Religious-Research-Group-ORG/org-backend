@@ -25,7 +25,6 @@ export interface ClaimRow {
   userId: string;
   message: string;
   status: ClaimStatus;
-  approvingAt?: Date;
   decidedBy?: string;
   decidedAt?: Date;
   reason?: string;
@@ -64,8 +63,6 @@ export interface MyClaims {
 export interface AdminClaimView {
   claimId: string;
   status: ClaimStatus;
-  /** An approval is being written right now. */
-  approving: boolean;
   message: string;
   requestedAt: string;
   decidedAt?: string;
@@ -100,7 +97,13 @@ export interface LegacyCommentView {
 }
 
 export interface LegacyCommentList {
-  owner: { slug: string; displayName: string };
+  /** The claimed page; absent once it is gone or no longer the claimant's. */
+  owner?: { slug: string; displayName: string; anonymous: boolean };
+  /**
+   * Why new links are refused: the page uses a nickname (linking would
+   * unmask the member), or it is gone. Existing links can still be undone.
+   */
+  linkingOff?: 'anonymous' | 'page-gone';
   comments: LegacyCommentView[];
   /** More imported comments exist than were listed. */
   hasMore: boolean;

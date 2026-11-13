@@ -20,6 +20,30 @@ describe('ModerationLogService', () => {
     const written = model.create.mock.calls[0][0] as { at: Date };
     expect(written.at.getTime()).toBeGreaterThanOrEqual(before);
   });
+
+  it('writes inside a transaction when given its session', async () => {
+    const model = {
+      create: jest.fn((docs: object[]) => Promise.resolve(docs)),
+    };
+    const service = new ModerationLogService(model as never);
+    const session = { id: 'synthetic-session' };
+
+    const written = await service.record(
+      {
+        actorUserId: 'user_admin',
+        action: 'claim.approved',
+        targetType: 'claim',
+        targetId: 'c1',
+        reason: 'test',
+      },
+      session as never,
+    );
+
+    expect(model.create).toHaveBeenCalledWith([expect.any(Object)], {
+      session,
+    });
+    expect(written).toMatchObject({ action: 'claim.approved' });
+  });
 });
 
 describe('moderationlog schema', () => {

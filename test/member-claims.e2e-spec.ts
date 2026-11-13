@@ -140,11 +140,20 @@ describe('claims API (e2e)', () => {
       ['get', `/admin/claims/${CLAIM}/legacy-comments`],
       ['post', `/admin/claims/${CLAIM}/approve`],
       ['post', `/admin/claims/${CLAIM}/reject`],
+      ['post', `/admin/claims/${CLAIM}/legacy-comments/link`],
+      ['post', `/admin/claims/${CLAIM}/legacy-comments/unlink`],
     ] as const) {
-      await call(method, path, 'user_member').send({}).expect(403);
+      // A valid body, so only the role check can refuse it.
+      await call(method, path, 'user_member')
+        .send(path.endsWith('link') ? { commentIds: ['c1'] } : {})
+        .expect(403);
     }
     expect(claims.adminList).not.toHaveBeenCalled();
     expect(claims.approve).not.toHaveBeenCalled();
+    expect(claims.reject).not.toHaveBeenCalled();
+    expect(links.candidates).not.toHaveBeenCalled();
+    expect(links.link).not.toHaveBeenCalled();
+    expect(links.unlink).not.toHaveBeenCalled();
     const queue = await call(
       'get',
       '/admin/claims?status=rejected',

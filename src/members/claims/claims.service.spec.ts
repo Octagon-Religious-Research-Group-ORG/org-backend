@@ -16,14 +16,14 @@ import {
 } from '../../social/schemas/claim.schema';
 import { CANNOT_CHECK_ACCOUNT } from '../comments/comment-writers';
 import {
-  APPROVE_LOCK_STALE_MS,
-  CLAIM_BUSY,
   CLAIM_DECIDED,
   CLAIM_MESSAGE_EMPTY,
   CLAIM_MESSAGE_TOO_LONG,
   CLAIM_NOT_FOUND,
   CLAIM_REASON_TOO_LONG,
+  CLAIMANT_GONE,
   CLAIMANT_HAS_PAGE,
+  CLAIMANT_UNVERIFIED,
   ClaimsService,
   HAS_PAGE,
   HAS_PENDING,
@@ -53,9 +53,30 @@ function chain(value: unknown) {
     sort: () => query,
     limit: () => query,
     lean: () => query,
+    session: () => query,
     exec: () => Promise.resolve(value),
   };
   return query;
+}
+
+/**
+ * A session whose transaction runs its work once and counts what an abort
+ * would undo; the real atomicity is tested on a replica set (e2e).
+ */
+function fakeSession() {
+  const session = {
+    aborted: 0,
+    withTransaction: jest.fn(async (work: () => Promise<unknown>) => {
+      try {
+        await work();
+      } catch (error) {
+        session.aborted += 1;
+        throw error;
+      }
+    }),
+    endSession: jest.fn(() => Promise.resolve()),
+  };
+  return session;
 }
 const exec = (value: unknown) => ({ exec: () => Promise.resolve(value) });
 const modified = (n: number) => exec({ modifiedCount: n, matchedCount: n });
@@ -86,7 +107,9 @@ const visiblePage = (overrides: Record<string, unknown> = {}) => ({
 });
 
 function build() {
+  const session = fakeSession();
   const claimModel = {
+    db: { startSession: jest.fn(() => Promise.resolve(session)) },
     find: jest.fn(() => chain([])),
     findOne: jest.fn(() => chain(claimRow())),
     create: jest.fn((doc: Record<string, unknown>) =>
@@ -112,7 +135,11 @@ function build() {
       Promise.resolve({ email: 'claimant@example.test', emailVerified: true }),
     ),
   };
-  const log = { record: jest.fn(() => Promise.resolve({})) };
+  const log = {
+    record: jest.fn<Promise<unknown>, [unknown, unknown?]>(() =>
+      Promise.resolve({}),
+    ),
+  };
   const service = new ClaimsService(
     claimModel as never,
     profileModel as never,
@@ -121,7 +148,16 @@ function build() {
     clerk as never,
     log as never,
   );
-  return { service, claimModel, profileModel, members, writers, clerk, log };
+  return {
+    service,
+    claimModel,
+    profileModel,
+    members,
+    writers,
+    clerk,
+    log,
+    session,
+  };
 }
 
 const viewer = { kind: 'signed-in' as const, userId: CLAIMANT, isAdmin: false };
@@ -387,27 +423,28 @@ describe('ClaimsService.request', () => {
 });
 
 describe('ClaimsService.withdraw', () => {
-  it('withdraws the member’s own waiting request and records it', async () => {
-    const { service, claimModel, log } = build();
+  it('withdraws the member’s own waiting request and records it, in one transaction', async () => {
+    const { service, claimModel, log, session } = build();
     expect(await service.withdraw(CLAIMANT, String(CLAIM_ID))).toEqual({
       withdrawn: true,
     });
-    const [filter, update] = claimModel.updateOne.mock.calls[0] as unknown as [
+    const [filter, update, options] = claimModel.updateOne.mock
+      .calls[0] as unknown as [
       Record<string, unknown>,
       { $set: Record<string, unknown> },
+      { session: unknown },
     ];
-    expect(filter).toMatchObject({
-      _id: CLAIM_ID,
-      userId: CLAIMANT,
-      status: 'pending',
-    });
+    expect(filter).toEqual({ _id: CLAIM_ID, status: 'pending' });
     expect(update.$set).toMatchObject({
       status: 'withdrawn',
       decidedBy: CLAIMANT,
     });
+    expect(options.session).toBe(session);
     expect(log.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'claim.withdrawn' }),
+      session,
     );
+    expect(session.endSession).toHaveBeenCalled();
   });
 
   it('answers someone else’s or a missing request with the same 404', async () => {
@@ -421,50 +458,14 @@ describe('ClaimsService.withdraw', () => {
     );
   });
 
-  it('refuses while being approved, and after a decision', async () => {
-    const { service, claimModel } = build();
+  it('refuses a request decided meanwhile, and records nothing', async () => {
+    const { service, claimModel, log, session } = build();
     claimModel.updateOne.mockReturnValueOnce(modified(0));
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })))
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })));
     await expect(service.withdraw(CLAIMANT, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_BUSY,
+      new ConflictException(CLAIM_DECIDED),
     );
-    claimModel.updateOne.mockReturnValueOnce(modified(0));
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow()))
-      .mockReturnValueOnce(chain(claimRow({ status: 'approved' })));
-    await expect(service.withdraw(CLAIMANT, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_DECIDED,
-    );
-    claimModel.updateOne.mockReturnValueOnce(modified(0));
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow()))
-      .mockReturnValueOnce(chain(null));
-    await expect(service.withdraw(CLAIMANT, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_DECIDED,
-    );
-  });
-
-  it('finishes an approval that died after binding instead of withdrawing', async () => {
-    const { service, claimModel, profileModel, log } = build();
-    const stale = new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000);
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: stale })))
-      .mockReturnValueOnce(chain(claimRow({ status: 'approved' })));
-    profileModel.findOne.mockReturnValueOnce(chain({ ownerUserId: CLAIMANT }));
-    claimModel.updateOne
-      .mockReturnValueOnce(modified(1)) // finish: approved
-      .mockReturnValueOnce(modified(0)); // the withdrawal finds it decided
-    await expect(service.withdraw(CLAIMANT, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_DECIDED,
-    );
-    expect(log.record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'claim.approved',
-        actorUserId: SYSTEM_CLAIMS_ACTOR,
-      }),
-    );
+    expect(log.record).not.toHaveBeenCalled();
+    expect(session.endSession).toHaveBeenCalled();
   });
 });
 
@@ -473,12 +474,11 @@ describe('ClaimsService.adminList', () => {
     const { service, claimModel, profileModel, clerk } = build();
     claimModel.find.mockReturnValueOnce(
       chain([
-        claimRow({ approvingAt: new Date() }),
+        claimRow(),
         claimRow({
           _id: OTHER_CLAIM_ID,
           userId: 'user_b',
           profileId: OTHER_PROFILE_ID,
-          approvingAt: new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000),
         }),
         claimRow({ _id: new Types.ObjectId(), userId: 'user_c' }),
       ]),
@@ -496,7 +496,6 @@ describe('ClaimsService.adminList', () => {
     expect(claims[0]).toEqual({
       claimId: String(CLAIM_ID),
       status: 'pending',
-      approving: true,
       message: 'Synthetic: I wrote this page in 2019.',
       requestedAt: REQUESTED.toISOString(),
       decidedBySite: false,
@@ -508,7 +507,6 @@ describe('ClaimsService.adminList', () => {
       page: { slug: 'imported-page', displayName: 'S' },
     });
     expect(claims[1]).toMatchObject({
-      approving: false,
       claimant: { userId: 'user_b', emailVerified: false },
     });
     expect(claims[1]).not.toHaveProperty('page');
@@ -524,13 +522,11 @@ describe('ClaimsService.adminList', () => {
           decidedBy: SYSTEM_CLAIMS_ACTOR,
           decidedAt: REQUESTED,
           reason: SITE_REASON_TAKEN,
-          approvingAt: new Date(),
         }),
       ]),
     );
     const { claims } = await service.adminList('rejected');
     expect(claims[0]).toMatchObject({
-      approving: false,
       decidedBySite: true,
       decidedAt: REQUESTED.toISOString(),
       reason: SITE_REASON_TAKEN,
@@ -539,8 +535,8 @@ describe('ClaimsService.adminList', () => {
 });
 
 describe('ClaimsService.approve', () => {
-  it('locks, binds only an ownerless imported page, approves, records, rejects the others', async () => {
-    const { service, claimModel, profileModel, log } = build();
+  it('approves, binds only an approved ownerless imported page and logs it in ONE transaction, then rejects the others', async () => {
+    const { service, claimModel, profileModel, log, session } = build();
     const other = claimRow({ _id: OTHER_CLAIM_ID, userId: 'user_b' });
     claimModel.find.mockReturnValueOnce(chain([other]));
 
@@ -548,32 +544,28 @@ describe('ClaimsService.approve', () => {
       approved: true,
     });
 
-    const [lockFilter, lockUpdate] = claimModel.updateOne.mock
+    const [casFilter, cas, casOptions] = claimModel.updateOne.mock
       .calls[0] as unknown as [
       Record<string, unknown>,
-      { $set: { approvingAt: Date } },
+      { $set: Record<string, unknown> },
+      { session: unknown },
     ];
-    expect(lockFilter).toMatchObject({ _id: CLAIM_ID, status: 'pending' });
-    expect(lockUpdate.$set.approvingAt).toBeInstanceOf(Date);
+    expect(casFilter).toEqual({ _id: CLAIM_ID, status: 'pending' });
+    expect(cas.$set).toMatchObject({ status: 'approved', decidedBy: ADMIN });
+    expect(casOptions.session).toBe(session);
     expect(profileModel.updateOne).toHaveBeenCalledWith(
       {
         _id: PROFILE_ID,
         source: 'migrated',
+        reviewStatus: 'approved',
         ownerUserId: { $exists: false },
         deletedAt: { $exists: false },
       },
       { $set: { ownerUserId: CLAIMANT } },
+      { session },
     );
-    const [, approved] = claimModel.updateOne.mock.calls[1] as unknown as [
-      unknown,
-      { $set: Record<string, unknown> },
-    ];
-    expect(approved.$set).toMatchObject({
-      status: 'approved',
-      decidedBy: ADMIN,
-    });
     const [othersFilter, othersUpdate] = claimModel.updateOne.mock
-      .calls[2] as unknown as [
+      .calls[1] as unknown as [
       Record<string, unknown>,
       { $set: Record<string, unknown> },
     ];
@@ -588,15 +580,9 @@ describe('ClaimsService.approve', () => {
         (call) => (call as unknown as [{ action: string }])[0].action,
       ),
     ).toEqual(['claim.approved', 'claim.rejected']);
-  });
-
-  it('records nothing for a claim another decision already finished', async () => {
-    const { service, claimModel, log } = build();
-    claimModel.updateOne
-      .mockReturnValueOnce(modified(1)) // lock
-      .mockReturnValueOnce(modified(0)); // already approved elsewhere
-    await service.approve(ADMIN, String(CLAIM_ID));
-    expect(log.record).not.toHaveBeenCalled();
+    // Every write went inside a transaction: one for the approval, one per
+    // other request.
+    expect(session.withTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('skips logging another claim that was decided meanwhile', async () => {
@@ -605,7 +591,6 @@ describe('ClaimsService.approve', () => {
       chain([claimRow({ _id: OTHER_CLAIM_ID, userId: 'user_b' })]),
     );
     claimModel.updateOne
-      .mockReturnValueOnce(modified(1))
       .mockReturnValueOnce(modified(1))
       .mockReturnValueOnce(modified(0));
     await service.approve(ADMIN, String(CLAIM_ID));
@@ -632,63 +617,39 @@ describe('ClaimsService.approve', () => {
     );
   });
 
-  it('is busy while another approval holds the lock', async () => {
-    const { service, claimModel, profileModel } = build();
+  it('answers decided, binding nothing, when another decision got there first', async () => {
+    const { service, claimModel, profileModel, log } = build();
     claimModel.updateOne.mockReturnValueOnce(modified(0));
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })))
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })));
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_BUSY,
+      new ConflictException(CLAIM_DECIDED),
     );
     expect(profileModel.updateOne).not.toHaveBeenCalled();
+    expect(log.record).not.toHaveBeenCalled();
   });
 
-  it('finishes an approval that died after binding, and says it is decided', async () => {
-    const { service, claimModel, profileModel } = build();
-    claimModel.findOne.mockReturnValueOnce(
-      chain(
-        claimRow({
-          approvingAt: new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000),
-        }),
-      ),
-    );
-    profileModel.findOne.mockReturnValueOnce(chain({ ownerUserId: CLAIMANT }));
+  it('checks the claimant again: gone, unconfirmed, or not checkable', async () => {
+    const { service, writers, claimModel } = build();
+    writers.emailVerified.mockRejectedValueOnce(new UnauthorizedException());
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_DECIDED,
+      new ConflictException(CLAIMANT_GONE),
     );
-    expect(profileModel.updateOne).not.toHaveBeenCalled();
+    writers.emailVerified.mockResolvedValueOnce(false);
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      new ConflictException(CLAIMANT_UNVERIFIED),
+    );
+    writers.emailVerified.mockRejectedValueOnce(new Error('down'));
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      new ServiceUnavailableException(CANNOT_CHECK_ACCOUNT),
+    );
+    writers.emailVerified.mockRejectedValueOnce(new ForbiddenException('odd'));
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      new ServiceUnavailableException(CANNOT_CHECK_ACCOUNT),
+    );
+    expect(claimModel.updateOne).not.toHaveBeenCalled();
   });
 
-  it('takes over a dead approval that never bound the page', async () => {
-    const { service, claimModel, profileModel } = build();
-    claimModel.findOne.mockReturnValueOnce(
-      chain(
-        claimRow({
-          approvingAt: new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000),
-        }),
-      ),
-    );
-    profileModel.findOne.mockReturnValueOnce(chain({}));
-    await expect(service.approve(ADMIN, String(CLAIM_ID))).resolves.toEqual({
-      approved: true,
-    });
-    // Also when the page row itself is gone: the bind then decides.
-    claimModel.findOne.mockReturnValueOnce(
-      chain(
-        claimRow({
-          approvingAt: new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000),
-        }),
-      ),
-    );
-    profileModel.findOne.mockReturnValueOnce(chain(null));
-    await expect(service.approve(ADMIN, String(CLAIM_ID))).resolves.toEqual({
-      approved: true,
-    });
-  });
-
-  it('releases the lock and refuses when the claimant owns a page already', async () => {
-    const { service, claimModel, profileModel } = build();
+  it('refuses when the claimant owns a page already; the transaction undoes the approval', async () => {
+    const { service, profileModel, log, session } = build();
     profileModel.updateOne.mockReturnValueOnce({
       exec: () =>
         Promise.reject(Object.assign(new Error('E11000'), { code: 11000 })),
@@ -696,14 +657,8 @@ describe('ClaimsService.approve', () => {
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       new ConflictException(CLAIMANT_HAS_PAGE),
     );
-    const [releaseFilter, release] = claimModel.updateOne.mock
-      .calls[1] as unknown as [
-      Record<string, unknown>,
-      Record<string, unknown>,
-    ];
-    expect(releaseFilter).toMatchObject({ _id: CLAIM_ID, status: 'pending' });
-    expect(releaseFilter.approvingAt).toBeInstanceOf(Date);
-    expect(release).toEqual({ $unset: { approvingAt: 1 } });
+    expect(session.aborted).toBe(1);
+    expect(log.record).not.toHaveBeenCalled();
 
     const failure = new Error('db down');
     profileModel.updateOne.mockReturnValueOnce({
@@ -714,64 +669,77 @@ describe('ClaimsService.approve', () => {
     );
   });
 
-  it('rejects the claim when the page went to someone else, or is gone', async () => {
-    const { service, profileModel, claimModel, log } = build();
+  it('rejects the claim, in its own transaction, when the page went to someone else or is gone', async () => {
+    const { service, profileModel, claimModel, log, session } = build();
     profileModel.updateOne.mockReturnValue(modified(0));
-    profileModel.findOne.mockReturnValueOnce(chain({ ownerUserId: 'user_b' }));
+    profileModel.findOne.mockReturnValueOnce(chain({}));
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       PAGE_TAKEN,
     );
+    expect(session.aborted).toBe(1);
     const [filter, update] = claimModel.updateOne.mock.calls[1] as unknown as [
       Record<string, unknown>,
       { $set: Record<string, unknown> },
     ];
-    expect(filter.approvingAt).toBeInstanceOf(Date);
+    expect(filter).toEqual({ _id: CLAIM_ID, status: 'pending' });
     expect(update.$set).toMatchObject({
       status: 'rejected',
       reason: SITE_REASON_TAKEN,
     });
+    expect(log.record).toHaveBeenCalledTimes(1);
     expect(log.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'claim.rejected',
         reason: SITE_REASON_TAKEN,
       }),
+      session,
     );
 
     profileModel.findOne.mockReturnValueOnce(chain(null));
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       PAGE_GONE,
     );
-    profileModel.findOne.mockReturnValueOnce(
-      chain({ ownerUserId: 'user_b', deletedAt: REQUESTED }),
-    );
+    profileModel.findOne.mockReturnValueOnce(chain({ deletedAt: REQUESTED }));
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       PAGE_GONE,
     );
     expect(log.record).toHaveBeenLastCalledWith(
       expect.objectContaining({ reason: SITE_REASON_GONE }),
+      session,
     );
   });
 
-  it('finishes when the page is already the claimant’s', async () => {
-    const { service, profileModel } = build();
-    profileModel.updateOne.mockReturnValueOnce(modified(0));
-    profileModel.findOne.mockReturnValueOnce(chain({ ownerUserId: CLAIMANT }));
-    await expect(service.approve(ADMIN, String(CLAIM_ID))).resolves.toEqual({
-      approved: true,
+  it('treats a page that already has an approved claim as taken', async () => {
+    const { service, claimModel, profileModel } = build();
+    claimModel.updateOne.mockReturnValueOnce({
+      exec: () =>
+        Promise.reject(Object.assign(new Error('E11000'), { code: 11000 })),
     });
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      PAGE_TAKEN,
+    );
+    expect(profileModel.updateOne).not.toHaveBeenCalled();
+    const failure = new Error('db down');
+    claimModel.updateOne.mockReturnValueOnce({
+      exec: () => Promise.reject(failure),
+    });
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toBe(
+      failure,
+    );
   });
 });
 
 describe('ClaimsService.reject', () => {
-  it('rejects with a cleaned reason, shown to the claimant, and records it', async () => {
-    const { service, claimModel, log } = build();
+  it('rejects with a cleaned reason, shown to the claimant, and records it in one transaction', async () => {
+    const { service, claimModel, log, session } = build();
     expect(
       await service.reject(ADMIN, String(CLAIM_ID), '  Synthetic\nreason  '),
     ).toEqual({ rejected: true });
-    const [, update] = claimModel.updateOne.mock.calls[0] as unknown as [
-      unknown,
+    const [filter, update] = claimModel.updateOne.mock.calls[0] as unknown as [
+      Record<string, unknown>,
       { $set: Record<string, unknown> },
     ];
+    expect(filter).toEqual({ _id: CLAIM_ID, status: 'pending' });
     expect(update.$set).toMatchObject({
       status: 'rejected',
       decidedBy: ADMIN,
@@ -782,6 +750,7 @@ describe('ClaimsService.reject', () => {
         action: 'claim.rejected',
         reason: 'Synthetic reason',
       }),
+      session,
     );
   });
 
@@ -795,10 +764,11 @@ describe('ClaimsService.reject', () => {
     expect(update.$set).not.toHaveProperty('reason');
     expect(log.record).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'Rejected without a reason.' }),
+      expect.anything(),
     );
   });
 
-  it('refuses a reason over its limit, its own request, and a busy or decided one', async () => {
+  it('refuses a reason over its limit, its own request, and a decided one', async () => {
     const { service, claimModel } = build();
     await expect(
       service.reject(
@@ -811,24 +781,6 @@ describe('ClaimsService.reject', () => {
       OWN_CLAIM,
     );
     claimModel.updateOne.mockReturnValueOnce(modified(0));
-    claimModel.findOne
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })))
-      .mockReturnValueOnce(chain(claimRow({ approvingAt: new Date() })));
-    await expect(service.reject(ADMIN, String(CLAIM_ID))).rejects.toThrow(
-      CLAIM_BUSY,
-    );
-  });
-
-  it('does not reject a claim whose dead approval bound the page', async () => {
-    const { service, claimModel, profileModel } = build();
-    claimModel.findOne.mockReturnValueOnce(
-      chain(
-        claimRow({
-          approvingAt: new Date(Date.now() - APPROVE_LOCK_STALE_MS - 1000),
-        }),
-      ),
-    );
-    profileModel.findOne.mockReturnValueOnce(chain({ ownerUserId: CLAIMANT }));
     await expect(service.reject(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       CLAIM_DECIDED,
     );

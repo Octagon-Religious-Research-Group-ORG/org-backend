@@ -96,8 +96,11 @@ export class AdminClaimsController {
   }
 
   @Get(':claimId/legacy-comments')
-  legacyComments(@Param('claimId') claimId: string) {
-    return this.links.candidates(claimId);
+  legacyComments(
+    @Req() request: AuthenticatedRequest,
+    @Param('claimId') claimId: string,
+  ) {
+    return this.links.candidates(getUserSub(request), claimId);
   }
 }
 
