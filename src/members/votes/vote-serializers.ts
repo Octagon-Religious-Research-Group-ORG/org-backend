@@ -26,6 +26,14 @@ export interface TabVotes {
   viewerVoteBlock?: VoteBlock;
 }
 
+/** One of ORG's own pages and its votes, as one reader sees them (Chunk 10b). */
+export interface OrgPageVotes {
+  pageId: string;
+  /** The published revision the counts are for: what a vote is cast on. */
+  revision: number;
+  votes: TabVotes;
+}
+
 /** One entry of the Beliefs page section. */
 export interface AgreedBelief {
   slug: string;

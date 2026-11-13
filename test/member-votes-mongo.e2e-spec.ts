@@ -9,10 +9,13 @@ import { MANAGED_SCHEMAS } from '../src/db/managed-schemas';
 import { CommentWritersService } from '../src/members/comments/comment-writers';
 import {
   seedBlocks,
+  seedOrgPages,
   seedProfiles,
   seedTabs,
   U,
 } from '../src/members/comments/comments-harness.mocks-spec';
+import { WebsitePageSchema } from '../src/content/schemas/website-page.schema';
+import { OrgPagesService } from '../src/members/org-pages/org-pages.service';
 import { MemberPageEditorService } from '../src/members/member-page-editor.service';
 import { MembersService } from '../src/members/members.service';
 import { VotersService } from '../src/members/votes/voters.service';
@@ -38,6 +41,7 @@ describeWithMongo('votes on a real MongoDB', () => {
   let members: MembersService;
   let tallies: VoteTalliesService;
   let history: VoteHistoryService;
+  let orgPages: OrgPagesService;
   const anonymous = { value: false };
 
   const viewer = (userId?: string) => members.resolveViewer(request(userId));
@@ -76,6 +80,9 @@ describeWithMongo('votes on a real MongoDB', () => {
       await m[name].createIndexes();
     }
     m.Comment = conn.model('Comment');
+    m.WebsitePage = conn.model('WebsitePage', WebsitePageSchema);
+    await m.WebsitePage.collection.insertMany(seedOrgPages());
+    orgPages = new OrgPagesService(m.WebsitePage);
     const seeded = seedBlocks();
     await m.SocialProfile.collection.insertMany(
       seedProfiles().map((p) =>
@@ -107,6 +114,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       m.BeliefTab,
       m.ProfileBlock,
       m.BlockVersion,
+      orgPages,
     );
     editor = new MemberPageEditorService(
       m.SocialProfile,
@@ -136,6 +144,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       tallies,
       history,
       { anonymousMayVote: () => Promise.resolve(anonymous.value) } as never,
+      orgPages,
     );
   });
 
@@ -453,6 +462,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       m.BeliefTab,
       m.ProfileBlock,
       m.BlockVersion,
+      orgPages,
     ).settle('tab_race', mark);
     const row = await m.VoteTally.findOne({ tabId: 'tab_race' }).lean();
     const shown = await tallies.forPage(profileId, [
@@ -471,6 +481,52 @@ describeWithMongo('votes on a real MongoDB', () => {
     expect(raced).toBe(true);
     expect(row).toMatchObject({ agreeMember: 2, writers: [] });
     expect(shown.get('tab_race')?.agreeMember).toBe(2);
+  });
+
+  it('ORG page votes racing a new published revision end exact, and stay off the agreed list (Chunk 10b)', async () => {
+    const tabId = 'org-page:about';
+    const outcomes = { counted: 0, stale: 0 };
+    for (let i = 0; i < 12; i++) {
+      const voter = `user_org_race_${i}`;
+      await addMember(voter);
+      const base = (await orgPages.find('about')).revision;
+      const publish = () =>
+        m.WebsitePage.updateOne(
+          { pageId: 'about' },
+          { $inc: { 'published.revision': 1 } },
+        );
+      const [voted] = await Promise.allSettled([
+        votes.castOnOrgPage(await viewer(voter), {
+          pageId: 'about',
+          value: 'agree',
+          baseSeq: base,
+        }),
+        i % 3 === 0 ? publish() : Promise.resolve(),
+      ]);
+      if (voted.status === 'fulfilled') outcomes.counted++;
+      else outcomes.stale++;
+    }
+    // A reader recounts against the revision shown now.
+    const now = await orgPages.find('about');
+    const shown = await tallies.forPage(now._id, [
+      { tabId, textSeq: now.revision },
+    ]);
+    const rows = await m.BeliefVote.find({
+      tabId,
+      value: { $exists: true },
+    }).lean();
+    expect(shown.get(tabId)).toMatchObject({
+      live: true,
+      textSeq: now.revision,
+      agreeMember: rows.filter((r) => r.textSeq === now.revision).length,
+      earlierMember: rows.filter((r) => r.textSeq !== now.revision).length,
+    });
+    expect(outcomes.counted + outcomes.stale).toBe(12);
+    // The last rounds publish nothing, so the page qualifies by count.
+    expect(shown.get(tabId)?.agreeMember).toBeGreaterThanOrEqual(2);
+    console.log('org page race:', outcomes, 'revision', now.revision);
+    const list = await votes.agreedPage(await viewer(), undefined);
+    expect(list.beliefs.map((b) => b.tabId)).not.toContain(tabId);
   });
 
   it('five clicks at once make one vote and one history entry', async () => {
@@ -568,6 +624,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       m.BeliefTab,
       m.ProfileBlock,
       m.BlockVersion,
+      orgPages,
     );
     const spiedVotes = new VotesService(
       spy('BeliefVote') as never,
@@ -581,6 +638,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       spiedTallies,
       history,
       { anonymousMayVote: () => Promise.resolve(anonymous.value) } as never,
+      orgPages,
     );
     const reader = await viewer('user_ix_1');
     for (const setting of [false, true]) {

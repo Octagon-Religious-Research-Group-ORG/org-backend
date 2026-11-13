@@ -27,6 +27,10 @@ import {
   VoteTallySchema,
 } from '../social/schemas/vote-tally.schema';
 import { SocialModule } from '../social/social.module';
+import {
+  WebsitePage,
+  WebsitePageSchema,
+} from '../content/schemas/website-page.schema';
 import { CommentAuthorsService } from './comments/comment-authors.service';
 import { CommentStore } from './comments/comment-store';
 import { CommentWritersService } from './comments/comment-writers';
@@ -47,6 +51,11 @@ import { MembersService } from './members.service';
 import { MemberWriteThrottleGuard } from './member-write-throttle.guard';
 import { MyMemberPageService } from './my-member-page.service';
 import { OrgSettingsService } from './org-settings.service';
+import {
+  OrgPageReactionsController,
+  OrgPageReactionWritesController,
+} from './org-pages/org-pages.controller';
+import { OrgPagesService } from './org-pages/org-pages.service';
 import { PictureStore } from './picture-store.service';
 import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
 import {
@@ -60,7 +69,8 @@ import { VotesService } from './votes/votes.service';
 /**
  * The directory, member pages, owner tools and the ORG chats panel (Chunk 7),
  * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9),
- * belief votes and the Beliefs page section (Chunk 10).
+ * belief votes and the Beliefs page section (Chunk 10), and the same votes
+ * and comments on ORG's own pages (Chunk 10b).
  */
 @Module({
   imports: [
@@ -75,6 +85,8 @@ import { VotesService } from './votes/votes.service';
       { name: Comment.name, schema: CommentSchema },
       { name: BeliefVote.name, schema: BeliefVoteSchema },
       { name: VoteTally.name, schema: VoteTallySchema },
+      // Read only, for votes and comments on ORG's own pages (Chunk 10b).
+      { name: WebsitePage.name, schema: WebsitePageSchema },
     ]),
   ],
   controllers: [
@@ -85,6 +97,8 @@ import { VotesService } from './votes/votes.service';
     CommentWritesController,
     AgreedBeliefsController,
     VoteWritesController,
+    OrgPageReactionsController,
+    OrgPageReactionWritesController,
   ],
   providers: [
     MembersService,
@@ -102,6 +116,7 @@ import { VotesService } from './votes/votes.service';
     VotesService,
     VotersService,
     VoteTalliesService,
+    OrgPagesService,
   ],
 })
 export class MembersModule {}

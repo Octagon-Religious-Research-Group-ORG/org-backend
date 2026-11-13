@@ -25,6 +25,8 @@ import {
   type VoteTallyDocument,
 } from '../../social/schemas/vote-tally.schema';
 import { describeFailure } from '../comments/comment-limits';
+import { orgPageIdOfThread } from '../org-pages/org-page-targets';
+import { OrgPagesService } from '../org-pages/org-pages.service';
 import { TEXT_TURN_STALE_MS } from '../tab-text-turns';
 import { readBeliefTexts } from './belief-texts';
 
@@ -144,6 +146,7 @@ export class VoteTalliesService {
     private readonly blockModel: Model<ProfileBlockDocument>,
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
+    private readonly orgPages: OrgPagesService,
   ) {}
 
   /**
@@ -215,22 +218,7 @@ export class VoteTalliesService {
       .lean()
       .exec()) as { rev: number } | null;
     if (!tally) return;
-    const tab = (await this.tabModel
-      .findOne({ tabId })
-      .select({ profileId: 1, removedAt: 1, createdAt: 1 })
-      .lean()
-      .exec()) as {
-      profileId: Types.ObjectId;
-      removedAt?: Date;
-      createdAt?: Date;
-    } | null;
-    const textSeq = tab
-      ? (
-          await readBeliefTexts(this.blockModel, this.versionModel, [
-            { profileId: tab.profileId, tabId },
-          ])
-        ).get(tabId)?.textSeq
-      : undefined;
+    const { live, textSeq, createdAt } = await this.wordingOf(tabId);
     const votes = (await this.voteModel
       .find({ tabId, value: { $exists: true } })
       .select({ value: 1, textSeq: 1, voterTier: 1 })
@@ -250,7 +238,7 @@ export class VoteTalliesService {
         { tabId, rev: tally.rev },
         {
           $set: {
-            live: Boolean(tab) && !tab?.removedAt,
+            live,
             textSeq: textSeq ?? 0,
             agreeMember,
             agreeAnon,
@@ -259,13 +247,47 @@ export class VoteTalliesService {
             earlierMember: count(earlier, 'member'),
             earlierAnon: count(earlier, 'anonymous'),
             agreeAll: agreeMember + agreeAnon,
-            tabCreatedAt: tab?.createdAt ?? new Date(0),
+            tabCreatedAt: createdAt ?? new Date(0),
             // The repair recounts the least recently counted first.
             countedAt: new Date(),
           },
         },
       )
       .exec();
+  }
+
+  /**
+   * What a tally counts for: whether its target is still there, the version
+   * of its wording that counts, and when the target was added. A belief's
+   * wording is its text version; an ORG page's (Chunk 10b) is its published
+   * revision, so a new revision starts its votes fresh, as a reworded belief
+   * does.
+   */
+  private async wordingOf(
+    tabId: string,
+  ): Promise<{ live: boolean; textSeq?: number; createdAt?: Date }> {
+    if (orgPageIdOfThread(tabId) !== undefined) {
+      const page = await this.orgPages.forThread(tabId);
+      return page
+        ? { live: true, textSeq: page.revision, createdAt: page.createdAt }
+        : { live: false };
+    }
+    const tab = (await this.tabModel
+      .findOne({ tabId })
+      .select({ profileId: 1, removedAt: 1, createdAt: 1 })
+      .lean()
+      .exec()) as {
+      profileId: Types.ObjectId;
+      removedAt?: Date;
+      createdAt?: Date;
+    } | null;
+    if (!tab) return { live: false };
+    const textSeq = (
+      await readBeliefTexts(this.blockModel, this.versionModel, [
+        { profileId: tab.profileId, tabId },
+      ])
+    ).get(tabId)?.textSeq;
+    return { live: !tab.removedAt, textSeq, createdAt: tab.createdAt };
   }
 
   /**

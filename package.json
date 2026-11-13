@@ -180,7 +180,10 @@
       "members/votes/vote-tallies.service.ts",
       "members/votes/voters.service.ts",
       "members/votes/votes.service.ts",
-      "members/votes/votes.controller.ts"
+      "members/votes/votes.controller.ts",
+      "members/org-pages/org-page-targets.ts",
+      "members/org-pages/org-pages.service.ts",
+      "members/org-pages/org-pages.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

@@ -22,6 +22,7 @@ import { VoteHistoryService } from '../../social/vote-history.service';
 import { VotersService } from '../votes/voters.service';
 import { VoteTalliesService } from '../votes/vote-tallies.service';
 import { VotesService } from '../votes/votes.service';
+import { OrgPagesService } from '../org-pages/org-pages.service';
 
 export const ids = {
   open: new Types.ObjectId(),
@@ -32,6 +33,9 @@ export const ids = {
   named: new Types.ObjectId(),
   anon: new Types.ObjectId(),
   gone: new Types.ObjectId(),
+  /** ORG's own pages (Chunk 10b). */
+  orgAbout: new Types.ObjectId(),
+  orgResearch: new Types.ObjectId(),
 };
 
 /** Clerk ids. `user_admin*` are admins; `*unverified*` has no verified email. */
@@ -161,6 +165,30 @@ export function seedBlocks() {
   ];
 }
 
+/**
+ * Two of ORG's published pages (Chunk 10b): 'about' at revision 1 and
+ * 'research' at revision 2. Every other page id is known but not stored, so
+ * it reads as not published.
+ */
+export function seedOrgPages() {
+  const stored = (_id: Types.ObjectId, pageId: string, revision: number) => ({
+    _id,
+    pageId,
+    published: {
+      revision,
+      content: { kind: 'reference', id: pageId, title: 'Synthetic' },
+      publishedAt: new Date('2026-11-01T09:00:00.000Z'),
+      publishedBy: 'system:test',
+    },
+    history: [],
+    createdAt: new Date('2026-10-01T09:00:00.000Z'),
+  });
+  return [
+    stored(ids.orgAbout, 'about', 1),
+    stored(ids.orgResearch, 'research', 2),
+  ];
+}
+
 export function seedImportedComments() {
   const at = (minute: number) => new Date(Date.UTC(2026, 9, 1, 12, minute, 0));
   return [
@@ -242,6 +270,9 @@ export interface Harness {
   votes: FakeModel;
   tallies: FakeModel;
   voteHistory: FakeModel;
+  /** ORG's CMS pages (Chunk 10b). */
+  pages: FakeModel;
+  orgPages: OrgPagesService;
   /** The admin setting; flip `anonymous` to let anonymous votes count. */
   settings: { anonymous: boolean; anonymousMayVote: jest.Mock };
   talliesService: VoteTalliesService;
@@ -298,6 +329,8 @@ export function harness(
     unique: [['voteKey', 'seq']],
     beforeWrite: faults.voteHistory,
   });
+  const pages = fakeModel(seedOrgPages(), { unique: [['pageId']] });
+  const orgPages = new OrgPagesService(pages as never);
   const setting = { anonymous: false };
   const settings = Object.assign(setting, {
     anonymousMayVote: jest.fn(() => Promise.resolve(setting.anonymous)),
@@ -341,6 +374,7 @@ export function harness(
     tabs as never,
     blocks as never,
     versions as never,
+    orgPages,
   );
   const editor = new MemberPageEditorService(
     profiles as never,
@@ -363,6 +397,7 @@ export function harness(
     commentVersionService,
     authors,
     votes as never,
+    orgPages,
   );
   const suggestions = new SuggestionsService(
     comments as never,
@@ -389,6 +424,7 @@ export function harness(
     talliesService,
     voteHistoryService,
     settings as never,
+    orgPages,
   );
   const history = new MemberHistoryService(
     members,
@@ -416,6 +452,8 @@ export function harness(
     votes,
     tallies,
     voteHistory,
+    pages,
+    orgPages,
     settings,
     talliesService,
     voteHistoryService,

@@ -26,9 +26,16 @@ import { SuggestionsService } from '../src/members/comments/suggestions.service'
 import {
   seedBlocks,
   seedImportedComments,
+  seedOrgPages,
   seedProfiles,
   seedTabs,
 } from '../src/members/comments/comments-harness.mocks-spec';
+import { WebsitePage } from '../src/content/schemas/website-page.schema';
+import {
+  OrgPageReactionsController,
+  OrgPageReactionWritesController,
+} from '../src/members/org-pages/org-pages.controller';
+import { OrgPagesService } from '../src/members/org-pages/org-pages.service';
 import { MemberHistoryService } from '../src/members/member-history.service';
 import { MemberPageEditorService } from '../src/members/member-page-editor.service';
 import { MemberWriteThrottleGuard } from '../src/members/member-write-throttle.guard';
@@ -81,7 +88,8 @@ export interface CommentsApp {
     | 'votes'
     | 'tallies'
     | 'voteHistory'
-    | 'settings',
+    | 'settings'
+    | 'pages',
     FakeModel
   >;
 }
@@ -112,6 +120,7 @@ export async function createCommentsApp(): Promise<CommentsApp> {
     tallies: fakeModel([], { unique: [['tabId']], timestamps: true }),
     voteHistory: fakeModel([], { unique: [['voteKey', 'seq']] }),
     settings: fakeModel([], { unique: [['key']], timestamps: true }),
+    pages: fakeModel(seedOrgPages(), { unique: [['pageId']] }),
   };
   const isAdmin = (req: { auth: { payload: { sub: string } } }) =>
     Promise.resolve(req.auth.payload.sub.startsWith('user_admin'));
@@ -125,6 +134,8 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       AgreedBeliefsController,
       VoteWritesController,
       AdminSettingsController,
+      OrgPageReactionsController,
+      OrgPageReactionWritesController,
     ],
     providers: [
       { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -146,6 +157,7 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       VoteTalliesService,
       VoteHistoryService,
       OrgSettingsService,
+      OrgPagesService,
       AdminRoleGuard,
       {
         provide: AdminAccessService,
@@ -182,6 +194,7 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       { provide: getModelToken(ProfileBlock.name), useValue: models.blocks },
       { provide: getModelToken(BlockVersion.name), useValue: models.versions },
       { provide: getModelToken(Comment.name), useValue: models.comments },
+      { provide: getModelToken(WebsitePage.name), useValue: models.pages },
       {
         provide: getModelToken(CommentVersion.name),
         useValue: models.commentVersions,

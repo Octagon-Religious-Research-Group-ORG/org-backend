@@ -23,6 +23,8 @@ import {
 import { normaliseFieldText } from '../editable-fields';
 import { MemberPageEditorService } from '../member-page-editor.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
+import { orgPageIdOfThread } from '../org-pages/org-page-targets';
+import { type OrgPage, OrgPagesService } from '../org-pages/org-pages.service';
 import type { Viewer } from '../profile-access';
 import { CommentAuthorsService } from './comment-authors.service';
 import { COMMENT_HISTORY_PAGE_SIZE, describeFailure } from './comment-limits';
@@ -53,13 +55,33 @@ export const EMPTY_COMMENT = 'A comment needs some text.';
 export const STALE_THREAD_PAGE =
   'That list of comments has changed. Please reload it.';
 
-export interface NewCommentInput {
-  slug: string;
+/** Where a new comment goes inside its page, and its badge. */
+interface CommentPlacement {
   body: string;
-  tabId?: string;
   parentCommentId?: string;
   /** "Agree and comment" / "Disagree and comment" (Chunk 10). */
   stance?: VoteValue;
+}
+
+export interface NewCommentInput extends CommentPlacement {
+  slug: string;
+  tabId?: string;
+}
+
+/** A comment on one of ORG's own pages (Chunk 10b): always its one thread. */
+export interface NewOrgPageCommentInput extends CommentPlacement {
+  pageId: string;
+}
+
+/**
+ * Where a thread lives: a member page, or one of ORG's own pages (Chunk 10b).
+ * An ORG page has one thread (its `tabId`), no owner and no suggestions.
+ */
+interface Place {
+  profileId: Types.ObjectId;
+  /** The reader owns the page (decides suggestions). */
+  isOwner: boolean;
+  orgPage?: OrgPage;
 }
 
 export const STANCE_ONLY_ON_BELIEF =
@@ -68,9 +90,16 @@ export const STANCE_NEEDS_VOTE =
   'You have no vote on this belief, so the comment cannot say whether you agree. Please vote, then post.';
 export const STANCE_EARLIER_WORDING =
   'Your vote is on an earlier wording of this belief. Confirm it on the current wording first, then post.';
+export const STANCE_NEEDS_PAGE_VOTE =
+  'You have no vote on this page, so the comment cannot say whether you agree. Please vote, then post.';
+export const STANCE_EARLIER_VERSION =
+  'Your vote is on an earlier version of this page. Confirm it on the current version first, then post.';
 /** The writer's saved vote says something else than the badge asked for. */
-export function stanceOtherVote(value: VoteValue) {
-  return `Your current vote on this belief is "${value}", so the comment can only show that.`;
+export function stanceOtherVote(
+  value: VoteValue,
+  subject: 'belief' | 'page' = 'belief',
+) {
+  return `Your current vote on this ${subject} is "${value}", so the comment can only show that.`;
 }
 
 /** Cleans a comment as an edit of page text is cleaned (Chunk 8 rules). */
@@ -108,6 +137,7 @@ export class CommentsService {
     private readonly authors: CommentAuthorsService,
     @InjectModel(BeliefVote.name)
     private readonly voteModel: Model<BeliefVoteDocument>,
+    private readonly orgPages: OrgPagesService,
   ) {}
 
   /**
@@ -151,16 +181,54 @@ export class CommentsService {
   ): Promise<ThreadPage> {
     const { profile, access } = await this.readablePage(slug, viewer);
     if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
+    return this.threadIn(
+      { profileId: profile._id, isOwner: access.isOwner },
+      tabId,
+      viewer,
+      after,
+      writing,
+    );
+  }
 
-    const page = await this.store.topLevel(profile._id, tabId, after);
+  /**
+   * One page of an ORG page's thread (Chunk 10b), for any reader, signed in
+   * or not. Authors are named by the same rule as on member pages.
+   *
+   * @throws NotFoundException for a page that is unknown or not published
+   * @throws BadRequestException for an `after` that names no comment there
+   */
+  async orgThread(
+    pageId: string,
+    viewer: Viewer,
+    after: string | undefined,
+    writing: WriteStatus,
+  ): Promise<ThreadPage> {
+    const page = await this.orgPages.find(pageId);
+    return this.threadIn(
+      { profileId: page._id, isOwner: false, orgPage: page },
+      page.tabId,
+      viewer,
+      after,
+      writing,
+    );
+  }
+
+  private async threadIn(
+    place: Place,
+    tabId: string | undefined,
+    viewer: Viewer,
+    after: string | undefined,
+    writing: WriteStatus,
+  ): Promise<ThreadPage> {
+    const page = await this.store.topLevel(place.profileId, tabId, after);
     if (!page) throw new BadRequestException(STALE_THREAD_PAGE);
     const replies = await this.store.replies(
-      profile._id,
+      place.profileId,
       page.roots.map((root) => root.commentId),
       page.imported,
     );
     const all = [...page.roots, ...[...replies.values()].flat()];
-    const views = await this.views(all, viewer, profile._id, access.isOwner);
+    const views = await this.views(all, viewer, place.profileId, place.isOwner);
     const viewOf = (row: StoredComment) =>
       views.get(row.commentId) as CommentView;
     return {
@@ -171,7 +239,9 @@ export class CommentsService {
       ...(page.more ? { nextAfter: page.roots.at(-1)?.commentId } : {}),
       viewerMayComment: writing.mayComment,
       ...(writing.block ? { viewerWriteBlock: writing.block } : {}),
-      viewerMaySuggest: writing.mayComment && !access.isOwner,
+      // No "Suggest a rewording" on ORG's own pages (Chunk 10b).
+      viewerMaySuggest:
+        writing.mayComment && !place.isOwner && place.orgPage === undefined,
     };
   }
 
@@ -252,11 +322,47 @@ export class CommentsService {
    */
   async create(writer: CommentWriter, input: NewCommentInput) {
     const body = cleanCommentBody(input.body);
-    const { profile } = await this.readablePage(input.slug, writer);
-    let tabId = input.tabId;
+    const { profile, access } = await this.readablePage(input.slug, writer);
+    return this.createIn(
+      writer,
+      { profileId: profile._id, isOwner: access.isOwner },
+      input.tabId,
+      { ...input, body },
+    );
+  }
+
+  /**
+   * Posts a comment or a reply on one of ORG's own pages (Chunk 10b), by the
+   * same writers and rules as on a belief.
+   *
+   * @throws NotFoundException for a page that is unknown or not published,
+   *   or a parent not on it
+   */
+  async createOnOrgPage(writer: CommentWriter, input: NewOrgPageCommentInput) {
+    const body = cleanCommentBody(input.body);
+    const page = await this.orgPages.find(input.pageId);
+    return this.createIn(
+      writer,
+      { profileId: page._id, isOwner: false, orgPage: page },
+      page.tabId,
+      { ...input, body },
+    );
+  }
+
+  private async createIn(
+    writer: CommentWriter,
+    place: Place,
+    thread: string | undefined,
+    input: CommentPlacement,
+  ) {
+    const body = input.body;
+    let tabId = thread;
     let parentCommentId: string | undefined;
     if (input.parentCommentId !== undefined) {
-      const root = await this.store.rootOf(profile._id, input.parentCommentId);
+      const root = await this.store.rootOf(
+        place.profileId,
+        input.parentCommentId,
+      );
       if (!root) throw new NotFoundException(COMMENT_NOT_FOUND);
       if (root.removedAt) throw new ConflictException(REPLY_TO_REMOVED);
       if (tabId !== undefined && tabId !== root.tabId) {
@@ -267,10 +373,12 @@ export class CommentsService {
       tabId = root.tabId;
       parentCommentId = root.commentId;
     }
-    if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
+    if (tabId !== undefined && !place.orgPage) {
+      await this.requireLiveTab(place.profileId, tabId);
+    }
     if (input.stance !== undefined) {
       await this.requireStance(
-        profile._id,
+        place,
         writer.userId,
         tabId,
         parentCommentId,
@@ -283,7 +391,7 @@ export class CommentsService {
     const seq = await this.store.createConfirmed(
       {
         commentId,
-        profileId: profile._id,
+        profileId: place.profileId,
         ...(tabId !== undefined ? { tabId } : {}),
         ...(parentCommentId ? { parentCommentId } : {}),
         authorUserId: writer.userId,
@@ -314,7 +422,7 @@ export class CommentsService {
    *   one on an earlier wording; each with its own message
    */
   private async requireStance(
-    profileId: Types.ObjectId,
+    place: Place,
     userId: string,
     tabId: string | undefined,
     parentCommentId: string | undefined,
@@ -328,16 +436,48 @@ export class CommentsService {
       .select({ value: 1, textSeq: 1 })
       .lean()
       .exec()) as { value: VoteValue; textSeq: number } | null;
-    if (!vote) throw new ConflictException(STANCE_NEEDS_VOTE);
+    const org = place.orgPage;
+    if (!vote) {
+      throw new ConflictException(
+        org ? STANCE_NEEDS_PAGE_VOTE : STANCE_NEEDS_VOTE,
+      );
+    }
     if (vote.value !== stance) {
-      throw new ConflictException(stanceOtherVote(vote.value));
+      throw new ConflictException(
+        stanceOtherVote(vote.value, org ? 'page' : 'belief'),
+      );
     }
     // Decision (fix round 1): a badge says the writer agrees or disagrees
     // with the belief AS IT READS NOW, so a vote kept from an earlier
-    // wording does not give one; the writer confirms it first.
-    const current = await this.editor.readTabText(profileId, tabId);
-    if (vote.textSeq !== current.headSeq) {
-      throw new ConflictException(STANCE_EARLIER_WORDING);
+    // wording does not give one; the writer confirms it first. An ORG page
+    // reads as its published revision (Chunk 10b).
+    const current = org
+      ? org.revision
+      : (await this.editor.readTabText(place.profileId, tabId)).headSeq;
+    if (vote.textSeq !== current) {
+      throw new ConflictException(
+        org ? STANCE_EARLIER_VERSION : STANCE_EARLIER_WORDING,
+      );
+    }
+  }
+
+  /**
+   * A comment's thread is still open: a live belief, or a published ORG
+   * page (Chunk 10b). The page's own thread always is.
+   *
+   * @throws NotFoundException otherwise
+   */
+  private async requireOpenThread(
+    profileId: Types.ObjectId,
+    tabId: string | undefined,
+  ) {
+    if (tabId === undefined) return;
+    if (orgPageIdOfThread(tabId) === undefined) {
+      await this.requireLiveTab(profileId, tabId);
+      return;
+    }
+    if (!(await this.orgPages.forThread(tabId))) {
+      throw new NotFoundException(COMMENT_NOT_FOUND);
     }
   }
 
@@ -369,7 +509,9 @@ export class CommentsService {
     if (!row || row.source !== 'native' || row.authorUserId !== userId) {
       throw new NotFoundException(COMMENT_NOT_FOUND);
     }
-    if (viewer) {
+    // An ORG page is readable by everyone; whether it is still published is
+    // checked with its thread (`requireOpenThread`).
+    if (viewer && orgPageIdOfThread(row.tabId) === undefined) {
       const slug = await this.members.slugOf(row.profileId);
       if (slug === undefined) throw new NotFoundException(COMMENT_NOT_FOUND);
       await this.readablePage(slug, viewer);
@@ -399,9 +541,7 @@ export class CommentsService {
       );
     }
     if (row.removedAt) throw new ConflictException(REMOVED_COMMENT);
-    if (row.tabId !== undefined) {
-      await this.requireLiveTab(row.profileId, row.tabId);
-    }
+    await this.requireOpenThread(row.profileId, row.tabId);
     const [head] = await this.versions.page(commentId, 0, 1);
     if (head && head.text === body) return { changed: false, seq: head.seq };
 
@@ -480,6 +620,28 @@ export class CommentsService {
     page = 1,
   ): Promise<CommentHistoryPage> {
     const { profile } = await this.readablePage(slug, viewer);
+    return this.historyIn(profile, commentId, page);
+  }
+
+  /**
+   * A comment's versions on one of ORG's own pages (Chunk 10b), for anyone.
+   *
+   * @throws NotFoundException for a page that is unknown or not published,
+   *   or a comment not listed on it
+   */
+  async orgHistory(
+    pageId: string,
+    commentId: string,
+    page = 1,
+  ): Promise<CommentHistoryPage> {
+    return this.historyIn(await this.orgPages.find(pageId), commentId, page);
+  }
+
+  private async historyIn(
+    profile: { _id: Types.ObjectId },
+    commentId: string,
+    page: number,
+  ): Promise<CommentHistoryPage> {
     const row = await this.store.one(commentId);
     if (
       !row ||
@@ -494,9 +656,7 @@ export class CommentsService {
       profile._id,
       commentId,
     )) as StoredComment;
-    if (root.tabId !== undefined) {
-      await this.requireLiveTab(profile._id, root.tabId);
-    }
+    await this.requireOpenThread(profile._id, root.tabId);
 
     const skip = (page - 1) * COMMENT_HISTORY_PAGE_SIZE;
     const rows = await this.versions.page(

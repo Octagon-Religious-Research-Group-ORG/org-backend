@@ -42,6 +42,8 @@ import { describeFailure } from '../comments/comment-limits';
 import { NO_SUCH_BELIEF } from '../comments/comments.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
 import { OrgSettingsService } from '../org-settings.service';
+import { NOT_AN_ORG_PAGE } from '../org-pages/org-page-targets';
+import { type OrgPage, OrgPagesService } from '../org-pages/org-pages.service';
 import { decideProfileAccess, type Viewer } from '../profile-access';
 import type {
   FullProfile,
@@ -67,10 +69,23 @@ import {
   type VoteStatus,
   VotersService,
 } from './voters.service';
-import type { AgreedBelief, AgreedPage, TabVotes } from './vote-serializers';
+import type {
+  AgreedBelief,
+  AgreedPage,
+  OrgPageVotes,
+  TabVotes,
+} from './vote-serializers';
 
 export const VOTE_STALE =
   'This belief was reworded since you opened it. Reload it to vote on the new wording.';
+export const ORG_PAGE_VOTE_STALE =
+  'This page was updated since you opened it. Reload it to vote on the new version.';
+
+/**
+ * What an ORG page adds to the voting rule (Chunk 10b): nobody owns it, and a
+ * published page is open.
+ */
+const ORG_PAGE_FACTS: VotePage = { isOwner: false, approved: true };
 
 /** A belief reaches the Beliefs page at this many agreeing votes (Tripp, Q04). */
 export const AGREED_THRESHOLD = 2;
@@ -150,6 +165,7 @@ export class VotesService {
     private readonly tallies: VoteTalliesService,
     private readonly history: VoteHistoryService,
     private readonly settings: OrgSettingsService,
+    private readonly orgPages: OrgPagesService,
   ) {}
 
   /**
@@ -228,16 +244,7 @@ export class VotesService {
         .exec()) as { slug: string } | null;
       // A vote on another page's belief is not this address's to withdraw.
       if (page?.slug === slug.toLowerCase()) {
-        const mark = await this.tallies.touch(tabId, row.profileId);
-        try {
-          await this.write(viewer.userId, row.profileId, tabId, {
-            // A counted vote always has both.
-            textSeq: row.textSeq as number,
-            voterTier: row.voterTier as VoterTier,
-          });
-        } finally {
-          await this.tallies.settle(tabId, mark);
-        }
+        await this.takeBack(viewer.userId, tabId, row);
       }
     }
     let readable: Awaited<ReturnType<MembersService['findVisible']>>;
@@ -262,6 +269,110 @@ export class VotesService {
         tabId,
         viewer,
       )),
+    };
+  }
+
+  /** Writes the withdrawal of a vote row that holds a vote. */
+  private async takeBack(
+    voterUserId: string,
+    tabId: string,
+    row: VoteRowState,
+  ) {
+    const mark = await this.tallies.touch(tabId, row.profileId);
+    try {
+      await this.write(voterUserId, row.profileId, tabId, {
+        // A counted vote always has both.
+        textSeq: row.textSeq as number,
+        voterTier: row.voterTier as VoterTier,
+      });
+    } finally {
+      await this.tallies.settle(tabId, mark);
+    }
+  }
+
+  /**
+   * An ORG page's votes as this reader sees them (Chunk 10b). Anyone may
+   * read them, signed in or not.
+   *
+   * @throws NotFoundException for a page that is unknown or not published
+   */
+  async orgPageVotes(viewer: Viewer, pageId: string): Promise<OrgPageVotes> {
+    return this.orgPageState(await this.orgPages.find(pageId), viewer);
+  }
+
+  /**
+   * Casts, changes or confirms the voter's vote on an ORG page (Chunk 10b):
+   * the belief rule without the own-belief part (nobody owns an ORG page).
+   * The vote is tied to the published revision the voter was looking at; a
+   * revision published meanwhile makes it a vote on the earlier version,
+   * exactly as an edit does to a belief vote, and the recount after the
+   * write sees the new revision.
+   *
+   * @throws NotFoundException for a page that is unknown or not published,
+   *   first and to everyone
+   * @throws ConflictException when a new revision was published since
+   *   `baseSeq`, or another window is saving this voter's vote
+   */
+  async castOnOrgPage(
+    viewer: Viewer,
+    input: { pageId: string; value: VoteValue; baseSeq: number },
+  ): Promise<OrgPageVotes> {
+    const page = await this.orgPages.find(input.pageId);
+    const anonymousCount = await this.settings.anonymousMayVote();
+    const voter = await this.voters.requireVoter(viewer, anonymousCount);
+    await this.repair(voter.userId);
+    let mark: string | undefined;
+    try {
+      mark = await this.tallies.touch(page.tabId, page._id);
+      const now = await this.orgPages.find(page.pageId);
+      if (now.revision !== input.baseSeq) {
+        throw new ConflictException(ORG_PAGE_VOTE_STALE);
+      }
+      await this.write(voter.userId, page._id, page.tabId, {
+        value: input.value,
+        textSeq: input.baseSeq,
+        voterTier: voter.tier,
+      });
+    } finally {
+      await this.tallies.settle(page.tabId, mark);
+    }
+    return this.orgPageState(await this.orgPages.find(page.pageId), voter);
+  }
+
+  /**
+   * Withdraws the voter's vote on an ORG page, on the current version or an
+   * earlier one. Never depends on being allowed to vote now; withdrawing a
+   * vote that is not there is no error.
+   *
+   * @throws NotFoundException for a page that is unknown or not published
+   */
+  async withdrawOnOrgPage(
+    viewer: Viewer & { userId: string },
+    pageId: string,
+  ): Promise<OrgPageVotes & { withdrawn: true }> {
+    const page = await this.orgPages.find(pageId);
+    await this.repair(viewer.userId);
+    const row = await this.row(page.tabId, viewer.userId);
+    if (row?.value !== undefined) {
+      await this.takeBack(viewer.userId, page.tabId, row);
+    }
+    return { withdrawn: true, ...(await this.orgPageState(page, viewer)) };
+  }
+
+  private async orgPageState(
+    page: OrgPage,
+    viewer: Viewer,
+  ): Promise<OrgPageVotes> {
+    return {
+      pageId: page.pageId,
+      revision: page.revision,
+      votes: await this.votesOn(
+        page._id,
+        page.tabId,
+        page.revision,
+        ORG_PAGE_FACTS,
+        viewer,
+      ),
     };
   }
 
@@ -447,31 +558,49 @@ export class VotesService {
     tabId: string,
     viewer: Viewer,
   ) {
-    const anonymousCount = await this.settings.anonymousMayVote();
     const text = (
       await readBeliefTexts(this.blockModel, this.versionModel, [
         { profileId: profile._id, tabId },
       ])
     ).get(tabId) as BeliefText;
-    const tallies = await this.tallies.forPage(profile._id, [
-      { tabId, textSeq: text.textSeq },
-    ]);
-    const mine = await this.myVotes(viewer.userId, { profileId: profile._id });
-    const status = this.voters.onPage(
-      await this.voters.status(viewer, anonymousCount),
-      pageFacts(profile, isOwner),
-    );
     return {
       tabId,
       textSeq: text.textSeq,
-      votes: tabVotes(
-        tallies.get(tabId),
+      votes: await this.votesOn(
+        profile._id,
+        tabId,
         text.textSeq,
-        mine.get(tabId),
-        status,
-        anonymousCount,
+        pageFacts(profile, isOwner),
+        viewer,
       ),
     };
+  }
+
+  /**
+   * One target's vote state for this reader: a belief, or an ORG page
+   * (Chunk 10b), at the wording version shown.
+   */
+  private async votesOn(
+    profileId: Types.ObjectId,
+    tabId: string,
+    textSeq: number,
+    facts: VotePage,
+    viewer: Viewer,
+  ): Promise<TabVotes> {
+    const anonymousCount = await this.settings.anonymousMayVote();
+    const tallies = await this.tallies.forPage(profileId, [{ tabId, textSeq }]);
+    const mine = await this.myVotes(viewer.userId, { profileId });
+    const status = this.voters.onPage(
+      await this.voters.status(viewer, anonymousCount),
+      facts,
+    );
+    return tabVotes(
+      tallies.get(tabId),
+      textSeq,
+      mine.get(tabId),
+      status,
+      anonymousCount,
+    );
   }
 
   /** The reader's confirmed votes, keyed by belief. */
@@ -584,6 +713,9 @@ export class VotesService {
       .find({
         live: true,
         [field]: { $gte: AGREED_THRESHOLD },
+        // ORG's own pages are voted on too (Chunk 10b) but are not members'
+        // beliefs, so they never join this list.
+        tabId: NOT_AN_ORG_PAGE,
         ...(after
           ? {
               $or: [
