@@ -274,6 +274,44 @@ describe('VoteTalliesService', () => {
     expect(target().countedAt).toBeInstanceOf(Date);
   });
 
+  it('a page read that drops a dead mark mid-settle recounts, so the writer’s voided save is not lost (fix round 3, N1)', async () => {
+    const h = harness();
+    h.votes.docs.push(vote('tab_a', 'a', 'agree', 1, 'member'));
+    await h.talliesService.settle(
+      'tab_a',
+      await h.talliesService.touch('tab_a', ids.open),
+    );
+    // A writer that died long ago left its mark.
+    h.tallies.docs[0].writers = [
+      { id: 'dead', at: new Date(Date.now() - WRITER_MARK_STALE_MS - 1000) },
+    ];
+    // A live writer W marks, writes its vote, then settles.
+    const mark = await h.talliesService.touch('tab_a', ids.open);
+    h.votes.docs.push(vote('tab_a', 'b', 'agree', 1, 'member'));
+    // Between W's recount reading the revision and its save, a page read.
+    const real = h.tallies.findOne;
+    let raced = false;
+    h.tallies.findOne = (filter) => {
+      const query = real(filter);
+      const exec = query.exec;
+      query.exec = async () => {
+        const found = await exec();
+        if (!raced) {
+          raced = true;
+          await h.talliesService.forPage(ids.open, [
+            { tabId: 'tab_a', textSeq: 1 },
+          ]);
+        }
+        return found;
+      };
+      return query;
+    };
+    await h.talliesService.settle('tab_a', mark);
+    h.tallies.findOne = real;
+    expect(raced).toBe(true);
+    expect(h.tallies.docs[0]).toMatchObject({ writers: [], agreeMember: 2 });
+  });
+
   it('a page read drops marks older than any live writer, and keeps live ones (fix round 2, item e)', async () => {
     const h = harness();
     const dead = new Date(Date.now() - WRITER_MARK_STALE_MS - 1000);

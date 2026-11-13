@@ -387,6 +387,92 @@ describeWithMongo('votes on a real MongoDB', () => {
     await m.VoteTally.collection.deleteMany({ profileId });
   });
 
+  it('a page read that drops a dead mark while a live writer settles still leaves the right count (fix round 3, N1)', async () => {
+    // The reviewer's probe R.
+    const profileId = new Types.ObjectId();
+    await m.BeliefTab.collection.insertOne({
+      profileId,
+      tabId: 'tab_race',
+      title: 'Synthetic race',
+      order: 0,
+      createdAt: new Date(),
+    });
+    const addVote = (u: string) =>
+      m.BeliefVote.collection.insertOne({
+        profileId,
+        tabId: 'tab_race',
+        voterUserId: u,
+        value: 'agree',
+        textSeq: 0,
+        voterTier: 'member',
+        historySeq: 1,
+      });
+    await addVote('user_r1');
+    await tallies.settle(
+      'tab_race',
+      await tallies.touch('tab_race', profileId),
+    );
+    // A writer that died six minutes ago.
+    await m.VoteTally.updateOne(
+      { tabId: 'tab_race' },
+      {
+        $push: {
+          writers: { id: 'dead-r', at: new Date(Date.now() - 6 * 60_000) },
+        },
+      },
+    );
+    const mark = await tallies.touch('tab_race', profileId);
+    await addVote('user_r2');
+    // W's recount reads the revision, then a page read runs before W saves.
+    let raced = false;
+    const proxied = new Proxy(m.VoteTally, {
+      get(target, key, receiver) {
+        if (key === 'findOne') {
+          return (filter: unknown) => {
+            const query = target.findOne(filter as object);
+            const exec = query.exec.bind(query);
+            query.exec = (async () => {
+              const found = await exec();
+              if (!raced) {
+                raced = true;
+                await tallies.forPage(profileId, [
+                  { tabId: 'tab_race', textSeq: 0 },
+                ]);
+              }
+              return found;
+            }) as never;
+            return query;
+          };
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await new VoteTalliesService(
+      proxied as never,
+      m.BeliefVote,
+      m.BeliefTab,
+      m.ProfileBlock,
+      m.BlockVersion,
+    ).settle('tab_race', mark);
+    const row = await m.VoteTally.findOne({ tabId: 'tab_race' }).lean();
+    const shown = await tallies.forPage(profileId, [
+      { tabId: 'tab_race', textSeq: 0 },
+    ]);
+    console.log(
+      'race: hooked',
+      raced,
+      'stored agreeMember',
+      row.agreeMember,
+      'writers',
+      (row.writers ?? []).length,
+      'next page read shows',
+      shown.get('tab_race')?.agreeMember,
+    );
+    expect(raced).toBe(true);
+    expect(row).toMatchObject({ agreeMember: 2, writers: [] });
+    expect(shown.get('tab_race')?.agreeMember).toBe(2);
+  });
+
   it('five clicks at once make one vote and one history entry', async () => {
     await addMember('user_clicker');
     const seq = await headSeq('tab_b');

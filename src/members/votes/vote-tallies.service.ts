@@ -300,12 +300,23 @@ export class VoteTalliesService {
     );
     for (const row of withDead) await this.dropDeadMarks(row.tabId, dead);
     if (withDead.length > 0) rows = await read();
-    const behind = tabs.filter(({ tabId, textSeq }) => {
-      const row = rows.get(tabId);
-      return row !== undefined && (isBehind(row) || row.textSeq !== textSeq);
-    });
-    if (behind.length === 0) return rows;
-    for (const { tabId } of behind) await this.recompute(tabId);
+    const behind = new Set(
+      tabs
+        .filter(({ tabId, textSeq }) => {
+          const row = rows.get(tabId);
+          return (
+            row !== undefined && (isBehind(row) || row.textSeq !== textSeq)
+          );
+        })
+        .map(({ tabId }) => tabId),
+    );
+    // Dropping a mark bumps the revision, which voids the guarded save of
+    // any recount in flight, a live writer's own included. So every tally
+    // whose dead marks were just dropped is recounted here, as the repair
+    // does, even when no mark is left (fix round 3, N1).
+    for (const row of withDead) behind.add(row.tabId);
+    if (behind.size === 0) return rows;
+    for (const tabId of behind) await this.recompute(tabId);
     return read();
   }
 
