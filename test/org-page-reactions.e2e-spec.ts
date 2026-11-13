@@ -90,6 +90,38 @@ describe('ORG page votes and comments API (e2e)', () => {
     await call('delete', '/me/org-pages/nope/vote', U.named).expect(404);
   });
 
+  it('answers an id that is not an ORG page with 404 before reading the request at all (round 2, N3)', async () => {
+    const writes: Array<
+      ['post' | 'put' | 'delete', string, Record<string, unknown> | undefined]
+    > = [
+      ['post', '/me/org-pages/nope/comments', { body: '' }],
+      ['post', '/me/org-pages/nope/comments', {}],
+      ['post', '/me/org-pages/nope/comments', { body: 'x', stance: 'maybe' }],
+      ['put', '/me/org-pages/nope/vote', { value: 'perhaps' }],
+      ['put', '/me/org-pages/nope/vote', undefined],
+      ['delete', '/me/org-pages/nope/vote', undefined],
+    ];
+    for (const user of [undefined, U.named, U.nopage]) {
+      for (const [method, path, payload] of writes) {
+        const req = call(method, path, user);
+        const { body } = await (payload ? req.send(payload) : req).expect(404);
+        expect(body.message).toBe(ORG_PAGE_NOT_FOUND);
+      }
+      for (const path of [
+        '/members/org-pages/nope/comments?after=not%20an%20id',
+        '/members/org-pages/nope/comments?tab=tab_a',
+        '/members/org-pages/nope/comments/cmt_x/history?page=0',
+      ]) {
+        const { body } = await call('get', path, user).expect(404);
+        expect(body.message).toBe(ORG_PAGE_NOT_FOUND);
+      }
+    }
+    // A known page still checks the request as before.
+    await call('post', '/me/org-pages/about/comments', U.named)
+      .send({ body: '' })
+      .expect(400);
+  });
+
   it('answers an unknown page with 404 before checking the writer or the text (review MEDIUM 1)', async () => {
     const noRights = await call('post', '/me/org-pages/nope/comments', U.nopage)
       .send({ body: 'Not yet a member.' })

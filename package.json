@@ -183,7 +183,8 @@
       "members/votes/votes.controller.ts",
       "members/org-pages/org-page-targets.ts",
       "members/org-pages/org-pages.service.ts",
-      "members/org-pages/org-pages.controller.ts"
+      "members/org-pages/org-pages.controller.ts",
+      "members/org-pages/org-page-id.guard.ts"
     ],
     "coverageThreshold": {
       "global": {

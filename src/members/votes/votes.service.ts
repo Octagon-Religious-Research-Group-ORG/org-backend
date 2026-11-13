@@ -354,6 +354,11 @@ export class VotesService {
    * LOW 4); withdrawing a vote that is not there is no error. The page's
    * votes are added only while it is published.
    *
+   * The contract, unlike a vote or a comment (round 2, N4): a KNOWN page
+   * that is not published answers 200 here, not 404. Over HTTP an unknown
+   * id is answered by `OrgPageIdGuard` before this runs; the check below
+   * keeps the service safe on its own.
+   *
    * @throws NotFoundException for an id that is not one of ORG's pages
    */
   async withdrawOnOrgPage(

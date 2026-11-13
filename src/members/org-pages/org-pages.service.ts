@@ -37,8 +37,10 @@ interface StoredPage {
 
 /**
  * Reads ORG's published CMS pages for votes and comments (Chunk 10b). Only a
- * published page takes votes or comments; anything else is the same quiet
- * "not found" for every reader.
+ * published page takes votes or comments. An id that is not one of ORG's
+ * pages never reaches here over HTTP (`OrgPageIdGuard` answers 404 first);
+ * a known page that is not published is answered here with the same 404,
+ * except that a vote on it can still be withdrawn (`withdrawOnOrgPage`).
  */
 @Injectable()
 export class OrgPagesService {

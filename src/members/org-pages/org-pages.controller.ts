@@ -25,6 +25,7 @@ import {
   NoStoreWhenSignedInInterceptor,
 } from '../no-store.interceptor';
 import { VotesService } from '../votes/votes.service';
+import { OrgPageIdGuard } from './org-page-id.guard';
 import { OrgPagesService } from './org-pages.service';
 import {
   NewOrgPageCommentDto,
@@ -36,9 +37,15 @@ import {
  * Votes and comments on ORG's own published pages (Chunk 10b), for any
  * reader, signed in or not. Answers depend on who asks (their own vote, who
  * may write, which authors they may see named): never shared by a cache.
+ *
+ * Not-found contract (round 2, N3/N4):
+ * - an id that is not one of ORG's pages: 404 from `OrgPageIdGuard`, before
+ *   anything else (sign-in, ration, query, body);
+ * - a known page that is not published: 404 from the services for every
+ *   read, vote and comment, while withdrawing a vote still answers 200.
  */
 @Controller('members/org-pages/:pageId')
-@UseGuards(OptionalClerkAuthGuard)
+@UseGuards(OrgPageIdGuard, OptionalClerkAuthGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor, MemberJsonCacheInterceptor)
 export class OrgPageReactionsController {
   constructor(
@@ -87,10 +94,11 @@ export class OrgPageReactionsController {
 /**
  * Voting and commenting on ORG's own pages. Signed in, and rationed with the
  * other member-page writes. Editing and removing a comment use the general
- * `/me/comments/:commentId` routes.
+ * `/me/comments/:commentId` routes. The page id is checked first, before
+ * sign-in and the ration (`OrgPageIdGuard`).
  */
 @Controller('me/org-pages/:pageId')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(OrgPageIdGuard, ClerkAuthGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class OrgPageReactionWritesController {
   constructor(
@@ -116,6 +124,12 @@ export class OrgPageReactionWritesController {
     });
   }
 
+  /**
+   * Takes the voter's vote back. Unlike a vote or a comment, this answers
+   * 200 on a known page that is no longer published (round 2, N4): taking a
+   * vote back never depends on the page's state, as on a belief. The answer
+   * carries the page's votes only while it is published.
+   */
   @Delete('vote')
   @WriteThrottle()
   async withdraw(
