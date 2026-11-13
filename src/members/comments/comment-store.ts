@@ -37,6 +37,7 @@ export const COMMENT_FIELDS = {
   authorUserId: 1,
   legacyAuthorName: 1,
   legacyCreatedAt: 1,
+  linkedUserId: 1,
   anchorText: 1,
   body: 1,
   bodySeq: 1,

@@ -26,11 +26,21 @@ import {
   VoteTally,
   VoteTallySchema,
 } from '../social/schemas/vote-tally.schema';
+import { Claim, ClaimSchema } from '../social/schemas/claim.schema';
 import { SocialModule } from '../social/social.module';
 import {
   WebsitePage,
   WebsitePageSchema,
 } from '../content/schemas/website-page.schema';
+import {
+  AdminClaimsController,
+  AdminClaimWritesController,
+  MyClaimsController,
+  MyClaimWritesController,
+} from './claims/claims.controller';
+import { ClaimRequestThrottleGuard } from './claims/claim-request-throttle.guard';
+import { ClaimsService } from './claims/claims.service';
+import { LegacyLinksService } from './claims/legacy-links.service';
 import { CommentAuthorsService } from './comments/comment-authors.service';
 import { CommentStore } from './comments/comment-store';
 import { CommentWritersService } from './comments/comment-writers';
@@ -69,8 +79,9 @@ import { VotesService } from './votes/votes.service';
 /**
  * The directory, member pages, owner tools and the ORG chats panel (Chunk 7),
  * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9),
- * belief votes and the Beliefs page section (Chunk 10), and the same votes
- * and comments on ORG's own pages (Chunk 10b).
+ * belief votes and the Beliefs page section (Chunk 10), the same votes
+ * and comments on ORG's own pages (Chunk 10b), and claims on imported pages
+ * with the linking of imported comments (Chunk 11).
  */
 @Module({
   imports: [
@@ -85,6 +96,7 @@ import { VotesService } from './votes/votes.service';
       { name: Comment.name, schema: CommentSchema },
       { name: BeliefVote.name, schema: BeliefVoteSchema },
       { name: VoteTally.name, schema: VoteTallySchema },
+      { name: Claim.name, schema: ClaimSchema },
       // Read only, for votes and comments on ORG's own pages (Chunk 10b).
       { name: WebsitePage.name, schema: WebsitePageSchema },
     ]),
@@ -99,6 +111,10 @@ import { VotesService } from './votes/votes.service';
     VoteWritesController,
     OrgPageReactionsController,
     OrgPageReactionWritesController,
+    MyClaimsController,
+    MyClaimWritesController,
+    AdminClaimsController,
+    AdminClaimWritesController,
   ],
   providers: [
     MembersService,
@@ -117,6 +133,9 @@ import { VotesService } from './votes/votes.service';
     VotersService,
     VoteTalliesService,
     OrgPagesService,
+    ClaimsService,
+    LegacyLinksService,
+    ClaimRequestThrottleGuard,
   ],
 })
 export class MembersModule {}

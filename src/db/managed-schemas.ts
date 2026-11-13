@@ -7,6 +7,7 @@ import { ModerationLogEntrySchema } from '../moderation/schemas/moderation-log.s
 import { BeliefTabSchema } from '../social/schemas/belief-tab.schema';
 import { BeliefVoteSchema } from '../social/schemas/belief-vote.schema';
 import { BlockVersionSchema } from '../social/schemas/block-version.schema';
+import { ClaimSchema } from '../social/schemas/claim.schema';
 import { CommentSchema } from '../social/schemas/comment.schema';
 import { CommentVersionSchema } from '../social/schemas/comment-version.schema';
 import { ImportRecordSchema } from '../social/schemas/import-record.schema';
@@ -40,4 +41,5 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'BeliefVote', schema: BeliefVoteSchema },
     { name: 'VoteHistoryEntry', schema: VoteHistoryEntrySchema },
     { name: 'VoteTally', schema: VoteTallySchema },
+    { name: 'Claim', schema: ClaimSchema },
   ];

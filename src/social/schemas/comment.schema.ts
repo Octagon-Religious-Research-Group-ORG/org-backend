@@ -180,6 +180,23 @@ export class Comment {
   @Prop({ type: Date })
   legacyCreatedAt?: Date;
 
+  /**
+   * An imported comment an admin linked to the member who wrote it, after
+   * that member's claim was approved (plan Q5, Chunk 11). A name typed into
+   * Apple Pages proves nothing, so the admin picks each comment; the text,
+   * the Pages name and the Pages date stay as imported, and every link and
+   * unlink is in the moderation log. Clerk user id; never sent to a client.
+   */
+  @Prop({ type: String })
+  linkedUserId?: string;
+
+  /** When, and by which admin (Clerk user id), the link was made. */
+  @Prop({ type: Date })
+  linkedAt?: Date;
+
+  @Prop({ type: String })
+  linkedBy?: string;
+
   @Prop({ type: Date })
   removedAt?: Date;
 

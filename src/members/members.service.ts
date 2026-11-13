@@ -52,6 +52,7 @@ import { readHeads } from '../social/version-heads';
 import { titleBlockId, visibleFieldBlocks } from './editable-fields';
 import { PAGE_THREAD } from './comments/comment-threads';
 import { commentCounts } from './comments/comment-store';
+import { isClaimable } from './claims/claim-views';
 
 /** Exactly one message for a missing page and for a page you may not see. */
 export const PROFILE_NOT_FOUND = 'That page does not exist.';
@@ -244,7 +245,11 @@ export class MembersService {
   /** @throws NotFoundException for a page this viewer may not know about */
   async profile(slug: string, viewer: Viewer): Promise<ProfileView> {
     const { profile, access } = await this.findVisible(slug, viewer);
-    if (access.level === 'name-only') return nameOnlyProfile(profile);
+    // Only a signed-in reader can ask; a guest's page stays as it was.
+    const claimable = viewer.userId !== undefined && isClaimable(profile);
+    if (access.level === 'name-only') {
+      return nameOnlyProfile(profile, claimable);
+    }
     return fullProfile(
       profile,
       access,
@@ -255,6 +260,7 @@ export class MembersService {
         manager: access.isOwner || viewer.isAdmin,
       }),
       await this.pictures.currentPicture(profile.imageIds ?? []),
+      claimable,
     );
   }
 

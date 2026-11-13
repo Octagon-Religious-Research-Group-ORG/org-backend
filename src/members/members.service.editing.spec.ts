@@ -201,6 +201,7 @@ describe('MembersService.profile, editing data', () => {
         removedTabs: [{ tabId: 't', title: 'Gone', removedAt: 'x' }],
       },
       undefined,
+      false,
     );
     expect(view).not.toHaveProperty('revisions');
     expect(view).not.toHaveProperty('manage');
@@ -222,6 +223,7 @@ describe('MembersService.profile, editing data', () => {
         removedTabs: [],
       },
       undefined,
+      false,
     );
     expect(view).toHaveProperty('manage');
     expect(view).not.toHaveProperty('revisions');

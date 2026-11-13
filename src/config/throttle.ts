@@ -41,6 +41,18 @@ export const MEMBER_WRITE_ACCOUNT_THROTTLE = { ttl: hours(24), limit: 100 };
 export const MEMBER_WRITE_DAILY_LIMIT_CODE = 'MEMBER_WRITE_DAILY_LIMIT';
 
 /**
+ * Claim requests (Chunk 11) per account per day, on top of the member-write
+ * ration: a member claims one page once, and each request goes to an admin.
+ */
+export const CLAIM_REQUEST_ACCOUNT_THROTTLE = { ttl: hours(24), limit: 5 };
+
+/** Tells the website a refusal is the daily ration of claim requests. */
+export const CLAIM_REQUEST_DAILY_LIMIT_CODE = 'CLAIM_REQUEST_DAILY_LIMIT';
+
+/** Claim requests per visitor address per hour. */
+export const CLAIM_REQUEST_THROTTLE = { ttl: hours(1), limit: 5 };
+
+/**
  * Member pictures: a directory page loads one per card, so the site-wide
  * limit would cut a large directory off part-way.
  */

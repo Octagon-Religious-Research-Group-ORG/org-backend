@@ -620,6 +620,53 @@ describe('MembersService.profile', () => {
     expect(view).not.toHaveProperty('manage');
   });
 
+  describe('claimable (Chunk 11)', () => {
+    const imported = page({ ownerUserId: undefined, source: 'migrated' });
+    const signedIn: Viewer = {
+      kind: 'signed-in',
+      userId: 'user_new',
+      isAdmin: false,
+    };
+
+    it('tells a signed-in reader an ownerless imported page can be claimed', async () => {
+      const full = await setup({ one: imported }).service.profile(
+        'quiet-fern',
+        signedIn,
+      );
+      expect(full).toMatchObject({ access: 'full', claimable: true });
+      const nameOnly = await setup({
+        one: { ...imported, visibility: 'members' },
+      }).service.profile('quiet-fern', signedIn);
+      expect(nameOnly).toEqual({
+        access: 'name-only',
+        slug: 'quiet-fern',
+        displayName: 'Quiet Fern',
+        isOwner: false,
+        hasPicture: false,
+        picturePublic: false,
+        claimable: true,
+      });
+    });
+
+    it('never tells a guest, and never for an owned or native page', async () => {
+      const guest = await setup({ one: imported }).service.profile(
+        'quiet-fern',
+        GUEST_VIEWER,
+      );
+      expect(guest).not.toHaveProperty('claimable');
+      for (const row of [
+        page({ source: 'migrated' }),
+        page({ ownerUserId: undefined, source: 'native' }),
+      ]) {
+        const view = await setup({ one: row }).service.profile(
+          'quiet-fern',
+          signedIn,
+        );
+        expect(view).not.toHaveProperty('claimable');
+      }
+    });
+  });
+
   it('copes with a page that has no contacts or pictures', async () => {
     const { service } = setup({
       one: page({ contacts: undefined, imageIds: undefined }),

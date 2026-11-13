@@ -18,8 +18,17 @@ export type CommentAuthorView =
    * may open the whole page. Otherwise neither: shown as "A member".
    */
   | { kind: 'member'; displayName?: string; slug?: string }
-  /** A name typed into Apple Pages; proves no identity (plan Q5). */
-  | { kind: 'imported'; name: string }
+  /**
+   * A name typed into Apple Pages; proves no identity (plan Q5). `member` is
+   * the member an admin linked it to after their claim (Chunk 11), named by
+   * the same rule as a site member's comment, and absent when that rule
+   * names no one for this reader.
+   */
+  | {
+      kind: 'imported';
+      name: string;
+      member?: { displayName: string; slug?: string };
+    }
   /** An admin, not named (see the member case). */
   | { kind: 'admin' };
 
@@ -103,6 +112,8 @@ export interface CommentRow {
   authorUserId?: string;
   legacyAuthorName?: string;
   legacyCreatedAt?: Date;
+  /** The member an admin linked an imported comment to (Chunk 11). */
+  linkedUserId?: string;
   anchorText?: string;
   body: string;
   source: 'migrated' | 'native';

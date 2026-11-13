@@ -29,6 +29,7 @@ import type { Viewer } from '../profile-access';
 import { CommentAuthorsService } from './comment-authors.service';
 import { COMMENT_HISTORY_PAGE_SIZE, describeFailure } from './comment-limits';
 import {
+  type CommentAuthorView,
   type CommentHistoryPage,
   type CommentRow,
   type CommentView,
@@ -279,10 +280,33 @@ export class CommentsService {
         .map((row) => row.commentId),
     );
     const authorOf = await this.authors.resolve(
-      // A site comment always has its author's id (the schema requires it).
-      native.map((row) => String(row.authorUserId)),
+      // A site comment always has its author's id (the schema requires it);
+      // an imported one may have been linked to a member (Chunk 11).
+      [
+        ...native.map((row) => String(row.authorUserId)),
+        ...rows.flatMap((row) =>
+          row.source === 'migrated' && row.linkedUserId
+            ? [row.linkedUserId]
+            : [],
+        ),
+      ],
       viewer,
     );
+    const importedAuthor = (row: CommentRow): CommentAuthorView => {
+      // The import always writes one ("Unknown (Apple Pages)" at worst).
+      const name = String(row.legacyAuthorName);
+      const linked = row.linkedUserId ? authorOf(row.linkedUserId) : undefined;
+      return linked?.kind === 'member' && linked.displayName !== undefined
+        ? {
+            kind: 'imported',
+            name,
+            member: {
+              displayName: linked.displayName,
+              ...(linked.slug ? { slug: linked.slug } : {}),
+            },
+          }
+        : { kind: 'imported', name };
+    };
     const pendingTabs = new Set(
       rows.flatMap((row) =>
         row.kind === 'suggestion' && row.tabId ? [row.tabId] : [],
@@ -300,11 +324,7 @@ export class CommentsService {
       heads,
       authorOf: (row: CommentRow) =>
         row.source === 'migrated'
-          ? {
-              kind: 'imported' as const,
-              // The import always writes one ("Unknown (Apple Pages)" at worst).
-              name: String(row.legacyAuthorName),
-            }
+          ? importedAuthor(row)
           : authorOf(String(row.authorUserId), row.writtenAsAdmin),
     };
     return new Map(

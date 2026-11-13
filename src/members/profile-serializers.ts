@@ -96,6 +96,12 @@ export interface NameOnlyProfile {
   isOwner: false;
   hasPicture: false;
   picturePublic: false;
+  /**
+   * An imported page with no owner yet, sent only to a signed-in reader
+   * (Chunk 11): the website offers "This is my page". Never says whether
+   * anyone has asked for it.
+   */
+  claimable?: true;
 }
 
 export interface FullProfile
@@ -109,6 +115,8 @@ export interface FullProfile
   contacts: Array<{ method: ContactMethod; value: string }>;
   /** Only for the owner: what each edit is based on. */
   revisions?: Revisions;
+  /** As on {@link NameOnlyProfile}. */
+  claimable?: true;
   /** Only for the owner and admins. */
   manage?: {
     visibility: ProfileVisibility;
@@ -126,7 +134,10 @@ export interface DirectoryCard extends PictureFacts {
   access: 'full' | 'name-only';
 }
 
-export function nameOnlyProfile(profile: ProfileRow): NameOnlyProfile {
+export function nameOnlyProfile(
+  profile: ProfileRow,
+  claimable: boolean,
+): NameOnlyProfile {
   return {
     access: 'name-only',
     slug: profile.slug,
@@ -134,6 +145,7 @@ export function nameOnlyProfile(profile: ProfileRow): NameOnlyProfile {
     isOwner: false,
     hasPicture: false,
     picturePublic: false,
+    ...(claimable ? { claimable: true as const } : {}),
   };
 }
 
@@ -144,6 +156,7 @@ export function fullProfile(
   picturePublic: boolean,
   content: ProfileContent,
   pictureId: string | undefined,
+  claimable: boolean,
 ): FullProfile {
   return {
     access: 'full',
@@ -161,6 +174,7 @@ export function fullProfile(
     extras: content.extras,
     tabs: content.tabs,
     pageCommentCount: content.pageCommentCount,
+    ...(claimable ? { claimable: true as const } : {}),
     ...(access.isOwner && content.revisions
       ? { revisions: content.revisions }
       : {}),

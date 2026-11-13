@@ -102,6 +102,37 @@ describe('CommentsService', () => {
       expect(page.comments[0].replies?.[0]).not.toHaveProperty('importedDate');
     });
 
+    it('names the member an imported comment was linked to, by the page-naming rule (Chunk 11)', async () => {
+      const h = harness();
+      const link = (commentId: string, userId: string) =>
+        h.comments
+          .updateOne({ commentId }, { $set: { linkedUserId: userId } })
+          .exec();
+      await link('cmt_imp1', U.named);
+      await link('cmt_imp2', U.waiting);
+      await link('cmt_imp3', U.anon);
+      const page = await h.thread('imported-page', await h.viewer(), 'tab_i');
+      const [root] = page.comments;
+      // The Pages name stays; the linked member is added, never substituted.
+      expect(root.author).toEqual({
+        kind: 'imported',
+        name: 'Synthetic Pages Author',
+        member: { displayName: 'Name of named-writer', slug: 'named-writer' },
+      });
+      // A pending page names no one.
+      expect(root.replies?.[0].author).toEqual({
+        kind: 'imported',
+        name: 'Another Pages Author',
+      });
+      // A members-only page: its name to a guest, not its address.
+      expect(root.replies?.[1].author).toEqual({
+        kind: 'imported',
+        name: 'Synthetic Pages Author',
+        member: { displayName: 'Name of anon-writer' },
+      });
+      expect(root.body).toBe('An imported synthetic comment.');
+    });
+
     it('lists comments with no tab in the page thread', async () => {
       const h = harness();
       const page = await h.thread(

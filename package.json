@@ -184,7 +184,12 @@
       "members/org-pages/org-page-targets.ts",
       "members/org-pages/org-pages.service.ts",
       "members/org-pages/org-pages.controller.ts",
-      "members/org-pages/org-page-id.guard.ts"
+      "members/org-pages/org-page-id.guard.ts",
+      "members/claims/claim-views.ts",
+      "members/claims/claims.service.ts",
+      "members/claims/legacy-links.service.ts",
+      "members/claims/claims.controller.ts",
+      "members/claims/claim-request-throttle.guard.ts"
     ],
     "coverageThreshold": {
       "global": {
