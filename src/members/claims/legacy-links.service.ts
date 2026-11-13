@@ -120,7 +120,7 @@ export class LegacyLinksService {
     const shown = rows.slice(0, MAX_LEGACY_LISTED);
     const pages = (await this.profileModel
       .find({ _id: { $in: [...new Set(shown.map((row) => row.profileId))] } })
-      .select({ slug: 1, displayName: 1, deletedAt: 1 })
+      .select({ slug: 1, displayName: 1, deletedAt: 1, reviewStatus: 1 })
       .lean()
       .exec()) as unknown as ClaimPageRow[];
     const pageOf = new Map(pages.map((row) => [String(row._id), row]));
@@ -253,6 +253,8 @@ export class LegacyLinksService {
         _id: claim.profileId,
         ownerUserId: claim.userId,
         deletedAt: { $exists: false },
+        // A page an admin removed (Chunk 12) is gone for linking too.
+        reviewStatus: { $ne: 'removed' },
       })
       .select({ slug: 1, displayName: 1, anonymous: 1 })
       .lean()

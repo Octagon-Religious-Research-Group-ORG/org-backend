@@ -69,8 +69,8 @@ export class AdminDashboardController {
   }
 
   @Get('invitations')
-  async invitations() {
-    return { invitations: await this.roles.invitations() };
+  invitations() {
+    return this.roles.invitations();
   }
 
   @Get('members')

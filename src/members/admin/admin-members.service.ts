@@ -215,6 +215,7 @@ export class AdminMembersService {
         throw new ConflictException(NOT_REMOVED);
       }
       const back = page.removal.previousStatus;
+      const owner = page.ownerUserId;
       await this.change(
         page,
         { reviewStatus: 'removed' },
@@ -233,6 +234,10 @@ export class AdminMembersService {
         },
         session,
       );
+      // Waiting again: the admins' notice comes back with it (LOW-2).
+      if (back === 'pending' && owner) {
+        await this.inbox.reopenPageNotice(page._id, owner, session);
+      }
       return back;
     });
     return { reviewStatus: restoredTo };

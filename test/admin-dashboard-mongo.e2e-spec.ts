@@ -17,7 +17,10 @@ import {
 } from '../src/members/admin/admin-members.service';
 import {
   AdminRolesService,
+  NO_LONGER_ADMIN,
+  OWN_PROMOTION,
   ROLE_CHANGE_BUSY,
+  ROLE_CHANGE_LOST,
   ROLE_LOCK_KEY,
 } from '../src/members/admin/admin-roles.service';
 import { EamRequestsService } from '../src/members/admin/eam-requests.service';
@@ -235,6 +238,12 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     await expect(
       admin.restore('user_admin_b', page.slug, 'Synthetic: second look'),
     ).resolves.toEqual({ reviewStatus: 'pending' });
+    // Waiting again, so the admins' notice is open again (review LOW-2).
+    const notice = await m.AdminInboxEntry.findOne({
+      profileId: page._id,
+    }).lean();
+    expect(notice).toMatchObject({ status: 'open', kind: 'page-submitted' });
+    expect(notice.handledAt).toBeUndefined();
   });
 
   it('takes one EaM request per member, until an admin resets it', async () => {
@@ -277,39 +286,141 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     expect(await actionsFor(String(entry._id))).toEqual(['eam.reset']);
   });
 
-  it('runs one role change at a time across callers, and frees the lock', async () => {
-    let releaseFirst: () => void = () => undefined;
-    const held = new Promise<void>((resolve) => (releaseFirst = resolve));
-    let calls = 0;
-    const roles = new AdminRolesService(
+  /**
+   * Clerk, simulated: a map of roles. `isAdminNow` reads it fresh, as the
+   * real one reads Clerk; gates let a test hold a change at a chosen step.
+   */
+  const clerkWorld = (admins: string[]) => {
+    const roles = new Map<string, string | undefined>(
+      admins.map((id) => [id, 'admin']),
+    );
+    const gates: Record<string, Promise<void> | undefined> = {};
+    const pending: Array<{ invitationId: string }> = [];
+    const revoked: string[] = [];
+    const log = new ModerationLogService(m.ModerationLogEntry);
+    const service = new AdminRolesService(
       { getOrThrow: () => 'https://org.example' } as never,
-      {} as never,
-      { getIdentity: () => Promise.resolve({}) } as never,
       {
-        setRole: async () => {
-          calls += 1;
-          if (calls === 1) await held;
+        holdersOf: async () => {
+          // Read first, answer late: what a slow Clerk list does.
+          const holders = [...roles]
+            .filter(([, role]) => role === 'admin')
+            .map(([userId]) => ({ userId }));
+          await gates.holdersOf;
+          return { holders, complete: true };
+        },
+        invite: (email: string) => {
+          const invitationId = `inv_${pending.length + revoked.length + 1}`;
+          pending.push({ invitationId });
+          return Promise.resolve({
+            invitationId,
+            email,
+            createdAt: new Date().toISOString(),
+          });
+        },
+        pendingInvitations: () =>
+          Promise.resolve({ invitations: [...pending], complete: true }),
+        revoke: (id: string) => {
+          revoked.push(id);
+          pending.splice(
+            pending.findIndex((p) => p.invitationId === id),
+            1,
+          );
+          return Promise.resolve();
         },
       } as never,
-      {} as never,
+      {
+        getIdentity: (id: string) =>
+          Promise.resolve(roles.get(id) ? { role: roles.get(id) } : {}),
+      } as never,
+      {
+        setRole: (change: { targetUserId: string; role: string | null }) => {
+          roles.set(change.targetUserId, change.role ?? undefined);
+          return Promise.resolve();
+        },
+      } as never,
+      log,
       m.OrgSetting,
       m.SocialProfile,
+      {
+        isAdminNow: (id: string) => Promise.resolve(roles.get(id) === 'admin'),
+        allowlist: () => [],
+        isAllowlisted: () => false,
+        forgetRole: () => Promise.resolve(),
+      } as never,
+      m.ModerationLogEntry,
     );
-    const first = roles.promote(ADMIN, 'user_new_1', 'r');
-    // Let the first take the lock before the second asks.
+    const adminsLeft = () =>
+      [...roles].filter(([, role]) => role === 'admin').length;
+    return { service, roles, gates, adminsLeft, pending, revoked };
+  };
+
+  it('refuses self-promotion, and any change by an admin no longer one in Clerk (HIGH-1)', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const world = clerkWorld(['user_A', 'user_B']);
+    world.roles.set('user_C', undefined);
+    await expect(
+      world.service.promote('user_C', 'user_C', 'r'),
+    ).rejects.toThrow(OWN_PROMOTION);
+    // B was demoted, but its token may still be cached as admin.
+    world.roles.set('user_B', undefined);
+    await expect(
+      world.service.promote('user_B', 'user_D', 'r'),
+    ).rejects.toThrow(NO_LONGER_ADMIN);
+    await expect(
+      world.service.invite('user_B', 'd@example.test', 'admin', undefined),
+    ).rejects.toThrow(NO_LONGER_ADMIN);
+    expect(world.roles.get('user_D')).toBeUndefined();
+    expect(world.pending).toEqual([]);
+  });
+
+  it('keeps an admin when the lock is aged and taken over mid-change (MEDIUM-1)', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const world = clerkWorld(['user_A', 'user_B']);
+    let releaseA: () => void = () => undefined;
+    world.gates.holdersOf = new Promise<void>(
+      (resolve) => (releaseA = resolve),
+    );
+    // A starts demoting B and waits in Clerk's admin list.
+    const a = world.service.demote('user_A', 'user_B', 'r').then(
+      () => 'done',
+      (error: Error) => error.message,
+    );
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await expect(roles.promote(ADMIN, 'user_new_2', 'r')).rejects.toThrow(
-      ROLE_CHANGE_BUSY,
+    // The lock is aged as if A's change had died.
+    await m.OrgSetting.collection.updateOne(
+      { key: ROLE_LOCK_KEY },
+      { $set: { updatedAt: new Date(0) } },
     );
-    releaseFirst();
-    await expect(first).resolves.toEqual({ role: 'admin' });
+    world.gates.holdersOf = undefined;
+    // B takes the lock over and demotes A.
+    await expect(
+      world.service.demote('user_B', 'user_A', 'r'),
+    ).resolves.toEqual({ role: null });
+    releaseA();
+    // A's fence finds its lock gone: it writes nothing.
+    expect(await a).toBe(ROLE_CHANGE_LOST);
+    expect(world.adminsLeft()).toBeGreaterThanOrEqual(1);
+    expect(world.roles.get('user_B')).toBe('admin');
+  });
+
+  it('runs one role change at a time, and frees the lock', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const world = clerkWorld(['user_A', 'user_B', 'user_C']);
+    let release: () => void = () => undefined;
+    world.gates.holdersOf = new Promise<void>((resolve) => (release = resolve));
+    const first = world.service.demote('user_A', 'user_C', 'r');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await expect(
+      world.service.promote('user_B', 'user_D', 'r'),
+    ).rejects.toThrow(ROLE_CHANGE_BUSY);
+    release();
+    await expect(first).resolves.toEqual({ role: null });
     expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(0);
-    await expect(roles.promote(ADMIN, 'user_new_3', 'r')).resolves.toEqual({
-      role: 'admin',
-    });
   });
 
   it('takes over a lock left by a role change that died', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
     await m.OrgSetting.collection.insertOne({
       key: ROLE_LOCK_KEY,
       value: 'dead-change',
@@ -317,19 +428,40 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
       createdAt: new Date(0),
       updatedAt: new Date(0),
     });
-    const roles = new AdminRolesService(
-      { getOrThrow: () => 'https://org.example' } as never,
-      {} as never,
-      { getIdentity: () => Promise.resolve({}) } as never,
-      { setRole: () => Promise.resolve() } as never,
-      {} as never,
-      m.OrgSetting,
-      m.SocialProfile,
-    );
-    await expect(roles.promote(ADMIN, 'user_new_4', 'r')).resolves.toEqual({
-      role: 'admin',
-    });
+    const world = clerkWorld(['user_A']);
+    await expect(
+      world.service.promote('user_A', 'user_new', 'r'),
+    ).resolves.toEqual({ role: 'admin' });
     expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(0);
+  });
+
+  it('withdraws the waiting admin invitations of an admin who is demoted (MEDIUM-3)', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const world = clerkWorld(['user_inviter', 'user_boss']);
+    const admin = await world.service.invite(
+      'user_inviter',
+      'new-admin@example.test',
+      'admin',
+      undefined,
+    );
+    const member = await world.service.invite(
+      'user_inviter',
+      'new-member@example.test',
+      'member',
+      undefined,
+    );
+    await world.service.demote('user_boss', 'user_inviter', 'r');
+    expect(world.revoked).toEqual([admin.invitationId]);
+    expect(world.pending).toEqual([{ invitationId: member.invitationId }]);
+    // The log keeps no readable address (LOW-4).
+    const rows = await m.ModerationLogEntry.find({
+      targetType: 'invitation',
+    }).lean();
+    expect(JSON.stringify(rows)).not.toContain('new-admin@example.test');
+    expect(JSON.stringify(rows)).not.toContain('new-member@example.test');
+    expect(
+      rows.some((row: any) => row.details?.emailDomain === 'example.test'),
+    ).toBe(true);
   });
 
   it('reads the log newest first, with names, a page at a time', async () => {

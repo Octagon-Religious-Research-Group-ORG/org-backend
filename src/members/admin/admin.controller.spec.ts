@@ -23,7 +23,9 @@ function setup() {
   const resolved = (value: string) => jest.fn(() => Promise.resolve(value));
   const roles = {
     admins: resolved('admins'),
-    invitations: jest.fn(() => Promise.resolve(['inv'])),
+    invitations: jest.fn(() =>
+      Promise.resolve({ invitations: ['inv'], complete: true }),
+    ),
     promote: resolved('promoted'),
     demote: resolved('demoted'),
     invite: resolved('invited'),
@@ -80,6 +82,7 @@ describe('admin dashboard controllers', () => {
     expect(s.roles.admins).toHaveBeenCalledWith(ADMIN);
     await expect(reads.invitations()).resolves.toEqual({
       invitations: ['inv'],
+      complete: true,
     });
     await reads.memberPages({});
     expect(s.members.list).toHaveBeenCalledWith('all', undefined, 1);

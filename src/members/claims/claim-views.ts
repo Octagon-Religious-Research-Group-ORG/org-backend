@@ -37,6 +37,8 @@ export interface ClaimPageRow {
   slug: string;
   displayName: string;
   deletedAt?: Date;
+  /** `removed`: an admin took it off the site (Chunk 12); named as gone. */
+  reviewStatus?: string;
 }
 
 /** One of the claimant's own requests. */
@@ -110,7 +112,7 @@ export interface LegacyCommentList {
 }
 
 export function pageView(page: ClaimPageRow | undefined) {
-  return page && !page.deletedAt
+  return page && !page.deletedAt && page.reviewStatus !== 'removed'
     ? { page: { slug: page.slug, displayName: page.displayName } }
     : {};
 }

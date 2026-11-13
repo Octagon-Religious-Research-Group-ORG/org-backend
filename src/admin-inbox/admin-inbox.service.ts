@@ -148,6 +148,33 @@ export class AdminInboxService {
       .exec();
   }
 
+  /**
+   * Puts a page's "waiting for approval" notice back in the open inbox, or
+   * writes it when there is none, inside an admin's restore of the page to
+   * waiting (review LOW-2).
+   */
+  async reopenPageNotice(
+    profileId: Types.ObjectId,
+    ownerUserId: string,
+    session: ClientSession,
+  ) {
+    await this.entryModel
+      .updateOne(
+        { dedupeKey: pageSubmittedKey(profileId) },
+        {
+          $set: { status: 'open' },
+          $unset: { handledAt: 1, handledBy: 1 },
+          $setOnInsert: {
+            kind: 'page-submitted',
+            subjectUserId: ownerUserId,
+            profileId,
+          },
+        },
+        { session, upsert: true },
+      )
+      .exec();
+  }
+
   async myEamRequest(userId: string): Promise<MyEamRequest> {
     const row = await this.entryModel
       .findOne({ dedupeKey: eamKey(userId) })

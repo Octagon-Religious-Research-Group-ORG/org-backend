@@ -67,7 +67,10 @@ function build(options: { page?: unknown; modified?: number } = {}) {
     })),
   };
   const log = { record: jest.fn(() => Promise.resolve({})) };
-  const inbox = { closePageNotice: jest.fn(() => Promise.resolve()) };
+  const inbox = {
+    closePageNotice: jest.fn(() => Promise.resolve()),
+    reopenPageNotice: jest.fn(() => Promise.resolve()),
+  };
   const { connection, session } = fakeConnection();
   const service = new AdminMembersService(
     profileModel as never,
@@ -359,7 +362,7 @@ describe('AdminMembersService decisions', () => {
 
   it('restores a removed page to the status it had', async () => {
     const removedAt = new Date('2026-11-12T00:00:00Z');
-    const { service, profileModel, log, session } = build({
+    const { service, profileModel, log, session, inbox } = build({
       page: pageRow({
         reviewStatus: 'removed',
         removal: {
@@ -392,6 +395,33 @@ describe('AdminMembersService decisions', () => {
       }),
       session,
     );
+    // Waiting again: its inbox notice is back (review LOW-2).
+    expect(inbox.reopenPageNotice).toHaveBeenCalledWith(
+      PAGE_ID,
+      OWNER,
+      session,
+    );
+  });
+
+  it('reopens no notice for a page restored to the site, or with no owner', async () => {
+    const removal = {
+      at: new Date(),
+      by: 'user_other',
+      reason: 'r',
+      previousStatus: 'approved',
+    };
+    const live = build({ page: pageRow({ reviewStatus: 'removed', removal }) });
+    await live.service.restore(ADMIN, 'quiet-fern', 'r');
+    expect(live.inbox.reopenPageNotice).not.toHaveBeenCalled();
+    const ownerless = build({
+      page: pageRow({
+        reviewStatus: 'removed',
+        ownerUserId: undefined,
+        removal: { ...removal, previousStatus: 'pending' },
+      }),
+    });
+    await ownerless.service.restore(ADMIN, 'quiet-fern', 'r');
+    expect(ownerless.inbox.reopenPageNotice).not.toHaveBeenCalled();
   });
 
   it('refuses to restore a page that is not removed', async () => {

@@ -45,7 +45,7 @@ export class AdminAccessService {
   private readonly allowlistedEmails: Set<string>;
   private readonly readAnswers = new Map<
     string,
-    { isAdmin: boolean; expires: number }
+    { isAdmin: boolean; expires: number; userId: string }
   >();
   private readonly readLookups = new Map<
     string,
@@ -168,8 +168,55 @@ export class AdminAccessService {
       startedAt: Date.now(),
       answer: this.lookUpAdminForRead(authProviderId),
     };
-    this.shareReadLookup(tokenHash, lookup);
+    this.shareReadLookup(tokenHash, authProviderId, lookup);
     return lookup.answer;
+  }
+
+  /**
+   * Whether this account is an admin RIGHT NOW: read from Clerk, never from
+   * any cache (Chunk 12, for the writes that grant or remove privilege). The
+   * same rule as everywhere else, the switch-over allowlist included.
+   */
+  async isAdminNow(userId: string): Promise<boolean> {
+    const identity = await this.clerkUserInfo.getIdentity(userId);
+    return this.decideAdmin(
+      userId,
+      identity.role,
+      identity.emailVerified === true,
+      identity.email?.trim().toLowerCase(),
+    );
+  }
+
+  /** The switch-over allowlist's addresses (Chunk 12, admins only). */
+  allowlist(): string[] {
+    return [...this.allowlistedEmails];
+  }
+
+  /** Whether a verified address makes its account an admin by allowlist. */
+  isAllowlisted(email: string | undefined, emailVerified: boolean): boolean {
+    return emailVerified && this.isAllowlistedEmail(email);
+  }
+
+  /**
+   * Forgets every cached answer about this account's role (Chunk 12, after a
+   * demotion): the role cached on its profile, so the next admin check asks
+   * Clerk, and this instance's remembered read answers. Another server
+   * instance's read answers still expire on their own, within
+   * {@link ROLE_CACHE_MAX_AGE_MS}; its writes go through the profile.
+   */
+  async forgetRole(userId: string): Promise<void> {
+    for (const [tokenHash, answer] of this.readAnswers) {
+      if (answer.userId === userId) this.readAnswers.delete(tokenHash);
+    }
+    await this.profileModel
+      .updateOne(
+        { authProviderId: userId },
+        {
+          $unset: { authRoleCheckedAt: 1, authEmailTokenHash: 1 },
+          $set: { isAdmin: false },
+        },
+      )
+      .exec();
   }
 
   private async lookUpAdminForRead(authProviderId: string): Promise<boolean> {
@@ -185,6 +232,7 @@ export class AdminAccessService {
 
   private shareReadLookup(
     tokenHash: string,
+    userId: string,
     lookup: { startedAt: number; answer: Promise<boolean> },
   ) {
     // A hung lookup never settles, so the list needs its own bound.
@@ -200,7 +248,7 @@ export class AdminAccessService {
       (isAdmin) => {
         if (!isCurrent()) return;
         this.readLookups.delete(tokenHash);
-        this.rememberReadAnswer(tokenHash, isAdmin);
+        this.rememberReadAnswer(tokenHash, userId, isAdmin);
       },
       () => {
         if (isCurrent()) this.readLookups.delete(tokenHash);
@@ -208,7 +256,11 @@ export class AdminAccessService {
     );
   }
 
-  private rememberReadAnswer(tokenHash: string, isAdmin: boolean) {
+  private rememberReadAnswer(
+    tokenHash: string,
+    userId: string,
+    isAdmin: boolean,
+  ) {
     this.readAnswers.delete(tokenHash);
     if (this.readAnswers.size >= MAX_REMEMBERED_READ_ANSWERS) {
       const [oldest] = this.readAnswers.keys();
@@ -216,6 +268,7 @@ export class AdminAccessService {
     }
     this.readAnswers.set(tokenHash, {
       isAdmin,
+      userId,
       expires: Date.now() + ROLE_CACHE_MAX_AGE_MS,
     });
   }

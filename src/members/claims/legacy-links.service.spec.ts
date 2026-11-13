@@ -275,6 +275,13 @@ describe('LegacyLinksService.link / unlink', () => {
     await expect(service.link(ADMIN, String(CLAIM_ID), ['c1'])).rejects.toThrow(
       new ConflictException(LINK_PAGE_GONE),
     );
+    // A page an admin removed (Chunk 12) is not a live page either.
+    expect(profileModel.findOne).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        deletedAt: { $exists: false },
+        reviewStatus: { $ne: 'removed' },
+      }),
+    );
     expect(commentModel.updateOne).not.toHaveBeenCalled();
   });
 

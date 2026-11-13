@@ -87,7 +87,12 @@ export const MY_CLAIMS_SHOWN = 20;
 /** Requests per page of the admin queue. */
 export const ADMIN_CLAIMS_SHOWN = 200;
 
-const CLAIM_PAGE_FIELDS = { slug: 1, displayName: 1, deletedAt: 1 };
+const CLAIM_PAGE_FIELDS = {
+  slug: 1,
+  displayName: 1,
+  deletedAt: 1,
+  reviewStatus: 1,
+};
 
 /** Thrown inside the approval to abort it: the page cannot be bound. */
 class PageNotBindable extends Error {}

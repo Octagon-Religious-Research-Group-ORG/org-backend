@@ -12,6 +12,7 @@ import {
   ClerkAdminDirectoryService,
   INVITATION_NOT_FOUND,
   INVITATION_REFUSED,
+  MAX_INVITATION_PAGES,
   MAX_USER_PAGES,
   translate,
 } from './clerk-admin-directory.service';
@@ -167,17 +168,57 @@ describe('ClerkAdminDirectoryService', () => {
           },
         ],
       });
-      await expect(build().pendingInvitations()).resolves.toEqual([
-        {
-          invitationId: 'inv_1',
-          email: 'a@example.org',
-          createdAt: new Date(CREATED).toISOString(),
-        },
-      ]);
+      await expect(build().pendingInvitations()).resolves.toEqual({
+        complete: true,
+        invitations: [
+          {
+            invitationId: 'inv_1',
+            email: 'a@example.org',
+            createdAt: new Date(CREATED).toISOString(),
+          },
+        ],
+      });
       expect(getInvitationList).toHaveBeenCalledWith({
         status: 'pending',
+        orderBy: '-created_at',
         limit: CLERK_PAGE,
+        offset: 0,
       });
+    });
+
+    it('pages through the waiting invitations, and says when it stopped short (LOW-1)', async () => {
+      const full = Array.from({ length: CLERK_PAGE }, (_, i) => ({
+        id: `inv_${i}`,
+        emailAddress: `${i}@example.org`,
+        publicMetadata: null,
+        createdAt: CREATED,
+      }));
+      getInvitationList
+        .mockResolvedValueOnce({ data: full })
+        .mockResolvedValueOnce({ data: full.slice(0, 2) });
+      const two = await build().pendingInvitations();
+      expect(two.complete).toBe(true);
+      expect(two.invitations).toHaveLength(CLERK_PAGE + 2);
+      expect(getInvitationList).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: CLERK_PAGE }),
+      );
+      getInvitationList.mockReset().mockResolvedValue({ data: full });
+      const capped = await build().pendingInvitations();
+      expect(capped.complete).toBe(false);
+      expect(getInvitationList).toHaveBeenCalledTimes(MAX_INVITATION_PAGES);
+    });
+
+    it('passes an expiry only when one is given (MEDIUM-3)', async () => {
+      createInvitation.mockResolvedValue({
+        id: 'inv_1',
+        emailAddress: 'a@example.org',
+        publicMetadata: { role: 'admin' },
+        createdAt: CREATED,
+      });
+      await build().invite('a@example.org', 'admin', 'https://x.test', 3);
+      expect(createInvitation).toHaveBeenCalledWith(
+        expect.objectContaining({ expiresInDays: 3 }),
+      );
     });
 
     it('revokes one, and says when it is not waiting', async () => {
@@ -190,6 +231,54 @@ describe('ClerkAdminDirectoryService', () => {
         new NotFoundException(INVITATION_NOT_FOUND),
       );
     });
+  });
+});
+
+describe('usersByEmail (MEDIUM-2)', () => {
+  beforeEach(() => getUserList.mockReset());
+
+  it('reads the accounts with those addresses, with role and verification', async () => {
+    getUserList.mockResolvedValue({
+      data: [
+        user('user_a', {
+          publicMetadata: { role: 'admin' },
+          emailAddresses: [
+            {
+              id: 'e1',
+              emailAddress: 'A@example.org',
+              verification: { status: 'verified' },
+            },
+          ],
+        }),
+        user('user_b', {
+          emailAddresses: [
+            { id: 'e1', emailAddress: 'b@example.org', verification: null },
+          ],
+        }),
+      ],
+    });
+    await expect(
+      build().usersByEmail(['a@example.org', 'b@example.org']),
+    ).resolves.toEqual([
+      {
+        holder: { userId: 'user_a', email: 'a@example.org' },
+        role: 'admin',
+        emailVerified: true,
+      },
+      {
+        holder: { userId: 'user_b', email: 'b@example.org' },
+        emailVerified: false,
+      },
+    ]);
+    expect(getUserList).toHaveBeenCalledWith({
+      emailAddress: ['a@example.org', 'b@example.org'],
+      limit: CLERK_PAGE,
+    });
+  });
+
+  it('asks nothing for an empty list', async () => {
+    await expect(build().usersByEmail([])).resolves.toEqual([]);
+    expect(getUserList).not.toHaveBeenCalled();
   });
 });
 

@@ -672,3 +672,77 @@ describe('how long a cached role is trusted', () => {
     expect(identity.getIdentity).toHaveBeenCalledWith('user_member');
   });
 });
+
+describe('role changes (Chunk 12, review HIGH-1 / MEDIUM-2)', () => {
+  const config = {
+    get: jest.fn(() => 'list@example.test, other@example.test'),
+  };
+  function setup(identity: Record<string, unknown>) {
+    const clerk = { getIdentity: jest.fn().mockResolvedValue(identity) };
+    const exec = jest.fn().mockResolvedValue({});
+    const model = {
+      findOne: jest.fn(() => query(null)),
+      findOneAndUpdate: jest.fn(() => query(null)),
+      updateOne: jest.fn(() => ({ exec })),
+    };
+    const service = new AdminAccessService(
+      config as never,
+      clerk as never,
+      model as never,
+    );
+    return { service, clerk, model };
+  }
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+  });
+  afterEach(() => warn.mockRestore());
+
+  it('asks Clerk every time whether an account is an admin now', async () => {
+    const { service, clerk } = setup({ role: 'admin', emailVerified: false });
+    await expect(service.isAdminNow('user_a')).resolves.toBe(true);
+    await expect(service.isAdminNow('user_a')).resolves.toBe(true);
+    expect(clerk.getIdentity).toHaveBeenCalledTimes(2);
+    clerk.getIdentity.mockResolvedValue({ emailVerified: false });
+    await expect(service.isAdminNow('user_a')).resolves.toBe(false);
+    clerk.getIdentity.mockResolvedValue({
+      email: ' List@Example.test ',
+      emailVerified: true,
+    });
+    await expect(service.isAdminNow('user_a')).resolves.toBe(true);
+    clerk.getIdentity.mockResolvedValue({ email: 'list@example.test' });
+    await expect(service.isAdminNow('user_a')).resolves.toBe(false);
+  });
+
+  it('tells the allowlist and whether a verified address is on it', () => {
+    const { service } = setup({});
+    expect(service.allowlist()).toEqual([
+      'list@example.test',
+      'other@example.test',
+    ]);
+    expect(service.isAllowlisted('LIST@example.test', true)).toBe(true);
+    expect(service.isAllowlisted('list@example.test', false)).toBe(false);
+    expect(service.isAllowlisted(undefined, true)).toBe(false);
+    expect(service.isAllowlisted('x@example.test', true)).toBe(false);
+  });
+
+  it('forgets a demoted account’s cached role: its profile and the read answers', async () => {
+    const { service, clerk, model } = setup({ role: 'admin' });
+    await expect(service.isAdminForRead(request())).resolves.toBe(true);
+    clerk.getIdentity.mockResolvedValue({});
+    // Still remembered...
+    await expect(service.isAdminForRead(request())).resolves.toBe(true);
+    // ...until forgotten. Another account's answers stay.
+    await service.forgetRole('user_other');
+    await expect(service.isAdminForRead(request())).resolves.toBe(true);
+    await service.forgetRole('user_member');
+    await expect(service.isAdminForRead(request())).resolves.toBe(false);
+    expect(model.updateOne).toHaveBeenLastCalledWith(
+      { authProviderId: 'user_member' },
+      {
+        $unset: { authRoleCheckedAt: 1, authEmailTokenHash: 1 },
+        $set: { isAdmin: false },
+      },
+    );
+  });
+});

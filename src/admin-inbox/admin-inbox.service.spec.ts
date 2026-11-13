@@ -115,6 +115,25 @@ describe('AdminInboxService', () => {
     expect(options).toEqual({ session });
   });
 
+  it('reopens, or writes, a page notice when the page waits again (LOW-2)', async () => {
+    const { service, entryModel } = build();
+    const session = { id: 's' };
+    await service.reopenPageNotice(PROFILE_ID, MEMBER, session as never);
+    expect(entryModel.updateOne).toHaveBeenCalledWith(
+      { dedupeKey: pageSubmittedKey(PROFILE_ID) },
+      {
+        $set: { status: 'open' },
+        $unset: { handledAt: 1, handledBy: 1 },
+        $setOnInsert: {
+          kind: 'page-submitted',
+          subjectUserId: MEMBER,
+          profileId: PROFILE_ID,
+        },
+      },
+      { session, upsert: true },
+    );
+  });
+
   describe('EaM requests (member side)', () => {
     it('reports none, then the request with its date', async () => {
       const { service, entryModel } = build();

@@ -19,6 +19,9 @@ export const CLERK_PAGE = 100;
  */
 export const MAX_USER_PAGES = 20;
 
+/** Invitation pages read at most; past it the list says it is incomplete. */
+export const MAX_INVITATION_PAGES = 10;
+
 export const ALREADY_INVITED =
   'That address already has an account or a waiting invitation.';
 export const INVITATION_REFUSED =
@@ -77,21 +80,9 @@ export class ClerkAdminDirectoryService {
         }),
       );
       for (const user of data) {
-        if (parseRole(user.publicMetadata) !== role) continue;
-        const primary = user.emailAddresses.find(
-          (address) => address.id === user.primaryEmailAddressId,
-        );
-        const name = [user.firstName, user.lastName]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-        holders.push({
-          userId: user.id,
-          ...(primary ? { email: primary.emailAddress.toLowerCase() } : {}),
-          ...(name || user.username
-            ? { name: name || String(user.username) }
-            : {}),
-        });
+        if (parseRole(user.publicMetadata) === role) {
+          holders.push(holderView(user).holder);
+        }
       }
       if (data.length < CLERK_PAGE) return { holders, complete: true };
     }
@@ -99,8 +90,33 @@ export class ClerkAdminDirectoryService {
   }
 
   /**
+   * The accounts whose primary address is one of `emails` (at most
+   * {@link CLERK_PAGE}), with their role and whether the address is
+   * verified: for the switch-over allowlist's admins (Chunk 12).
+   */
+  async usersByEmail(
+    emails: string[],
+  ): Promise<
+    Array<{ holder: RoleHolder; role?: MemberRole; emailVerified: boolean }>
+  > {
+    if (emails.length === 0) return [];
+    const { data } = await this.call(() =>
+      this.clerk.users.getUserList({
+        emailAddress: emails.slice(0, CLERK_PAGE),
+        limit: CLERK_PAGE,
+      }),
+    );
+    return data.map((user) => {
+      const { holder, emailVerified } = holderView(user);
+      const role = parseRole(user.publicMetadata);
+      return { holder, ...(role ? { role } : {}), emailVerified };
+    });
+  }
+
+  /**
    * Invites someone by email; Clerk sends the email. `role` is copied to the
-   * account's public metadata when they accept.
+   * account's public metadata when they accept. `expiresInDays` is Clerk's
+   * own expiry (its default is 30 days).
    *
    * @throws ConflictException when the address has an account or invitation
    * @throws BadRequestException for an address Clerk refuses
@@ -109,6 +125,7 @@ export class ClerkAdminDirectoryService {
     email: string,
     role: MemberRole | null,
     redirectUrl: string,
+    expiresInDays?: number,
   ): Promise<PendingInvitation> {
     const invitation = await this.call(
       () =>
@@ -117,20 +134,36 @@ export class ClerkAdminDirectoryService {
           redirectUrl,
           notify: true,
           ...(role ? { publicMetadata: { role } } : {}),
+          ...(expiresInDays ? { expiresInDays } : {}),
         }),
       'invite',
     );
     return this.view(invitation);
   }
 
-  async pendingInvitations(): Promise<PendingInvitation[]> {
-    const { data } = await this.call(() =>
-      this.clerk.invitations.getInvitationList({
-        status: 'pending',
-        limit: CLERK_PAGE,
-      }),
-    );
-    return data.map((invitation) => this.view(invitation));
+  /**
+   * The waiting invitations, newest first, page by page.
+   *
+   * @returns them, and whether every one was read
+   */
+  async pendingInvitations(): Promise<{
+    invitations: PendingInvitation[];
+    complete: boolean;
+  }> {
+    const invitations: PendingInvitation[] = [];
+    for (let page = 0; page < MAX_INVITATION_PAGES; page += 1) {
+      const { data } = await this.call(() =>
+        this.clerk.invitations.getInvitationList({
+          status: 'pending',
+          orderBy: '-created_at',
+          limit: CLERK_PAGE,
+          offset: page * CLERK_PAGE,
+        }),
+      );
+      invitations.push(...data.map((invitation) => this.view(invitation)));
+      if (data.length < CLERK_PAGE) return { invitations, complete: true };
+    }
+    return { invitations, complete: false };
   }
 
   /** @throws NotFoundException for an unknown or no longer pending one */
@@ -169,6 +202,38 @@ export class ClerkAdminDirectoryService {
 }
 
 export type ClerkCallMode = 'read' | 'invite' | 'revoke';
+
+interface ClerkUserRow {
+  id: string;
+  primaryEmailAddressId: string | null;
+  emailAddresses: Array<{
+    id: string;
+    emailAddress: string;
+    verification?: { status?: string } | null;
+  }>;
+  firstName: string | null;
+  lastName: string | null;
+  username: string | null;
+}
+
+/** A Clerk user as the Roles section shows it. */
+export function holderView(user: ClerkUserRow): {
+  holder: RoleHolder;
+  emailVerified: boolean;
+} {
+  const primary = user.emailAddresses.find(
+    (address) => address.id === user.primaryEmailAddressId,
+  );
+  const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  return {
+    holder: {
+      userId: user.id,
+      ...(primary ? { email: primary.emailAddress.toLowerCase() } : {}),
+      ...(name || user.username ? { name: name || String(user.username) } : {}),
+    },
+    emailVerified: primary?.verification?.status === 'verified',
+  };
+}
 
 /** Clerk's answer, as the admin should read it; never Clerk's raw text. */
 export function translate(error: unknown, mode: ClerkCallMode) {
