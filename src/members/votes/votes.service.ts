@@ -174,9 +174,10 @@ export class VotesService {
     await this.repair(voter.userId);
     const turn = await takeTextTurn(this.tabModel, profile._id, input.tabId);
     if (turn === undefined) throw new NotFoundException(NO_SUCH_BELIEF);
+    let mark: string | undefined;
     try {
       // Marked before anything is written, recounted whatever happens.
-      await this.tallies.touch(input.tabId, profile._id);
+      mark = await this.tallies.touch(input.tabId, profile._id);
       const text = (
         await readBeliefTexts(this.blockModel, this.versionModel, [
           { profileId: profile._id, tabId: input.tabId },
@@ -194,43 +195,49 @@ export class VotesService {
       await endTextTurn(this.tabModel, input.tabId, turn, (message) =>
         this.logger.warn(message),
       );
-      await this.tallies.settle(input.tabId, profile._id);
+      await this.tallies.settle(input.tabId, mark);
     }
     return this.oneBelief(profile, access.isOwner, input.tabId, voter);
   }
 
   /**
-   * Withdraws the voter's vote. Taking one's own vote back never depends on
-   * being allowed to vote now, nor on the page's settings; withdrawing a
-   * vote that is not there is no error.
+   * Withdraws the voter's vote, on the current wording or an earlier one.
+   * Taking one's own vote back never depends on being allowed to vote now,
+   * nor on the page's settings; withdrawing a vote that is not there is no
+   * error.
    *
-   * @returns the belief's vote state when the reader may still read it
-   * @throws NotFoundException for a page that does not exist
+   * The answer never says whether a page exists (fix round 1, MEDIUM 2):
+   * only the voter's own vote row is looked up, and its page is matched by
+   * address; a missing, unlisted, pending or deleted page, a name-only page
+   * and a page with no vote of theirs all answer the same `{ withdrawn:
+   * true }`. The belief's vote state is added only for a belief the reader
+   * may read in full, which says nothing they could not already see.
    */
   async withdraw(
     viewer: Viewer & { userId: string },
     slug: string,
     tabId: string,
   ) {
-    const profile = (await this.profileModel
-      .findOne({ slug: slug.toLowerCase() })
-      .select({ _id: 1 })
-      .lean()
-      .exec()) as { _id: Types.ObjectId } | null;
-    if (!profile) throw new NotFoundException(PROFILE_NOT_FOUND);
     await this.repair(viewer.userId);
     const row = await this.row(tabId, viewer.userId);
-    // A vote on another page's belief is not this page's to withdraw.
-    if (row?.value !== undefined && profile._id.equals(row.profileId)) {
-      await this.tallies.touch(tabId, profile._id);
-      try {
-        await this.write(viewer.userId, profile._id, tabId, {
-          // A counted vote always has both.
-          textSeq: row.textSeq as number,
-          voterTier: row.voterTier as VoterTier,
-        });
-      } finally {
-        await this.tallies.settle(tabId, profile._id);
+    if (row?.value !== undefined) {
+      const page = (await this.profileModel
+        .findOne({ _id: row.profileId })
+        .select({ slug: 1 })
+        .lean()
+        .exec()) as { slug: string } | null;
+      // A vote on another page's belief is not this address's to withdraw.
+      if (page?.slug === slug.toLowerCase()) {
+        const mark = await this.tallies.touch(tabId, row.profileId);
+        try {
+          await this.write(viewer.userId, row.profileId, tabId, {
+            // A counted vote always has both.
+            textSeq: row.textSeq as number,
+            voterTier: row.voterTier as VoterTier,
+          });
+        } finally {
+          await this.tallies.settle(tabId, mark);
+        }
       }
     }
     let readable: Awaited<ReturnType<MembersService['findVisible']>>;
@@ -240,7 +247,11 @@ export class VotesService {
       return { withdrawn: true };
     }
     const live = await this.tabModel
-      .exists({ profileId: profile._id, tabId, removedAt: { $exists: false } })
+      .exists({
+        profileId: readable.profile._id,
+        tabId,
+        removedAt: { $exists: false },
+      })
       .exec();
     if (readable.access.level !== 'full' || !live) return { withdrawn: true };
     return {
@@ -419,7 +430,8 @@ export class VotesService {
           )
           .exec();
         await this.catchUp(row.tabId, voterUserId);
-        await this.tallies.settle(row.tabId, row.profileId);
+        // The dead writer's own mark ages out in repairLeftBehind.
+        await this.tallies.settle(row.tabId, undefined);
       }
     } catch (error) {
       this.logger.warn(
@@ -672,6 +684,9 @@ export class VotesService {
     const mine = await this.myVotes(viewer.userId, {
       tabIds: found.map((listed) => listed.belief.tabId),
     });
+    // Who may comment is the same rule on every listed page: each is one the
+    // reader may read in full (Chunk 9's writer rule).
+    const writing = await this.voters.commentStatus(viewer);
     const beliefs = found.flatMap(({ belief, tally, isOwner }) => {
       const votes = tabVotes(
         tally,
@@ -683,7 +698,12 @@ export class VotesService {
       // Recounted below the threshold just now: not listed.
       return votes.agree >= AGREED_THRESHOLD ? [{ ...belief, votes }] : [];
     });
-    return { beliefs, ...(nextAfter !== undefined ? { nextAfter } : {}) };
+    return {
+      beliefs,
+      ...(nextAfter !== undefined ? { nextAfter } : {}),
+      viewerMayComment: writing.mayComment,
+      ...(writing.block ? { viewerWriteBlock: writing.block } : {}),
+    };
   }
 }
 

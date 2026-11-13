@@ -65,7 +65,13 @@ export interface NewCommentInput {
 export const STANCE_ONLY_ON_BELIEF =
   'Only a new comment on a belief can say whether you agree.';
 export const STANCE_NEEDS_VOTE =
-  'Your vote on this belief is not saved yet, so the comment cannot say it. Please vote, then post.';
+  'You have no vote on this belief, so the comment cannot say whether you agree. Please vote, then post.';
+export const STANCE_EARLIER_WORDING =
+  'Your vote is on an earlier wording of this belief. Confirm it on the current wording first, then post.';
+/** The writer's saved vote says something else than the badge asked for. */
+export function stanceOtherVote(value: VoteValue) {
+  return `Your current vote on this belief is "${value}", so the comment can only show that.`;
+}
 
 /** Cleans a comment as an edit of page text is cleaned (Chunk 8 rules). */
 export function cleanCommentBody(raw: string): string {
@@ -264,6 +270,7 @@ export class CommentsService {
     if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
     if (input.stance !== undefined) {
       await this.requireStance(
+        profile._id,
         writer.userId,
         tabId,
         parentCommentId,
@@ -299,13 +306,15 @@ export class CommentsService {
 
   /**
    * A stance badge says what the writer's vote says (Chunk 10): only on a
-   * new top-level comment on a belief, and only matching their counted or
-   * earlier-wording vote on it right now.
+   * new top-level comment on a belief, and only matching their vote on its
+   * CURRENT wording right now.
    *
    * @throws BadRequestException on a reply or the page's own thread
-   * @throws ConflictException when their vote does not say the same
+   * @throws ConflictException when they have no vote, a different one, or
+   *   one on an earlier wording; each with its own message
    */
   private async requireStance(
+    profileId: Types.ObjectId,
     userId: string,
     tabId: string | undefined,
     parentCommentId: string | undefined,
@@ -314,10 +323,22 @@ export class CommentsService {
     if (tabId === undefined || parentCommentId !== undefined) {
       throw new BadRequestException(STANCE_ONLY_ON_BELIEF);
     }
-    const vote = await this.voteModel
-      .exists({ tabId, voterUserId: userId, value: stance })
-      .exec();
+    const vote = (await this.voteModel
+      .findOne({ tabId, voterUserId: userId, value: { $exists: true } })
+      .select({ value: 1, textSeq: 1 })
+      .lean()
+      .exec()) as { value: VoteValue; textSeq: number } | null;
     if (!vote) throw new ConflictException(STANCE_NEEDS_VOTE);
+    if (vote.value !== stance) {
+      throw new ConflictException(stanceOtherVote(vote.value));
+    }
+    // Decision (fix round 1): a badge says the writer agrees or disagrees
+    // with the belief AS IT READS NOW, so a vote kept from an earlier
+    // wording does not give one; the writer confirms it first.
+    const current = await this.editor.readTabText(profileId, tabId);
+    if (vote.textSeq !== current.headSeq) {
+      throw new ConflictException(STANCE_EARLIER_WORDING);
+    }
   }
 
   /**

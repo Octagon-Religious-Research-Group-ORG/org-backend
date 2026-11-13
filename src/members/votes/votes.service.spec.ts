@@ -260,8 +260,8 @@ describe('VotesService', () => {
       await expect(stale).rejects.toThrow(VOTE_STALE);
       const tab = h.tabs.docs.find((t) => t.tabId === 'tab_a')!;
       expect(tab.textTurns).toEqual([]);
-      // Nothing written, and the tally is left clean.
-      expect(h.tallies.docs[0].dirtySince).toBeUndefined();
+      // Nothing written, and the vote's own mark is gone again.
+      expect(h.tallies.docs[0].writers).toEqual([]);
     });
 
     it('is refused as busy while another window holds the row', async () => {
@@ -509,10 +509,10 @@ describe('VotesService', () => {
       await expect(h.editor.removeTab(U.owner, 'tab_a')).rejects.toThrow(
         REMOVAL_BUSY,
       );
-      // The removal's own tally marks are cleared again.
-      expect(
-        h.tallies.docs.find((t) => t.tabId === 'tab_a')?.dirtySince,
-      ).toBeUndefined();
+      // The removal's own tally mark is cleared again.
+      expect(h.tallies.docs.find((t) => t.tabId === 'tab_a')?.writers).toEqual(
+        [],
+      );
     });
   });
 
@@ -562,10 +562,39 @@ describe('VotesService', () => {
       expect(h.votes.docs[0].value).toBe('agree');
     });
 
-    it('answers 404 for a page that does not exist', async () => {
+    it('answers the same for a missing, unlisted, pending or deleted page, so it reveals none of them (fix round 1, MEDIUM 2)', async () => {
+      for (const [slug, tabId] of [
+        ['no-such-page', 'tab_a'],
+        ['hidden-page', 'tab_h'],
+        ['waiting-page', 'tab_w'],
+        ['gone-page', 'tab_x'],
+      ]) {
+        await expect(withdraw(U.named, slug, tabId)).resolves.toEqual({
+          withdrawn: true,
+        });
+      }
+      expect(h.votes.docs).toHaveLength(0);
+    });
+
+    it('withdraws a vote kept only on an earlier wording (fix round 1, LOW 7)', async () => {
+      await cast(h, U.named, 'open-page', 'tab_a', 'agree');
+      await h.editor.editTabText(
+        U.owner,
+        'tab_a',
+        'A new synthetic wording.',
+        1,
+      );
       await expect(
-        withdraw(U.named, 'no-such-page', 'tab_a'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+        withdraw(U.named, 'open-page', 'tab_a'),
+      ).resolves.toMatchObject({
+        withdrawn: true,
+        votes: { earlierWording: 0, mayVote: true },
+      });
+      expect(h.votes.docs[0].value).toBeUndefined();
+      expect(h.voteHistory.docs.at(-1)).toMatchObject({
+        action: 'withdraw',
+        textSeq: 1,
+      });
     });
   });
 
@@ -638,6 +667,17 @@ describe('VotesService', () => {
 
       const page = await list(undefined);
       expect(page.nextAfter).toBeUndefined();
+      // A guest may not comment, and is told why (fix round 1, LOW 6).
+      expect(page).toMatchObject({
+        viewerMayComment: false,
+        viewerWriteBlock: 'sign-in',
+      });
+      expect(await list(U.unverified)).toMatchObject({
+        viewerMayComment: false,
+        viewerWriteBlock: 'verify-email',
+      });
+      expect(await list(U.admin)).toMatchObject({ viewerMayComment: true });
+      expect(await list('user_v1')).not.toHaveProperty('viewerWriteBlock');
       expect(page.beliefs.map((b) => [b.tabId, b.votes.agree])).toEqual([
         ['tab_b', 3],
         ['tab_a', 2],
@@ -757,7 +797,9 @@ describe('VotesService', () => {
     it('recounts a dirty tally that still qualifies and lists it', async () => {
       await cast(h, 'user_v1', 'open-page', 'tab_a', 'agree');
       await cast(h, 'user_v2', 'open-page', 'tab_a', 'agree');
-      h.tallies.docs.find((t) => t.tabId === 'tab_a')!.dirtySince = new Date();
+      h.tallies.docs.find((t) => t.tabId === 'tab_a')!.writers = [
+        { id: 'in-flight', at: new Date() },
+      ];
       expect((await list()).beliefs.map((b) => b.tabId)).toEqual(['tab_a']);
     });
 
@@ -865,9 +907,9 @@ describe('VotesService', () => {
       const tally = h.tallies.docs.find((t) => t.tabId === 'tab_a')!;
       tally.agreeMember = 0;
       tally.agreeAll = 0;
-      tally.dirtySince = new Date(0);
+      tally.writers = [{ id: 'dead-writer', at: new Date(0) }];
       expect((await list()).beliefs.map((b) => b.tabId)).toEqual(['tab_a']);
-      expect(tally.dirtySince).toBeUndefined();
+      expect(tally.writers).toEqual([]);
     });
 
     it('refuses a cursor it did not make', async () => {

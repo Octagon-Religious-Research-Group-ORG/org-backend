@@ -187,7 +187,7 @@ export class MemberPageEditorService {
     await this.liveTab(page._id, tabId);
     // A new wording changes which votes count (Chunk 10): the tally is
     // marked before the version and recounted after it, whatever happens.
-    await this.tallies.touch(tabId, page._id);
+    const mark = await this.tallies.touch(tabId, page._id);
     let saved: SaveResult;
     try {
       saved = await this.withTextTurn(page._id, tabId, () =>
@@ -202,7 +202,7 @@ export class MemberPageEditorService {
         ),
       );
     } finally {
-      await this.tallies.settle(tabId, page._id);
+      await this.tallies.settle(tabId, mark);
     }
     if (saved.changed) await this.markReviewed(tabId);
     return saved;
@@ -516,11 +516,11 @@ export class MemberPageEditorService {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
     // A removed belief keeps its votes but leaves every listing (Chunk 10).
-    await this.tallies.touch(tabId, page._id);
+    const mark = await this.tallies.touch(tabId, page._id);
     try {
       return await this.removeLiveTab(userId, page, tabId);
     } finally {
-      await this.tallies.settle(tabId, page._id);
+      await this.tallies.settle(tabId, mark);
     }
   }
 

@@ -10,6 +10,7 @@ import { describeFailure } from '../comments/comment-limits';
 import {
   CANNOT_CHECK_ACCOUNT,
   CommentWritersService,
+  type WriteStatus,
 } from '../comments/comment-writers';
 import type { Viewer } from '../profile-access';
 
@@ -70,6 +71,11 @@ export class VotersService {
   private readonly logger = new Logger(VotersService.name);
 
   constructor(private readonly writers: CommentWritersService) {}
+
+  /** Whether this reader may comment (Chunk 9's rule), and why not. */
+  commentStatus(viewer: Viewer): Promise<WriteStatus> {
+    return this.writers.writeStatus(viewer);
+  }
 
   /**
    * The rule for this reader, before any page. Asks Clerk (cached) only for

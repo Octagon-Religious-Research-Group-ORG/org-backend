@@ -204,7 +204,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       // Counted as an earlier wording once the edit landed.
       const tally = await m.VoteTally.findOne({ tabId: 'tab_a' }).lean();
       expect(tally).toMatchObject(await expectedTally('tab_a'));
-      expect(tally.dirtySince).toBeUndefined();
+      expect(tally.writers).toEqual([]);
     }
     // Both orders must actually have happened for this to mean anything.
     console.log('vote vs edit outcomes', JSON.stringify(outcomes));
@@ -265,6 +265,78 @@ describeWithMongo('votes on a real MongoDB', () => {
       expect(tally.live).toBe(!tab.removedAt);
     }
     console.log('vote vs removal outcomes', JSON.stringify(outcomes));
+  });
+
+  it('a reader recounting during a write never erases the writer’s mark; a writer that dies leaves it, and reads keep counting right (fix round 1, MEDIUM 1)', async () => {
+    // The reviewer's probe sequence, on a belief of its own.
+    const profileId = new Types.ObjectId();
+    await m.BeliefTab.collection.insertOne({
+      profileId,
+      tabId: 'tab_probe',
+      title: 'Synthetic probe',
+      order: 0,
+      createdAt: new Date(),
+    });
+    for (const u of ['user_p1', 'user_p2']) {
+      await m.BeliefVote.collection.insertOne({
+        profileId,
+        tabId: 'tab_probe',
+        voterUserId: u,
+        value: 'agree',
+        textSeq: 0,
+        voterTier: 'member',
+        historySeq: 1,
+      });
+    }
+    await tallies.settle(
+      'tab_probe',
+      await tallies.touch('tab_probe', profileId),
+    );
+    // Writer W marks the tally, as VotesService.cast does first.
+    await tallies.touch('tab_probe', profileId);
+    // A reader (a page read) recounts meanwhile.
+    await tallies.forPage(profileId, [{ tabId: 'tab_probe', textSeq: 0 }]);
+    // W confirms a third agree vote, then dies before settling.
+    await m.BeliefVote.collection.insertOne({
+      profileId,
+      tabId: 'tab_probe',
+      voterUserId: 'user_p3',
+      value: 'agree',
+      textSeq: 0,
+      voterTier: 'member',
+      historySeq: 1,
+    });
+    const shown = await tallies.forPage(profileId, [
+      { tabId: 'tab_probe', textSeq: 0 },
+    ]);
+    const actual = await m.BeliefVote.countDocuments({
+      tabId: 'tab_probe',
+      value: 'agree',
+    });
+    const marked = await m.VoteTally.countDocuments({
+      tabId: 'tab_probe',
+      'writers.at': { $exists: true },
+    });
+    console.log(
+      'probe: shown',
+      shown.get('tab_probe')?.agreeMember,
+      'actual',
+      actual,
+      'marked',
+      marked,
+    );
+    expect(shown.get('tab_probe')?.agreeMember).toBe(3);
+    expect(marked).toBe(1);
+    // Once the dead writer's mark is old enough, the repair drops it and
+    // saves the true count.
+    await m.VoteTally.collection.updateOne(
+      { tabId: 'tab_probe' },
+      { $set: { 'writers.0.at': new Date(0), agreeMember: 0 } },
+    );
+    await tallies.repairLeftBehind();
+    expect(
+      await m.VoteTally.findOne({ tabId: 'tab_probe' }).lean(),
+    ).toMatchObject({ writers: [], agreeMember: 3 });
   });
 
   it('five clicks at once make one vote and one history entry', async () => {
@@ -451,8 +523,8 @@ describeWithMongo('votes on a real MongoDB', () => {
       'list (anonymous counted)',
     );
     await expectIndex(
-      (e) => e.model === 'VoteTally' && 'dirtySince' in e.filter,
-      'dirtySince_1',
+      (e) => e.model === 'VoteTally' && 'writers.at' in e.filter,
+      'writers.at_1',
       'left-behind repair',
     );
     await expectIndex(

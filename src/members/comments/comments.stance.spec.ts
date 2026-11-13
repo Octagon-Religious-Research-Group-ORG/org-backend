@@ -1,6 +1,11 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { harness, U } from './comments-harness.mocks-spec';
-import { STANCE_NEEDS_VOTE, STANCE_ONLY_ON_BELIEF } from './comments.service';
+import {
+  STANCE_EARLIER_WORDING,
+  STANCE_NEEDS_VOTE,
+  STANCE_ONLY_ON_BELIEF,
+  stanceOtherVote,
+} from './comments.service';
 
 /** "Agree and comment" / "Disagree and comment" (Chunk 10). Synthetic data. */
 describe('comment stance badges', () => {
@@ -45,6 +50,39 @@ describe('comment stance badges', () => {
     });
     await expect(refused).rejects.toBeInstanceOf(ConflictException);
     await expect(refused).rejects.toThrow(STANCE_NEEDS_VOTE);
+    expect(h.comments.docs.filter((c) => c.source === 'native')).toHaveLength(
+      0,
+    );
+  });
+
+  it('says what the saved vote is when it differs, and refuses a badge for an earlier wording (fix round 1, LOW 5)', async () => {
+    const h = harness();
+    await h.votesService.cast(await h.viewer(U.named), {
+      slug: 'open-page',
+      tabId: 'tab_a',
+      value: 'disagree',
+      baseSeq: 1,
+    });
+    const writer = await h.writer(U.named);
+    const other = h.commentsService.create(writer, {
+      slug: 'open-page',
+      tabId: 'tab_a',
+      body: 'Claims to agree.',
+      stance: 'agree',
+    });
+    await expect(other).rejects.toBeInstanceOf(ConflictException);
+    await expect(other).rejects.toThrow(stanceOtherVote('disagree'));
+    expect(stanceOtherVote('disagree')).toContain('"disagree"');
+
+    // The belief is reworded: the vote is now on an earlier wording.
+    await h.editor.editTabText(U.owner, 'tab_a', 'Reworded synthetically.', 1);
+    const earlier = h.commentsService.create(writer, {
+      slug: 'open-page',
+      tabId: 'tab_a',
+      body: 'Still disagree.',
+      stance: 'disagree',
+    });
+    await expect(earlier).rejects.toThrow(STANCE_EARLIER_WORDING);
     expect(h.comments.docs.filter((c) => c.source === 'native')).toHaveLength(
       0,
     );

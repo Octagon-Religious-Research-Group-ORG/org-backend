@@ -175,6 +175,31 @@ describe('Votes API (e2e)', () => {
       .expect(401);
   });
 
+  it('answers a withdrawal identically whether or not the page exists or may be read (fix round 1, MEDIUM 2)', async () => {
+    const answers: Array<{ status: number; body: unknown; cache: unknown }> =
+      [];
+    for (const [slug, tabId] of [
+      ['no-such-page', 'tab_a'],
+      ['hidden-page', 'tab_h'],
+      ['waiting-page', 'tab_w'],
+      ['gone-page', 'tab_x'],
+    ]) {
+      const { status, body, headers } = await call(
+        'delete',
+        '/me/votes',
+        U.named,
+      ).send({ slug, tabId });
+      answers.push({ status, body, cache: headers['cache-control'] });
+    }
+    for (const answer of answers) {
+      expect(answer).toEqual({
+        status: 200,
+        body: { withdrawn: true },
+        cache: 'private, no-store',
+      });
+    }
+  });
+
   it('lets an admin turn anonymous voting on, which counts anonymous votes at once', async () => {
     await call('get', '/admin/settings/vote-eligibility', U.named).expect(403);
     const read = await call(
@@ -233,10 +258,14 @@ describe('Votes API (e2e)', () => {
           }),
         }),
       ],
+      viewerMayComment: false,
+      viewerWriteBlock: 'sign-in',
     });
     await call('get', '/members/agreed-beliefs?after=nonsense').expect(400);
     await call('get', '/members/agreed-beliefs?after=2.0.tab_a').expect(200, {
       beliefs: [],
+      viewerMayComment: false,
+      viewerWriteBlock: 'sign-in',
     });
   });
 

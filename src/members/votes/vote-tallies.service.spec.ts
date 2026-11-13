@@ -7,6 +7,7 @@ import {
   shownCounts,
   TALLY_REPAIR_AFTER_MS,
   TALLY_REPAIRS_PER_READ,
+  WRITER_MARK_STALE_MS,
 } from './vote-tallies.service';
 
 /** Every name and text here is synthetic. */
@@ -55,7 +56,8 @@ describe('VoteTalliesService', () => {
       earlierAnon: 1,
       agreeAll: 2,
     });
-    expect(tally.dirtySince).toBeUndefined();
+    // The recount alone leaves the writer's mark; only its writer drops it.
+    expect(tally.writers).toHaveLength(1);
     expect(shownCounts(tally as never, false)).toEqual({
       agree: 1,
       disagree: 1,
@@ -89,7 +91,38 @@ describe('VoteTalliesService', () => {
     };
     await h.talliesService.recompute('tab_a');
     expect(h.tallies.docs[0].live).toBeUndefined();
-    expect(h.tallies.docs[0].dirtySince).toBeInstanceOf(Date);
+    expect(h.tallies.docs[0].writers).toHaveLength(1);
+  });
+
+  it('only the writer that set a mark removes it; a reader recount never does (fix round 1, MEDIUM 1)', async () => {
+    const h = harness();
+    h.votes.docs.push(
+      vote('tab_a', 'a', 'agree', 1, 'member'),
+      vote('tab_a', 'b', 'agree', 1, 'member'),
+    );
+    await h.talliesService.settle(
+      'tab_a',
+      await h.talliesService.touch('tab_a', ids.open),
+    );
+    expect(h.tallies.docs[0].writers).toEqual([]);
+    // A writer marks the tally, then a reader recounts before its vote lands.
+    const mark = await h.talliesService.touch('tab_a', ids.open);
+    const other = await h.talliesService.touch('tab_a', ids.open);
+    await h.talliesService.forPage(ids.open, [{ tabId: 'tab_a', textSeq: 1 }]);
+    expect(h.tallies.docs[0].writers).toHaveLength(2);
+    // The vote lands; its writer dies before settling.
+    h.votes.docs.push(vote('tab_a', 'c', 'agree', 1, 'member'));
+    // Still behind, so the next read recounts and shows 3.
+    const rows = await h.talliesService.forPage(ids.open, [
+      { tabId: 'tab_a', textSeq: 1 },
+    ]);
+    expect(rows.get('tab_a')).toMatchObject({ agreeMember: 3 });
+    expect(isBehind(rows.get('tab_a') as never)).toBe(true);
+    // Another writer settling removes only its own mark.
+    await h.talliesService.settle('tab_a', other);
+    expect(
+      (h.tallies.docs[0].writers as Array<{ id: string }>).map((w) => w.id),
+    ).toEqual([mark]);
   });
 
   it('marks a removed belief, and a missing one, as not live', async () => {
@@ -140,16 +173,28 @@ describe('VoteTalliesService', () => {
       exec: () => Promise.reject(new Error('down')),
     });
     await expect(
-      h.talliesService.settle('tab_a', ids.open),
+      h.talliesService.settle('tab_a', 'a-mark'),
     ).resolves.toBeUndefined();
+  });
+
+  it('settles with no mark when the touch itself failed: a recount only', async () => {
+    const h = harness();
+    const mark = await h.talliesService.touch('tab_a', ids.open);
+    await h.talliesService.settle('tab_a', undefined);
+    expect(h.tallies.docs[0]).toMatchObject({ rev: 2, live: true });
+    expect(
+      (h.tallies.docs[0].writers as Array<{ id: string }>).map((w) => w.id),
+    ).toEqual([mark]);
   });
 
   it('reads a page’s tallies, recounting only those behind', async () => {
     const h = harness();
     h.votes.docs.push(vote('tab_a', 'a', 'agree', 1, 'member'));
     await h.talliesService.touch('tab_a', ids.open);
-    await h.talliesService.touch('tab_b', ids.open);
-    await h.talliesService.recompute('tab_b');
+    await h.talliesService.settle(
+      'tab_b',
+      await h.talliesService.touch('tab_b', ids.open),
+    );
     const spy = jest.spyOn(h.talliesService, 'recompute');
     const rows = await h.talliesService.forPage(ids.open, [
       { tabId: 'tab_a', textSeq: 1 },
@@ -164,16 +209,18 @@ describe('VoteTalliesService', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('repairs a few left-behind tallies, oldest first', async () => {
+  it('recounts a few left-behind tallies, and drops only marks older than any live writer', async () => {
     const h = harness();
-    const old = new Date(Date.now() - TALLY_REPAIR_AFTER_MS - 1);
+    const now = Date.now();
+    const slow = new Date(now - TALLY_REPAIR_AFTER_MS - 1);
+    const dead = new Date(now - WRITER_MARK_STALE_MS - 1);
     for (let i = 0; i < TALLY_REPAIRS_PER_READ + 2; i++) {
       h.tallies.docs.push({
         _id: new Types.ObjectId(),
         tabId: `t${i}`,
         profileId: ids.open,
         rev: 1,
-        dirtySince: new Date(old.getTime() - i),
+        writers: [{ id: `w${i}`, at: i === 0 ? dead : slow }],
       });
     }
     h.tallies.docs.push({
@@ -181,15 +228,21 @@ describe('VoteTalliesService', () => {
       tabId: 'fresh',
       profileId: ids.open,
       rev: 1,
-      dirtySince: new Date(),
+      writers: [{ id: 'w-fresh', at: new Date() }],
     });
     await h.talliesService.repairLeftBehind();
-    const repaired = h.tallies.docs.filter((t) => t.dirtySince === undefined);
-    expect(repaired).toHaveLength(TALLY_REPAIRS_PER_READ);
-    expect(repaired.map((t) => t.tabId)).not.toContain('t0');
-    expect(
-      h.tallies.docs.find((t) => t.tabId === 'fresh')!.dirtySince,
-    ).toBeInstanceOf(Date);
+    const counted = h.tallies.docs.filter((t) => t.live !== undefined);
+    expect(counted).toHaveLength(TALLY_REPAIRS_PER_READ);
+    // The dead writer's mark is gone; a slow one's stays for its writer.
+    const t0 = h.tallies.docs.find((t) => t.tabId === 't0')!;
+    expect(t0.writers).toEqual([]);
+    expect(t0.live).toBe(false);
+    expect(h.tallies.docs.find((t) => t.tabId === 't1')!.writers).toHaveLength(
+      1,
+    );
+    const fresh = h.tallies.docs.find((t) => t.tabId === 'fresh')!;
+    expect(fresh.live).toBeUndefined();
+    expect(fresh.writers).toHaveLength(1);
   });
 
   it('names the sort field and what is behind', () => {
@@ -197,9 +250,10 @@ describe('VoteTalliesService', () => {
     expect(agreeField(false)).toBe('agreeMember');
     expect(isBehind({ live: true } as never)).toBe(false);
     expect(isBehind({} as never)).toBe(true);
-    expect(isBehind({ live: true, dirtySince: new Date() } as never)).toBe(
-      true,
-    );
+    expect(isBehind({ live: true, writers: [] } as never)).toBe(false);
+    expect(
+      isBehind({ live: true, writers: [{ id: 'w', at: new Date() }] } as never),
+    ).toBe(true);
   });
 });
 

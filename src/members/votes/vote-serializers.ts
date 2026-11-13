@@ -1,5 +1,6 @@
 import type { VoteValue } from '../../social/schemas/belief-vote.schema';
 import type { ParagraphView } from '../profile-serializers';
+import type { WriteBlock } from '../comments/comment-writers';
 import type { VoteBlock } from './voters.service';
 
 /**
@@ -45,4 +46,10 @@ export interface AgreedPage {
   beliefs: AgreedBelief[];
   /** Pass as `after` for the next page; absent on the last one. */
   nextAfter?: string;
+  /**
+   * The reader may comment on the listed beliefs (Chunk 9's rule; every
+   * listed page is one they may read in full), and why not when not.
+   */
+  viewerMayComment: boolean;
+  viewerWriteBlock?: WriteBlock;
 }
