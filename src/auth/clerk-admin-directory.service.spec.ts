@@ -5,7 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/backend';
-import { CLERK_TIMEOUT_MS } from './clerk-user-info.service';
+import { CLERK_TIMEOUT_MS, ClerkTimedOut } from './clerk-user-info.service';
 import {
   ALREADY_INVITED,
   CLERK_PAGE,
@@ -300,9 +300,8 @@ describe('usersByEmail (MEDIUM-2)', () => {
       .usersByEmail(['a@example.org'])
       .catch((e: unknown) => e);
     await jest.advanceTimersByTimeAsync(CLERK_TIMEOUT_MS + 1);
-    expect(await result).toEqual(
-      new ServiceUnavailableException(CLERK_UNAVAILABLE),
-    );
+    // An unknown outcome stays one (review round 3).
+    expect(await result).toBeInstanceOf(ClerkTimedOut);
     jest.useRealTimers();
   });
 

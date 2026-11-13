@@ -8,6 +8,7 @@ import {
   ROLE_AUDIT_INCOMPLETE_MESSAGE,
   RolesService,
 } from './roles.service';
+import { ClerkTimedOut } from './clerk-user-info.service';
 
 function setup(currentRole?: string) {
   const clerk = {
@@ -37,6 +38,21 @@ const entry = {
 };
 
 describe('RolesService.setRole', () => {
+  it('logs a Clerk timeout as an unknown outcome, never as failed (review round 3)', async () => {
+    const { service, clerk, log } = setup('admin');
+    clerk.setRole.mockRejectedValueOnce(new ClerkTimedOut());
+    await expect(service.setRole(change)).rejects.toBeInstanceOf(ClerkTimedOut);
+    const actions = log.record.mock.calls.map(
+      (call) => (call as unknown as [{ action: string }])[0].action,
+    );
+    expect(actions).toEqual(['role.change.requested', 'role.change.timeout']);
+    expect(log.record).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        details: { from: 'admin', to: 'moderator', outcome: 'unknown' },
+      }),
+    );
+  });
+
   it('says the role changed when only the final audit entry fails', async () => {
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     const { service, clerk, log } = setup();

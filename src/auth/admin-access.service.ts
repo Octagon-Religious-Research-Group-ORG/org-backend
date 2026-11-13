@@ -27,6 +27,12 @@ export const MAX_REMEMBERED_READ_ANSWERS = 2_000;
  * client has no timeout, so without this a hung request would hold everyone
  * using that token.
  */
+/**
+ * Clock difference allowed between server instances when comparing a role
+ * read with a revocation (review round 3).
+ */
+export const ROLE_CLOCK_SKEW_MS = 5_000;
+
 export const MAX_SHARED_READ_LOOKUP_MS = 10_000;
 
 /**
@@ -49,7 +55,7 @@ export class AdminAccessService {
   >();
   private readonly readLookups = new Map<
     string,
-    { startedAt: number; answer: Promise<boolean> }
+    { startedAt: number; answer: Promise<boolean>; userId: string }
   >();
 
   constructor(
@@ -172,9 +178,10 @@ export class AdminAccessService {
     }
     const lookup = {
       startedAt: Date.now(),
+      userId: authProviderId,
       answer: this.lookUpAdminForRead(authProviderId),
     };
-    this.shareReadLookup(tokenHash, authProviderId, lookup);
+    this.shareReadLookup(tokenHash, lookup);
     return lookup.answer;
   }
 
@@ -214,6 +221,11 @@ export class AdminAccessService {
     for (const [tokenHash, answer] of this.readAnswers) {
       if (answer.userId === userId) this.readAnswers.delete(tokenHash);
     }
+    // A lookup already under way read Clerk before the demotion: dropped, so
+    // its answer is handed to those already waiting and never remembered.
+    for (const [tokenHash, lookup] of this.readLookups) {
+      if (lookup.userId === userId) this.readLookups.delete(tokenHash);
+    }
     await this.profileModel
       .updateOne(
         { authProviderId: userId },
@@ -221,7 +233,12 @@ export class AdminAccessService {
           $unset: { authRoleCheckedAt: 1, authEmailTokenHash: 1 },
           // A sync whose Clerk read began before this moment cannot make its
           // answer count afterwards, whenever it writes.
-          $set: { isAdmin: false, roleRevokedAt: new Date() },
+          // Stamped a little ahead, so a server whose clock runs slightly
+          // behind cannot date a stale read after it either.
+          $set: {
+            isAdmin: false,
+            roleRevokedAt: new Date(Date.now() + ROLE_CLOCK_SKEW_MS),
+          },
         },
       )
       .exec();
@@ -240,8 +257,7 @@ export class AdminAccessService {
 
   private shareReadLookup(
     tokenHash: string,
-    userId: string,
-    lookup: { startedAt: number; answer: Promise<boolean> },
+    lookup: { startedAt: number; answer: Promise<boolean>; userId: string },
   ) {
     // A hung lookup never settles, so the list needs its own bound.
     if (this.readLookups.size >= MAX_REMEMBERED_READ_ANSWERS) {
@@ -256,7 +272,7 @@ export class AdminAccessService {
       (isAdmin) => {
         if (!isCurrent()) return;
         this.readLookups.delete(tokenHash);
-        this.rememberReadAnswer(tokenHash, userId, isAdmin);
+        this.rememberReadAnswer(tokenHash, lookup.userId, isAdmin);
       },
       () => {
         if (isCurrent()) this.readLookups.delete(tokenHash);

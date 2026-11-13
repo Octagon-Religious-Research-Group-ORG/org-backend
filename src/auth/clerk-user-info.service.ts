@@ -9,14 +9,28 @@ import type { ClerkClient } from '@clerk/backend';
 import { type MemberRole, parseRole } from './roles';
 
 /**
- * Longest wait for one Clerk call (Chunk 12, review round 2). Clerk's client
- * has no timeout of its own; past this the caller gets a 503, so work that a
- * caller stopped waiting for still settles soon, well inside the role lock's
- * stale window.
+ * Longest wait for one Clerk call (Chunk 12). Clerk's client has no timeout
+ * of its own, and nothing can abort a request already sent: past this the
+ * caller stops WAITING, nothing more.
  */
 export const CLERK_TIMEOUT_MS = 10_000;
 
-/** `work`, or a rejection after `ms`; the timer never outlives it. */
+export const CLERK_TIMED_OUT =
+  'The sign-in service did not answer in time, so the outcome is unknown.';
+
+/**
+ * Clerk did not answer in time (review round 3). The request may still be
+ * processed, so for a WRITE this is an UNKNOWN outcome, never a failure: every
+ * layer passes it through unchanged, so the caller can tell. A 503 for anyone
+ * who does not look closer.
+ */
+export class ClerkTimedOut extends ServiceUnavailableException {
+  constructor() {
+    super(CLERK_TIMED_OUT);
+  }
+}
+
+/** `work`, or a {@link ClerkTimedOut} after `ms`; the timer never outlives it. */
 export async function withClerkTimeout<T>(
   work: Promise<T>,
   ms = CLERK_TIMEOUT_MS,
@@ -26,10 +40,7 @@ export async function withClerkTimeout<T>(
     return await Promise.race([
       work,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error('Clerk did not answer in time.')),
-          ms,
-        );
+        timer = setTimeout(() => reject(new ClerkTimedOut()), ms);
       }),
     ]);
   } finally {
@@ -107,6 +118,7 @@ export class ClerkUserInfoService {
   }
 
   private translate(error: unknown) {
+    if (error instanceof ClerkTimedOut) return error;
     if (this.isNotFound(error)) {
       return new UnauthorizedException('The member profile was rejected.');
     }

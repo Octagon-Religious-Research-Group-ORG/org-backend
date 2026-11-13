@@ -5,6 +5,7 @@ import {
   MAX_REMEMBERED_READ_ANSWERS,
   MAX_SHARED_READ_LOOKUP_MS,
   ROLE_CACHE_MAX_AGE_MS,
+  ROLE_CLOCK_SKEW_MS,
 } from './admin-access.service';
 import type { AuthenticatedRequest } from './auth.types';
 import { createHash } from 'node:crypto';
@@ -764,6 +765,40 @@ describe('role changes (Chunk 12, review HIGH-1 / MEDIUM-2)', () => {
     expect(service.isAllowlisted('list@example.test', false)).toBe(false);
     expect(service.isAllowlisted(undefined, true)).toBe(false);
     expect(service.isAllowlisted('x@example.test', true)).toBe(false);
+  });
+
+  it('never remembers a lookup that was under way when the role was removed (round 3)', async () => {
+    const { service, clerk } = setup({ role: 'admin' });
+    let answer: (value: unknown) => void = () => undefined;
+    clerk.getIdentity.mockReturnValueOnce(
+      new Promise((resolve) => (answer = resolve)),
+    );
+    const inFlight = service.isAdminForRead(request());
+    // Another account's demotion leaves this lookup alone...
+    await service.forgetRole('user_other');
+    // ...this account's drops it.
+    await service.forgetRole('user_member');
+    // Clerk answers with what it read before the demotion.
+    answer({ role: 'admin' });
+    await expect(inFlight).resolves.toBe(true);
+    clerk.getIdentity.mockResolvedValue({});
+    // Not remembered: the next read asks Clerk again.
+    await expect(service.isAdminForRead(request())).resolves.toBe(false);
+  });
+
+  it('stamps the revocation a little ahead, for clocks that differ (round 3)', async () => {
+    const { service, model } = setup({});
+    const before = Date.now();
+    await service.forgetRole('user_member');
+    const update = (
+      model.updateOne.mock.calls[0] as unknown as [
+        unknown,
+        { $set: { roleRevokedAt: Date } },
+      ]
+    )[1];
+    expect(update.$set.roleRevokedAt.getTime()).toBeGreaterThanOrEqual(
+      before + ROLE_CLOCK_SKEW_MS,
+    );
   });
 
   it('forgets a demoted account’s cached role: its profile and the read answers', async () => {

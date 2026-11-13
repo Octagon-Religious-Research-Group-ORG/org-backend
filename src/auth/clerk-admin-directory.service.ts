@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
-import { withClerkTimeout } from './clerk-user-info.service';
+import { ClerkTimedOut, withClerkTimeout } from './clerk-user-info.service';
 import { type MemberRole, parseRole } from './roles';
 
 /** Users read per Clerk request (Clerk's maximum page). */
@@ -242,6 +242,8 @@ export function holderView(user: ClerkUserRow): {
 
 /** Clerk's answer, as the admin should read it; never Clerk's raw text. */
 export function translate(error: unknown, mode: ClerkCallMode) {
+  // An unknown outcome stays one (review round 3).
+  if (error instanceof ClerkTimedOut) return error;
   const status =
     typeof error === 'object' && error !== null
       ? (error as { status?: unknown }).status

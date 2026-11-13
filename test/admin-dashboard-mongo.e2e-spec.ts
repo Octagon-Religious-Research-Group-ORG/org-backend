@@ -8,6 +8,7 @@
 import { ConflictException } from '@nestjs/common';
 import mongoose, { type Model, Types } from 'mongoose';
 import { AdminInboxService } from '../src/admin-inbox/admin-inbox.service';
+import { ClerkTimedOut } from '../src/auth/clerk-user-info.service';
 import { MANAGED_SCHEMAS } from '../src/db/managed-schemas';
 import { AdminLogService } from '../src/members/admin/admin-log.service';
 import {
@@ -19,11 +20,10 @@ import {
   AdminRolesService,
   NO_LONGER_ADMIN,
   OWN_PROMOTION,
-  CLERK_TOO_SLOW,
+  DEMOTION_UNKNOWN,
   ROLE_CHANGE_BUSY,
   ROLE_CHANGE_LOST,
   ROLE_LOCK_KEY,
-  ROLE_TIMING,
 } from '../src/members/admin/admin-roles.service';
 import { EamRequestsService } from '../src/members/admin/eam-requests.service';
 import { MembersService } from '../src/members/members.service';
@@ -305,6 +305,8 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     }> = [];
     const revoked: string[] = [];
     const events: string[] = [];
+    // Ids are never reused, like Clerk's.
+    let created = 0;
     const log = new ModerationLogService(m.ModerationLogEntry);
     const service = new AdminRolesService(
       { getOrThrow: () => 'https://org.example' } as never,
@@ -319,7 +321,7 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
         },
         invite: (email: string, role: string | null) => {
           const invitation = {
-            invitationId: `inv_${pending.length + revoked.length + 1}`,
+            invitationId: `inv_${(created += 1)}`,
             email,
             ...(role ? { role } : {}),
             createdAt: new Date().toISOString(),
@@ -343,14 +345,20 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
           Promise.resolve(roles.get(id) ? { role: roles.get(id) } : {}),
       } as never,
       {
-        setRole: async (change: {
-          targetUserId: string;
-          role: string | null;
-        }) => {
-          // A slow Clerk: the write lands only when the gate opens.
-          await gates.setRole;
-          roles.set(change.targetUserId, change.role ?? undefined);
-          events.push(`landed:${change.targetUserId}`);
+        setRole: (change: { targetUserId: string; role: string | null }) => {
+          const apply = () => {
+            roles.set(change.targetUserId, change.role ?? undefined);
+            events.push(`landed:${change.targetUserId}`);
+          };
+          const gate = gates.setRole;
+          if (!gate) {
+            apply();
+            return Promise.resolve();
+          }
+          // A slow Clerk: the caller's timeout fires (what RolesService
+          // passes on), and the write still lands when the gate opens.
+          void gate.then(apply);
+          return Promise.reject(new ClerkTimedOut());
         },
       } as never,
       log,
@@ -418,44 +426,62 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
     expect(world.roles.get('user_B')).toBe('admin');
   });
 
-  it('keeps the lock while a timed-out Clerk write may still land (round 2, the probe)', async () => {
+  it('keeps the lock after a write with an unknown outcome, until it goes stale (round 3)', async () => {
     await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
-    const saved = { ...ROLE_TIMING };
-    ROLE_TIMING.writeMs = 200;
-    try {
-      const world = clerkWorld(['user_A', 'user_B']);
-      let land: () => void = () => undefined;
-      world.gates.setRole = new Promise<void>((resolve) => (land = resolve));
-      // A demotes B; Clerk is slow, so A gives up waiting.
-      await expect(
-        world.service.demote('user_A', 'user_B', 'r'),
-      ).rejects.toThrow(CLERK_TOO_SLOW);
-      world.gates.setRole = undefined;
-      // B, still an admin in Clerk for now, tries to demote A: refused,
-      // because A's write may still land.
-      await expect(
-        world.service.demote('user_B', 'user_A', 'r'),
-      ).rejects.toThrow(ROLE_CHANGE_BUSY);
-      expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(1);
-      // A's write lands; only then is the lock freed.
-      land();
-      for (let i = 0; i < 50; i++) {
-        if ((await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })) === 0) {
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(0);
-      expect(world.events).toEqual(['landed:user_B']);
-      // B is no longer an admin, so it cannot demote A now either.
-      await expect(
-        world.service.demote('user_B', 'user_A', 'r'),
-      ).rejects.toThrow(NO_LONGER_ADMIN);
-      expect(world.adminsLeft()).toBe(1);
-      expect(world.roles.get('user_A')).toBe('admin');
-    } finally {
-      Object.assign(ROLE_TIMING, saved);
-    }
+    const world = clerkWorld(['user_A', 'user_B']);
+    let land: () => void = () => undefined;
+    world.gates.setRole = new Promise<void>((resolve) => (land = resolve));
+    // A demotes B; Clerk times out, so the outcome is unknown.
+    await expect(world.service.demote('user_A', 'user_B', 'r')).rejects.toThrow(
+      DEMOTION_UNKNOWN,
+    );
+    world.gates.setRole = undefined;
+    // B, still an admin in Clerk for now, tries to demote A: refused.
+    await expect(world.service.demote('user_B', 'user_A', 'r')).rejects.toThrow(
+      ROLE_CHANGE_BUSY,
+    );
+    // A's write lands late; the lock is still held, not released early.
+    land();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(world.events).toEqual(['landed:user_B']);
+    expect(await m.OrgSetting.countDocuments({ key: ROLE_LOCK_KEY })).toBe(1);
+    // Five minutes later (the lock aged), B is no longer an admin.
+    await m.OrgSetting.collection.updateOne(
+      { key: ROLE_LOCK_KEY },
+      { $set: { updatedAt: new Date(0) } },
+    );
+    await expect(world.service.demote('user_B', 'user_A', 'r')).rejects.toThrow(
+      NO_LONGER_ADMIN,
+    );
+    expect(world.adminsLeft()).toBe(1);
+    expect(world.roles.get('user_A')).toBe('admin');
+  });
+
+  it('leaves another admin’s later invitation to the same address alone (round 3, LOW-1)', async () => {
+    await m.OrgSetting.deleteMany({ key: ROLE_LOCK_KEY });
+    const world = clerkWorld(['user_old', 'user_new']);
+    // The old admin invited x@ long ago; it expired (gone from Clerk).
+    await world.service.invite(
+      'user_old',
+      'x@example.test',
+      'admin',
+      undefined,
+    );
+    world.pending.splice(0, world.pending.length);
+    // Another admin invites the same address now.
+    const fresh = await world.service.invite(
+      'user_new',
+      'x@example.test',
+      'admin',
+      undefined,
+    );
+    await expect(
+      world.service.demote('user_new', 'user_old', 'r'),
+    ).resolves.toEqual({ role: null });
+    expect(world.revoked).toEqual([]);
+    expect(world.pending.map((p) => p.invitationId)).toEqual([
+      fresh.invitationId,
+    ]);
   });
 
   it('runs one role change at a time, and frees the lock', async () => {

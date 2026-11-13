@@ -5,7 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ModerationLogService } from '../moderation/moderation-log.service';
-import { ClerkUserInfoService } from './clerk-user-info.service';
+import { ClerkTimedOut, ClerkUserInfoService } from './clerk-user-info.service';
 import type { MemberRole } from './roles';
 
 export interface RoleChange {
@@ -67,6 +67,15 @@ export class RolesService {
     try {
       await this.clerk.setRole(change.targetUserId, change.role);
     } catch (error) {
+      if (error instanceof ClerkTimedOut) {
+        // The request may still land: the log must not say "failed".
+        await this.log.record({
+          ...entry,
+          action: 'role.change.timeout',
+          details: { ...details, outcome: 'unknown' },
+        });
+        throw error;
+      }
       await this.log.record({
         ...entry,
         action: 'role.change.failed',
