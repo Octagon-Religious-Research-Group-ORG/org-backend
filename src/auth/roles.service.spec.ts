@@ -8,7 +8,8 @@ import {
   ROLE_AUDIT_INCOMPLETE_MESSAGE,
   RolesService,
 } from './roles.service';
-import { ClerkTimedOut } from './clerk-user-info.service';
+import { ClerkOutcomeUnknown, ClerkTimedOut } from './clerk-user-info.service';
+import { settle, settledAs } from './write-outcome';
 
 function setup(currentRole?: string) {
   const clerk = {
@@ -38,6 +39,47 @@ const entry = {
 };
 
 describe('RolesService.setRole', () => {
+  it('treats any unmarked error from the write as unknown, and says so (round 5)', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const { service, clerk, log } = setup('admin');
+    const onUnknown = jest.fn(() => {
+      throw new Error('hook broke');
+    });
+    clerk.setRole.mockRejectedValueOnce(new RangeError('Invalid time value'));
+    await expect(
+      service.setRole({ ...change, onUnknown }),
+    ).rejects.toBeInstanceOf(ClerkOutcomeUnknown);
+    expect(onUnknown).toHaveBeenCalled();
+    // A throwing hook neither replaces the outcome nor skips the entry.
+    expect(log.record).toHaveBeenLastCalledWith(
+      expect.objectContaining({ action: 'role.change.timeout' }),
+    );
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('hook broke'));
+    logged.mockRestore();
+  });
+
+  it('marks every failure before the send as not sent', async () => {
+    const { service, clerk, log } = setup();
+    log.record.mockRejectedValueOnce(new Error('requested entry failed'));
+    const error = await service.setRole(change).catch((e: unknown) => e);
+    expect(settledAs(error)).toBe('not-sent');
+    expect(clerk.setRole).not.toHaveBeenCalled();
+    clerk.getIdentity.mockRejectedValueOnce('raw read failure');
+    const raw = await service.setRole(change).catch((e: unknown) => e);
+    expect(settledAs(raw)).toBe('not-sent');
+  });
+
+  it('marks a change whose final entry failed as applied', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const { service, log } = setup();
+    log.record
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('db down'));
+    const error = await service.setRole(change).catch((e: unknown) => e);
+    expect(settledAs(error)).toBe('applied');
+    logged.mockRestore();
+  });
+
   it('never lets a failing log write replace an unknown outcome (round 4, MEDIUM-1)', async () => {
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     const { service, clerk, log } = setup('admin');
@@ -53,7 +95,9 @@ describe('RolesService.setRole', () => {
     );
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('mongo down'));
     // A failed "failed" entry does not replace the refusal either.
-    clerk.setRole.mockRejectedValueOnce(new Error('refused'));
+    clerk.setRole.mockRejectedValueOnce(
+      settle(new Error('refused'), 'refused'),
+    );
     log.record
       .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('mongo down again'));
@@ -147,10 +191,15 @@ describe('RolesService.setRole', () => {
   });
 
   it.each([
-    ['an Error', new Error('Clerk is down'), 'Clerk is down'],
-    ['a non-Error value', 'boom', 'boom'],
+    [
+      'an Error',
+      settle(new Error('Clerk refused'), 'refused'),
+      'Clerk refused',
+    ],
+    ['a non-Error value', settle('boom', 'refused'), 'boom'],
+    ['a plain object', settle({ status: 422 }, 'refused'), '[object Object]'],
   ])(
-    'logs a failed change and rethrows %s',
+    'logs a change Clerk refused as failed, and rethrows %s',
     async (_label, thrown, message) => {
       const { service, clerk, log } = setup();
       clerk.setRole.mockRejectedValueOnce(thrown);

@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
 import { type MemberRole, parseRole } from './roles';
+import { settle } from './write-outcome';
 
 /**
  * Longest wait for one Clerk call (Chunk 12). Clerk's client has no timeout
@@ -166,13 +167,20 @@ export class ClerkUserInfoService {
       // Unless Clerk definitely refused, the role may have changed.
       const unknown = unknownWriteOutcome(error);
       if (unknown) throw unknown;
+      // Definitely refused: marked, so callers may call it a failure.
       if (this.isNotFound(error)) {
-        throw new UnauthorizedException('The member profile was rejected.');
+        throw settle(
+          new UnauthorizedException('The member profile was rejected.'),
+          'refused',
+        );
       }
       const status = (error as { status: number }).status;
-      throw status === 429
-        ? new ServiceUnavailableException(CLERK_WRITE_BUSY)
-        : new BadRequestException(CLERK_WRITE_REFUSED);
+      throw settle(
+        status === 429
+          ? new ServiceUnavailableException(CLERK_WRITE_BUSY)
+          : new BadRequestException(CLERK_WRITE_REFUSED),
+        'refused',
+      );
     }
   }
 

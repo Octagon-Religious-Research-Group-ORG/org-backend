@@ -246,6 +246,20 @@ describe('uncertain Clerk writes, through the real services (reviews 3 and 4)', 
     expect(events).not.toContain('unlock');
   });
 
+  it('PA: an invitation answer the SDK hands back unread is unknown, and the lock is kept (round 5)', async () => {
+    const { service, events, client } = build();
+    // What the SDK returns for a 2xx with a charset content type: the text.
+    client.invitations.createInvitation.mockResolvedValueOnce(
+      '{"object":"invitation","id":"inv_x"}',
+    );
+    await expect(
+      service.invite(ADMIN, 'x@example.org', 'admin', undefined),
+    ).rejects.toThrow(OUTCOME_UNKNOWN);
+    expect(events).toContain('invitation.unknown');
+    expect(events).not.toContain('invitation.failed');
+    expect(events).not.toContain('unlock');
+  });
+
   it('a definite refusal is failed, and frees the lock', async () => {
     const { service, events, client } = build();
     client.users.updateUserMetadata.mockRejectedValueOnce(REFUSED);

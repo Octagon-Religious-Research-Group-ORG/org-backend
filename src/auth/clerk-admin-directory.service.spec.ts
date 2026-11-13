@@ -192,6 +192,41 @@ describe('ClerkAdminDirectoryService', () => {
       });
     });
 
+    it('lists an invitation with no usable creation time, and refuses one with no id (round 5)', async () => {
+      getInvitationList.mockResolvedValueOnce({
+        data: [
+          { id: 'inv_1', emailAddress: 'a@example.org', publicMetadata: null },
+          {
+            id: 'inv_2',
+            emailAddress: 'b@example.org',
+            publicMetadata: {},
+            createdAt: Number.NaN,
+          },
+          { id: 'inv_3', publicMetadata: {}, createdAt: CREATED },
+        ],
+      });
+      await expect(build().pendingInvitations()).resolves.toEqual({
+        complete: true,
+        invitations: [
+          { invitationId: 'inv_1', email: 'a@example.org' },
+          { invitationId: 'inv_2', email: 'b@example.org' },
+          {
+            invitationId: 'inv_3',
+            email: '',
+            createdAt: new Date(CREATED).toISOString(),
+          },
+        ],
+      });
+      getInvitationList.mockResolvedValueOnce({ data: [{ id: '' }] });
+      await expect(build().pendingInvitations()).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      getInvitationList.mockResolvedValueOnce({ data: [null] });
+      await expect(build().pendingInvitations()).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+    });
+
     it('pages through the waiting invitations, and says when it stopped short (LOW-1)', async () => {
       const full = Array.from({ length: CLERK_PAGE }, (_, i) => ({
         id: `inv_${i}`,

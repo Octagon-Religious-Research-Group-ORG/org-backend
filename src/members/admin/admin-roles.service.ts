@@ -22,6 +22,7 @@ import {
   ClerkUserInfoService,
 } from '../../auth/clerk-user-info.service';
 import { MAX_REASON_LENGTH, RolesService } from '../../auth/roles.service';
+import { settle, settledAs } from '../../auth/write-outcome';
 import { cleanMemberTitle } from '../../membership/member-text';
 import { ModerationLogService } from '../../moderation/moderation-log.service';
 import {
@@ -49,6 +50,15 @@ export const ROLE_CHANGE_DEADLINE_MS = 90_000;
  * A lock this old belongs to a change that died, or to one whose Clerk write
  * had an unknown outcome (that change never releases it). Far longer than a
  * change takes and than a Clerk request plausibly runs after we stop waiting.
+ *
+ * The window counts from the lock row's `updatedAt`. When an outcome becomes
+ * unknown it is moved to that moment; if that one update fails (logged), the
+ * window still counts from when the lock was taken, at most the change's own
+ * duration earlier (bounded by {@link ROLE_CHANGE_DEADLINE_MS} plus one Clerk
+ * timeout, about 100 s), so the lock then guards for at least ~200 s after
+ * the unknown moment instead of 300 s. Accepted (review round 5): a takeover
+ * is checked by other server instances, so an in-memory record would not
+ * help, and a second write to the same row could fail the same way.
  */
 export const ROLE_LOCK_STALE_MS = 300_000;
 /** Admin invitations expire after this many days (Clerk's default is 30). */
@@ -104,6 +114,16 @@ class LockLost extends ServiceUnavailableException {
   constructor() {
     super(ROLE_CHANGE_LOST);
   }
+}
+
+/**
+ * Whether a failed write is KNOWN not to have changed anything in Clerk (or
+ * known to have been applied), so the lock may be released: marked by the
+ * layer that knew (`write-outcome.ts`), or the fence stopped it before the
+ * send. Everything else is an unknown outcome.
+ */
+function isKnownOutcome(error: unknown): boolean {
+  return settledAs(error) !== undefined || error instanceof LockLost;
 }
 
 function isDuplicateKey(error: unknown): boolean {
@@ -276,7 +296,8 @@ export class AdminRolesService {
           onUnknown: () => change.unknown(),
         });
       } catch (error) {
-        if (!(error instanceof ClerkOutcomeUnknown)) throw error;
+        // Only a write known not to have happened is a plain failure.
+        if (isKnownOutcome(error)) throw error;
         change.unknown();
         throw new ServiceUnavailableException(OUTCOME_UNKNOWN);
       }
@@ -319,7 +340,7 @@ export class AdminRolesService {
           onUnknown: () => change.unknown(),
         });
       } catch (error) {
-        if (!(error instanceof ClerkOutcomeUnknown)) throw error;
+        if (isKnownOutcome(error)) throw error;
         change.unknown();
         // Harmless either way: it only makes the next check ask Clerk.
         await this.forgetRole(userId);
@@ -394,8 +415,12 @@ export class AdminRolesService {
           as === 'admin' ? ADMIN_INVITATION_DAYS : undefined,
         );
       } catch (error) {
-        // Marked before anything else can fail (review round 4).
-        const unknown = error instanceof ClerkOutcomeUnknown;
+        // Known only when refused or never sent; anything else (our own
+        // code after the send included) is unknown. Marked before anything
+        // else can fail.
+        const unknown = !(
+          settledAs(error) === 'refused' || error instanceof LockLost
+        );
         if (unknown) change.unknown();
         await this.recordOrReport({
           ...entry,
@@ -500,14 +525,13 @@ export class AdminRolesService {
           );
         } catch (error) {
           done = false;
-          // Lost the lock or the deadline, or an unknown outcome: stop here.
-          if (error instanceof ClerkOutcomeUnknown) unknown = true;
-          if (
-            error instanceof ClerkOutcomeUnknown ||
-            error instanceof LockLost
-          ) {
-            break;
+          // Refused: try the next. Not sent (lock, deadline, log): stop.
+          // Anything else is an unknown outcome: stop, the lock is kept.
+          if (settledAs(error) === 'refused') continue;
+          if (!(error instanceof LockLost || settledAs(error) === 'not-sent')) {
+            unknown = true;
           }
+          break;
         }
       }
     } catch (error) {
@@ -544,12 +568,20 @@ export class AdminRolesService {
       targetId: invitationId,
       reason,
     };
-    await this.log.record({ ...entry, action: 'invitation.revoke.requested' });
+    try {
+      await this.log.record({
+        ...entry,
+        action: 'invitation.revoke.requested',
+      });
+    } catch (error) {
+      throw settle(error, 'not-sent');
+    }
     try {
       await this.directory.revoke(invitationId);
     } catch (error) {
-      // Marked before anything else can fail (review round 4).
-      const unknown = error instanceof ClerkOutcomeUnknown;
+      // Known only when Clerk refused; anything else is unknown, marked
+      // before anything else can fail.
+      const unknown = settledAs(error) !== 'refused';
       if (unknown) change.unknown();
       await this.recordOrReport({
         ...entry,
@@ -558,6 +590,9 @@ export class AdminRolesService {
           : 'invitation.revoke.failed',
         details: { error: describe(error) },
       });
+      if (unknown && !(error instanceof ClerkOutcomeUnknown)) {
+        throw new ClerkOutcomeUnknown();
+      }
       throw error;
     }
     await this.log.record({ ...entry, action: 'invitation.revoke.applied' });
@@ -648,22 +683,25 @@ export class AdminRolesService {
       unknown: () => {
         if (outcomeUnknown) return;
         outcomeUnknown = true;
-        // The stale window starts now, when the outcome became unknown.
-        bump = this.settingModel
-          .updateOne(
-            { key: ROLE_LOCK_KEY, value: token },
-            { $set: { updatedAt: new Date() } },
-            { timestamps: false },
-          )
-          .exec()
-          .then(
-            () => undefined,
-            (error: unknown) => {
-              this.logger.error(
-                `Could not restart the role lock's stale window: ${describe(error)}`,
-              );
-            },
+        // The stale window starts now, when the outcome became unknown. The
+        // flag above is what keeps the lock; nothing here may throw past it.
+        const failedBump = (error: unknown) => {
+          this.logger.error(
+            `Could not restart the role lock's stale window: ${describe(error)}`,
           );
+        };
+        try {
+          bump = this.settingModel
+            .updateOne(
+              { key: ROLE_LOCK_KEY, value: token },
+              { $set: { updatedAt: new Date() } },
+              { timestamps: false },
+            )
+            .exec()
+            .then(() => undefined, failedBump);
+        } catch (error) {
+          failedBump(error);
+        }
       },
     };
     try {
@@ -749,7 +787,10 @@ export function isTheirs(
   if (sentIds.has(invitation.invitationId)) return true;
   if (invitation.role !== 'admin') return false;
   const hash = emailForLog(invitation.email).emailHash;
-  const created = new Date(invitation.createdAt).getTime();
+  // No creation time: it can match only by id.
+  const created = invitation.createdAt
+    ? new Date(invitation.createdAt).getTime()
+    : Number.NaN;
   return openWindows.some(
     (window) =>
       window.hash === hash && created >= window.from && created <= window.to,

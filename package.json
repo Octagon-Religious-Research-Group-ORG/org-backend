@@ -198,7 +198,8 @@
       "members/admin/admin-members.service.ts",
       "members/admin/admin-log.service.ts",
       "members/admin/eam-requests.service.ts",
-      "members/admin/admin.controller.ts"
+      "members/admin/admin.controller.ts",
+      "auth/write-outcome.ts"
     ],
     "coverageThreshold": {
       "global": {

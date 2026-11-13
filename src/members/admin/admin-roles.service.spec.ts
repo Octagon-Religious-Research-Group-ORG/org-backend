@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { settle } from '../../auth/write-outcome';
 import { ClerkTimedOut } from '../../auth/clerk-user-info.service';
 import {
   ADMIN_INVITATION_DAYS,
@@ -59,6 +60,7 @@ function build(
   } = {},
 ) {
   const order: string[] = [];
+  let acquired: string | undefined;
   const directory = {
     holdersOf: jest.fn(() =>
       Promise.resolve({
@@ -100,11 +102,21 @@ function build(
     }),
   };
   const settingModel = {
-    updateOne: jest.fn((filter: { value?: string }) => {
-      // Taking the lock names no token; restarting its window does.
-      order.push(filter.value === undefined ? 'lock' : 'lock-bumped');
-      return { exec: () => Promise.resolve({}) };
-    }),
+    updateOne: jest.fn(
+      (filter: { value?: string }, update: { $set: { value?: string } }) => {
+        // Taking the lock names no token; restarting its window must name
+        // the token this change took (review round 5, mutant M7d).
+        if (filter.value === undefined) {
+          acquired = update.$set.value;
+          order.push('lock');
+        } else {
+          order.push(
+            filter.value === acquired ? 'lock-bumped' : 'lock-bumped-WRONG',
+          );
+        }
+        return { exec: () => Promise.resolve({}) };
+      },
+    ),
     deleteOne: jest.fn(() => {
       order.push('unlock');
       return { exec: () => Promise.resolve({}) };
@@ -418,9 +430,165 @@ describe('AdminRolesService', () => {
       expect(settingModel.deleteOne).not.toHaveBeenCalled();
     });
 
-    it('passes a plain write failure on and frees the lock', async () => {
+    it('treats ANY unmarked error from a write as unknown, our own included (round 5)', async () => {
+      // setRole
+      const roleWrite = build();
+      roleWrite.roles.setRole.mockRejectedValueOnce(
+        new RangeError('Invalid time value'),
+      );
+      await expect(
+        roleWrite.service.promote(ADMIN, MEMBER, 'r'),
+      ).rejects.toThrow(OUTCOME_UNKNOWN);
+      expect(roleWrite.settingModel.deleteOne).not.toHaveBeenCalled();
+      // invite
+      const invite = build();
+      invite.directory.invite.mockRejectedValueOnce(
+        new RangeError('Invalid time value'),
+      );
+      await expect(
+        invite.service.invite(ADMIN, 'a@example.org', 'admin', undefined),
+      ).rejects.toThrow(OUTCOME_UNKNOWN);
+      expect(invite.log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'invitation.unknown' }),
+      );
+      expect(invite.settingModel.deleteOne).not.toHaveBeenCalled();
+      // withdrawal
+      const revoke = build();
+      revoke.directory.revoke.mockRejectedValueOnce(new TypeError('boom'));
+      await expect(
+        revoke.service.revokeInvitation(ADMIN, 'inv_1'),
+      ).rejects.toThrow(OUTCOME_UNKNOWN);
+      expect(revoke.log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'invitation.revoke.unknown' }),
+      );
+      expect(revoke.settingModel.deleteOne).not.toHaveBeenCalled();
+      // the withdrawals after a demotion
+      const after = build({ identity: { role: 'admin' } });
+      after.logModel.find.mockReturnValueOnce(
+        chain([
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+        ]),
+      );
+      after.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [{ invitationId: 'inv_a', email: 'a@example.org' }],
+        complete: true,
+      });
+      after.directory.revoke.mockRejectedValueOnce(new RangeError('x'));
+      await expect(
+        after.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_UNKNOWN,
+      });
+      expect(after.settingModel.deleteOne).not.toHaveBeenCalled();
+    });
+
+    it('releases the lock for a write known never to have been sent', async () => {
       const { service, roles, settingModel } = build();
-      roles.setRole.mockRejectedValueOnce(new Error('refused'));
+      roles.setRole.mockRejectedValueOnce(
+        settle(new Error('requested entry failed'), 'not-sent'),
+      );
+      await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
+        'requested entry failed',
+      );
+      expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      // After a demotion, a withdrawal whose "requested" entry failed was
+      // never sent: a plain warning, and the lock is released.
+      const after = build({ identity: { role: 'admin' } });
+      after.logModel.find.mockReturnValueOnce(
+        chain([
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+        ]),
+      );
+      after.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [{ invitationId: 'inv_a', email: 'a@example.org' }],
+        complete: true,
+      });
+      after.log.record.mockImplementation((entry: { action: string }) =>
+        entry.action === 'invitation.revoke.requested'
+          ? Promise.reject(new Error('mongo down'))
+          : Promise.resolve({}),
+      );
+      await expect(
+        after.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning: FOLLOW_UP_WARNING,
+      });
+      expect(after.directory.revoke).not.toHaveBeenCalled();
+      expect(after.settingModel.deleteOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('still answers unknown, and logs it, when restarting the window throws at once (round 5, LOW-1)', async () => {
+      const errorLog = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      const { service, directory, settingModel, log } = build();
+      directory.invite.mockRejectedValueOnce(new ClerkTimedOut());
+      settingModel.updateOne
+        .mockImplementationOnce(() => ({ exec: () => Promise.resolve({}) }))
+        .mockImplementationOnce(() => {
+          throw new Error('synchronous bump failure');
+        });
+      await expect(
+        service.invite(ADMIN, 'a@example.org', 'admin', undefined),
+      ).rejects.toThrow(OUTCOME_UNKNOWN);
+      expect(log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'invitation.unknown' }),
+      );
+      expect(settingModel.deleteOne).not.toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('synchronous bump failure'),
+      );
+      errorLog.mockRestore();
+    });
+
+    it('waits for a slow restart of the window before answering (mutant M12)', async () => {
+      const { service, roles, settingModel } = build();
+      roles.setRole.mockRejectedValueOnce(new ClerkTimedOut());
+      let finishBump: () => void = () => undefined;
+      settingModel.updateOne
+        .mockImplementationOnce(() => ({ exec: () => Promise.resolve({}) }))
+        .mockImplementationOnce(() => ({
+          exec: () =>
+            new Promise<object>((resolve) => (finishBump = () => resolve({}))),
+        }));
+      let settled = false;
+      const answer = service
+        .promote(ADMIN, MEMBER, 'r')
+        .catch((error: unknown) => error)
+        .finally(() => (settled = true));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(settled).toBe(false);
+      finishBump();
+      expect(await answer).toEqual(
+        new ServiceUnavailableException(OUTCOME_UNKNOWN),
+      );
+    });
+
+    it('restarts the window on the lock this change took (mutant M7d)', async () => {
+      const { service, roles, order } = build();
+      roles.setRole.mockRejectedValueOnce(new ClerkTimedOut());
+      await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
+        OUTCOME_UNKNOWN,
+      );
+      expect(order).toContain('lock-bumped');
+      expect(order).not.toContain('lock-bumped-WRONG');
+    });
+
+    it('passes a write Clerk refused on, and frees the lock', async () => {
+      const { service, roles, settingModel } = build();
+      roles.setRole.mockRejectedValueOnce(
+        settle(new Error('refused'), 'refused'),
+      );
       await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
         'refused',
       );
@@ -689,6 +857,10 @@ describe('AdminRolesService', () => {
           openWindows,
         ),
       ).toBe(false);
+      // No creation time from Clerk: it can match by id only.
+      const { createdAt: _dropped, ...undated } = invitation(0);
+      void _dropped;
+      expect(isTheirs(undated, sentIds, openWindows)).toBe(false);
     });
 
     it('never lets a failed release replace the result (LOW-5)', async () => {
@@ -821,9 +993,11 @@ describe('AdminRolesService', () => {
       const { service, roles, order, adminAccess } = build({
         identity: { role: 'admin' },
       });
-      roles.setRole.mockRejectedValueOnce(new Error('synthetic Clerk outage'));
+      roles.setRole.mockRejectedValueOnce(
+        settle(new Error('synthetic refusal'), 'refused'),
+      );
       await expect(service.demote(ADMIN, OTHER, 'r')).rejects.toThrow(
-        'synthetic Clerk outage',
+        'synthetic refusal',
       );
       expect(order.at(-1)).toBe('unlock');
       expect(adminAccess.forgetRole).not.toHaveBeenCalled();
@@ -978,7 +1152,9 @@ describe('AdminRolesService', () => {
         ],
         complete: true,
       });
-      second.directory.revoke.mockRejectedValueOnce(new Error('gone'));
+      second.directory.revoke.mockRejectedValueOnce(
+        settle(new Error('gone'), 'refused'),
+      );
       await expect(
         second.service.demote(ADMIN, OTHER, 'r'),
       ).resolves.toStrictEqual({
@@ -1106,7 +1282,9 @@ describe('AdminRolesService', () => {
 
     it('logs a failed or lost invitation and passes the refusal on', async () => {
       const { service, directory, log, settingModel } = build();
-      directory.invite.mockRejectedValueOnce(new ConflictException('dup'));
+      directory.invite.mockRejectedValueOnce(
+        settle(new ConflictException('dup'), 'refused'),
+      );
       await expect(
         service.invite(ADMIN, 'a@example.org', 'member', undefined),
       ).rejects.toThrow(ConflictException);
@@ -1116,10 +1294,14 @@ describe('AdminRolesService', () => {
           details: expect.objectContaining({ error: 'dup' }) as unknown,
         }),
       );
+      // Anything not marked as refused is an unknown outcome (round 5).
       directory.invite.mockRejectedValueOnce('raw');
       await expect(
         service.invite(ADMIN, 'a@example.org', 'member', undefined),
-      ).rejects.toBe('raw');
+      ).rejects.toThrow(OUTCOME_UNKNOWN);
+      expect(log.record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ action: 'invitation.unknown' }),
+      );
       settingModel.exists.mockReturnValueOnce({
         exec: () => Promise.resolve(null),
       } as never);
@@ -1143,7 +1325,9 @@ describe('AdminRolesService', () => {
         'invitation.revoke.applied',
         'unlock',
       ]);
-      directory.revoke.mockRejectedValueOnce(new NotFoundException('gone'));
+      directory.revoke.mockRejectedValueOnce(
+        settle(new NotFoundException('gone'), 'refused'),
+      );
       await expect(service.revokeInvitation(ADMIN, 'inv_1')).rejects.toThrow(
         NotFoundException,
       );

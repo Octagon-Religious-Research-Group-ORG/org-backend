@@ -14,6 +14,7 @@ import {
   withClerkTimeout,
 } from './clerk-user-info.service';
 import { type MemberRole, parseRole } from './roles';
+import { settle } from './write-outcome';
 
 /** Users read per Clerk request (Clerk's maximum page). */
 export const CLERK_PAGE = 100;
@@ -50,7 +51,8 @@ export interface PendingInvitation {
   email: string;
   /** The role the person gets on accepting; absent for a plain member. */
   role?: MemberRole;
-  createdAt: string;
+  /** Absent when Clerk did not say (it never stops a success). */
+  createdAt?: string;
 }
 
 /**
@@ -137,18 +139,21 @@ export class ClerkAdminDirectoryService {
     redirectUrl: string,
     expiresInDays?: number,
   ): Promise<PendingInvitation> {
-    const invitation = await this.call(
-      () =>
-        this.clerk.invitations.createInvitation({
-          emailAddress: email,
-          redirectUrl,
-          notify: true,
-          ...(role ? { publicMetadata: { role } } : {}),
-          ...(expiresInDays ? { expiresInDays } : {}),
-        }),
+    // Reading the answer is part of the call: an answer we cannot read is
+    // an unknown outcome, never a failure (review round 5).
+    return this.call(
+      async () =>
+        this.view(
+          await this.clerk.invitations.createInvitation({
+            emailAddress: email,
+            redirectUrl,
+            notify: true,
+            ...(role ? { publicMetadata: { role } } : {}),
+            ...(expiresInDays ? { expiresInDays } : {}),
+          }),
+        ),
       'invite',
     );
-    return this.view(invitation);
   }
 
   /**
@@ -162,16 +167,18 @@ export class ClerkAdminDirectoryService {
   }> {
     const invitations: PendingInvitation[] = [];
     for (let page = 0; page < MAX_INVITATION_PAGES; page += 1) {
-      const { data } = await this.call(() =>
-        this.clerk.invitations.getInvitationList({
+      // Reading the answer is part of the call, as for invitations.
+      const shown = await this.call(async () => {
+        const { data } = await this.clerk.invitations.getInvitationList({
           status: 'pending',
           orderBy: '-created_at',
           limit: CLERK_PAGE,
           offset: page * CLERK_PAGE,
-        }),
-      );
-      invitations.push(...data.map((invitation) => this.view(invitation)));
-      if (data.length < CLERK_PAGE) return { invitations, complete: true };
+        });
+        return data.map((invitation) => this.view(invitation));
+      });
+      invitations.push(...shown);
+      if (shown.length < CLERK_PAGE) return { invitations, complete: true };
     }
     return { invitations, complete: false };
   }
@@ -184,18 +191,32 @@ export class ClerkAdminDirectoryService {
     );
   }
 
-  private view(invitation: {
-    id: string;
-    emailAddress: string;
-    publicMetadata: Record<string, unknown> | null;
-    createdAt: number;
-  }): PendingInvitation {
-    const role = parseRole(invitation.publicMetadata);
+  /**
+   * An invitation as the dashboard shows it. Without an id there is nothing
+   * to show or withdraw, so that throws; a missing or invalid creation time
+   * is simply left out (review round 5: it must not turn a success into an
+   * error).
+   */
+  private view(invitation: unknown): PendingInvitation {
+    const row = (invitation ?? {}) as {
+      id?: unknown;
+      emailAddress?: unknown;
+      publicMetadata?: unknown;
+      createdAt?: unknown;
+    };
+    if (typeof row.id !== 'string' || row.id === '') {
+      throw new Error('Clerk answered without an invitation id.');
+    }
+    const role = parseRole(row.publicMetadata);
+    const created =
+      typeof row.createdAt === 'number' ? new Date(row.createdAt) : undefined;
     return {
-      invitationId: invitation.id,
-      email: invitation.emailAddress,
+      invitationId: row.id,
+      email: typeof row.emailAddress === 'string' ? row.emailAddress : '',
       ...(role ? { role } : {}),
-      createdAt: new Date(invitation.createdAt).toISOString(),
+      ...(created && !Number.isNaN(created.getTime())
+        ? { createdAt: created.toISOString() }
+        : {}),
     };
   }
 
@@ -272,18 +293,24 @@ export function translate(error: unknown, mode: ClerkCallMode) {
         )
       : [];
   const refused = status === 400 || status === 404 || status === 422;
+  // Past this point a write was definitely refused: marked so (round 5).
   if (mode === 'revoke' && refused) {
-    return new NotFoundException(INVITATION_NOT_FOUND);
+    return settle(new NotFoundException(INVITATION_NOT_FOUND), 'refused');
   }
   if (mode === 'invite') {
     if (codes.some((code) => /duplicate|exists|already/i.test(code))) {
-      return new ConflictException(ALREADY_INVITED);
+      return settle(new ConflictException(ALREADY_INVITED), 'refused');
     }
-    if (refused) return new BadRequestException(INVITATION_REFUSED);
+    if (refused) {
+      return settle(new BadRequestException(INVITATION_REFUSED), 'refused');
+    }
   }
   if (mode !== 'read') {
     // Refused for another reason (401/403/409/429): nothing was changed.
-    return new ServiceUnavailableException(CLERK_WRITE_REFUSED_HERE);
+    return settle(
+      new ServiceUnavailableException(CLERK_WRITE_REFUSED_HERE),
+      'refused',
+    );
   }
   return new ServiceUnavailableException(CLERK_UNAVAILABLE);
 }

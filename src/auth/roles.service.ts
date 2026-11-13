@@ -9,6 +9,7 @@ import {
   ClerkOutcomeUnknown,
   ClerkUserInfoService,
 } from './clerk-user-info.service';
+import { settle, settledAs } from './write-outcome';
 import type { MemberRole } from './roles';
 
 export interface RoleChange {
@@ -47,50 +48,46 @@ export class RolesService {
     private readonly log: ModerationLogService,
   ) {}
 
+  /**
+   * Every error it throws says what is known (`write-outcome.ts`): marked
+   * `not-sent` before the request, `refused` when Clerk definitely refused,
+   * `applied` when only the final audit entry failed. ANY other error is an
+   * unknown outcome, thrown as a {@link ClerkOutcomeUnknown} (review round 5).
+   */
   async setRole(change: RoleChange): Promise<void> {
-    const reason = change.reason.trim();
-    if (!reason) {
-      throw new BadRequestException('A role change needs a reason.');
-    }
-    if (reason.length > MAX_REASON_LENGTH) {
-      throw new BadRequestException(
-        `The reason can be at most ${MAX_REASON_LENGTH} characters.`,
-      );
-    }
-
-    const current = await this.clerk.getIdentity(change.targetUserId);
-    const entry = {
-      actorUserId: change.actorUserId,
-      targetType: 'user',
-      targetId: change.targetUserId,
-      reason,
-    };
-    const details = { from: current.role ?? null, to: change.role };
-
-    await this.log.record({
-      ...entry,
-      action: 'role.change.requested',
-      details,
-    });
+    const { entry, details } = await this.beforeSending(change);
     try {
       await this.clerk.setRole(change.targetUserId, change.role);
     } catch (error) {
-      const unknown = error instanceof ClerkOutcomeUnknown;
-      if (unknown) change.onUnknown?.();
-      // Neither entry may replace what happened: if the log write fails, it
-      // is reported here and the original outcome is what the caller gets.
+      if (settledAs(error) === 'refused') {
+        await this.recordOrReport({
+          ...entry,
+          action: 'role.change.failed',
+          details: {
+            ...details,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        throw error;
+      }
+      // Anything else: the role may have changed. The caller hears it first.
+      try {
+        change.onUnknown?.();
+      } catch (hookError) {
+        this.logger.error(
+          `Could not mark a role change unknown: ${String(hookError)}`,
+        );
+      }
+      // The request may still land: the log must not say "failed", and a
+      // failing log write must not replace the outcome.
       await this.recordOrReport({
         ...entry,
-        // The request may still land: the log must not say "failed".
-        action: unknown ? 'role.change.timeout' : 'role.change.failed',
-        details: unknown
-          ? { ...details, outcome: 'unknown' }
-          : {
-              ...details,
-              error: error instanceof Error ? error.message : String(error),
-            },
+        action: 'role.change.timeout',
+        details: { ...details, outcome: 'unknown' },
       });
-      throw error;
+      throw error instanceof ClerkOutcomeUnknown
+        ? error
+        : new ClerkOutcomeUnknown();
     }
     try {
       await this.log.record({
@@ -105,7 +102,41 @@ export class RolesService {
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      throw new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE);
+      throw settle(
+        new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE),
+        'applied',
+      );
+    }
+  }
+
+  /** Checks and the `requested` entry; any failure here sent nothing. */
+  private async beforeSending(change: RoleChange) {
+    try {
+      const reason = change.reason.trim();
+      if (!reason) {
+        throw new BadRequestException('A role change needs a reason.');
+      }
+      if (reason.length > MAX_REASON_LENGTH) {
+        throw new BadRequestException(
+          `The reason can be at most ${MAX_REASON_LENGTH} characters.`,
+        );
+      }
+      const current = await this.clerk.getIdentity(change.targetUserId);
+      const entry = {
+        actorUserId: change.actorUserId,
+        targetType: 'user',
+        targetId: change.targetUserId,
+        reason,
+      };
+      const details = { from: current.role ?? null, to: change.role };
+      await this.log.record({
+        ...entry,
+        action: 'role.change.requested',
+        details,
+      });
+      return { entry, details };
+    } catch (error) {
+      throw settle(error, 'not-sent');
     }
   }
 
