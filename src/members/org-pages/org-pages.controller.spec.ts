@@ -3,6 +3,7 @@ import type { CommentWritersService } from '../comments/comment-writers';
 import type { CommentsService } from '../comments/comments.service';
 import type { MembersService } from '../members.service';
 import type { VotesService } from '../votes/votes.service';
+import type { OrgPagesService } from './org-pages.service';
 import {
   OrgPageReactionsController,
   OrgPageReactionWritesController,
@@ -36,6 +37,9 @@ function setup(view: unknown = { commentId: 'cmt_1' }) {
     writeStatus: jest.fn(() => Promise.resolve({ mayComment: true })),
     requireWriter: jest.fn(() => Promise.resolve(writer)),
   };
+  const orgPages = {
+    find: jest.fn(() => Promise.resolve({ pageId: 'about' })),
+  };
   const deps = [
     members,
     votes as unknown as VotesService,
@@ -48,7 +52,12 @@ function setup(view: unknown = { commentId: 'cmt_1' }) {
     votes,
     comments,
     reads: new OrgPageReactionsController(...deps),
-    writes: new OrgPageReactionWritesController(...deps),
+    writes: new OrgPageReactionWritesController(
+      ...deps,
+      orgPages as unknown as OrgPagesService,
+    ),
+    orgPages,
+    writers,
   };
 }
 
@@ -112,6 +121,16 @@ describe('ORG page reaction controllers (Chunk 10b)', () => {
       stance: 'agree',
     });
     expect(comments.viewOne).toHaveBeenCalledWith('cmt_1', writer);
+  });
+
+  it('looks the page up before it checks the writer (review MEDIUM 1)', async () => {
+    const { writes, orgPages, writers, comments } = setup();
+    orgPages.find.mockRejectedValueOnce(new Error('not found'));
+    await expect(
+      writes.create(request, 'nope', { body: 'Synthetic.' }),
+    ).rejects.toThrow('not found');
+    expect(writers.requireWriter).not.toHaveBeenCalled();
+    expect(comments.createOnOrgPage).not.toHaveBeenCalled();
   });
 
   it('answers a write without the comment when it cannot be shown', async () => {

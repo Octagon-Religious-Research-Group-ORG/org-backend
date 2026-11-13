@@ -14,7 +14,6 @@ import {
   COMMENT_NOT_FOUND,
   STANCE_EARLIER_VERSION,
   STANCE_NEEDS_PAGE_VOTE,
-  STANCE_ONLY_ON_BELIEF,
   stanceOtherVote,
 } from '../comments/comments.service';
 import {
@@ -22,7 +21,7 @@ import {
   NEEDS_APPROVED_PAGE_TO_VOTE,
   VERIFY_EMAIL_TO_VOTE,
 } from '../votes/voters.service';
-import { ORG_PAGE_VOTE_STALE } from '../votes/votes.service';
+import { AGREED_MAX_SCAN, ORG_PAGE_VOTE_STALE } from '../votes/votes.service';
 import {
   isOrgPageId,
   NOT_AN_ORG_PAGE,
@@ -235,7 +234,7 @@ describe('votes on ORG pages', () => {
     expect(h.voteHistory.docs).toHaveLength(4);
   });
 
-  it('never lists an ORG page among the members’ agreed beliefs', async () => {
+  it('never reads an ORG page’s tally for the agreed list, so none spends its scan (review LOW 3)', async () => {
     await cast(h, U.named, 'agree');
     await cast(h, U.owner, 'agree');
     expect(h.tallies.docs.find((t) => t.tabId === ABOUT)).toMatchObject({
@@ -243,8 +242,48 @@ describe('votes on ORG pages', () => {
       agreeMember: 2,
       textSeq: 1,
     });
+    // More ORG tallies than one request may look at, all ahead of any
+    // belief in the list's order.
+    for (let i = 0; i < AGREED_MAX_SCAN; i++) {
+      h.tallies.docs.push({
+        tabId: `org-page:synthetic-${i}`,
+        profileId: ids.orgAbout,
+        rev: 1,
+        live: true,
+        textSeq: 1,
+        agreeMember: 50,
+        agreeAnon: 0,
+        agreeAll: 50,
+        disagreeMember: 0,
+        disagreeAnon: 0,
+        earlierMember: 0,
+        earlierAnon: 0,
+        tabCreatedAt: new Date(),
+        countedAt: new Date(),
+      });
+    }
+    // One member belief at the threshold.
+    for (const voter of [U.named, U.membersOwner]) {
+      await h.votesService.cast(await h.viewer(voter), {
+        slug: 'open-page',
+        tabId: 'tab_a',
+        value: 'agree',
+        baseSeq: 1,
+      });
+    }
+    // The list query itself (private): no ORG row is ever read.
+    const service = h.votesService as unknown as {
+      candidates: (
+        field: string,
+        after: undefined,
+      ) => Promise<Array<{ tabId: string }>>;
+    };
+    const rows = await service.candidates('agreeMember', undefined);
+    expect(rows.map((row) => row.tabId)).toEqual(['tab_a']);
+
     const list = await h.votesService.agreedPage(await h.viewer(), undefined);
-    expect(list.beliefs).toEqual([]);
+    expect(list.beliefs.map((belief) => belief.tabId)).toEqual(['tab_a']);
+    expect(list).not.toHaveProperty('nextAfter');
   });
 
   it('starts the votes fresh on a new revision, shows the earlier ones apart and lets the voter confirm', async () => {
@@ -276,6 +315,28 @@ describe('votes on ORG pages', () => {
       ['cast', 1],
       ['confirm', 2],
     ]);
+  });
+
+  it('withdraws a vote even once the page is no longer published (review LOW 4)', async () => {
+    await cast(h, U.named, 'agree');
+    unpublish(h, 'about');
+    await expect(withdraw(h, U.named)).resolves.toEqual({ withdrawn: true });
+    expect(h.voteHistory.docs.at(-1)).toMatchObject({
+      tabId: ABOUT,
+      voterUserId: U.named,
+      action: 'withdraw',
+    });
+    expect(
+      h.votes.docs.find((v) => v.voterUserId === U.named),
+    ).not.toHaveProperty('value');
+    // Nothing to take back on a known page that is not stored: same answer.
+    await expect(withdraw(h, U.owner, 'legal')).resolves.toEqual({
+      withdrawn: true,
+    });
+    // Not one of ORG's pages at all: not found.
+    await expect(withdraw(h, U.named, 'tab_a')).rejects.toThrow(
+      ORG_PAGE_NOT_FOUND,
+    );
   });
 
   it('withdraws a vote on an earlier revision too', async () => {
@@ -419,7 +480,7 @@ describe('comments on ORG pages', () => {
     });
   });
 
-  it('refuses writers the belief threads refuse, and unknown pages first', async () => {
+  it('refuses writers the belief threads refuse, and answers an unknown page before the text', async () => {
     await expect(h.writer(U.nopage)).rejects.toBeInstanceOf(ForbiddenException);
     const writer = await h.writer(U.named);
     for (const pageId of ['nope', 'legal']) {
@@ -430,8 +491,12 @@ describe('comments on ORG pages', () => {
         }),
       ).rejects.toThrow(ORG_PAGE_NOT_FOUND);
     }
+    // The page is looked up before the text is checked (review MEDIUM 1).
     await expect(
       h.commentsService.createOnOrgPage(writer, { pageId: 'nope', body: ' ' }),
+    ).rejects.toThrow(ORG_PAGE_NOT_FOUND);
+    await expect(
+      h.commentsService.createOnOrgPage(writer, { pageId: 'about', body: ' ' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     await expect(orgThread(h, undefined, 'nope')).rejects.toThrow(
       ORG_PAGE_NOT_FOUND,
@@ -478,7 +543,7 @@ describe('comments on ORG pages', () => {
         parentCommentId: made.commentId,
         stance: 'disagree',
       }),
-    ).rejects.toThrow(STANCE_ONLY_ON_BELIEF);
+    ).rejects.toThrow(/a new comment on this page, not a reply/);
 
     publish(h, 'about', 2);
     await expect(

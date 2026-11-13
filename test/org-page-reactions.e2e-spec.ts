@@ -90,6 +90,24 @@ describe('ORG page votes and comments API (e2e)', () => {
     await call('delete', '/me/org-pages/nope/vote', U.named).expect(404);
   });
 
+  it('answers an unknown page with 404 before checking the writer or the text (review MEDIUM 1)', async () => {
+    const noRights = await call('post', '/me/org-pages/nope/comments', U.nopage)
+      .send({ body: 'Not yet a member.' })
+      .expect(404);
+    expect(noRights.body.message).toBe(ORG_PAGE_NOT_FOUND);
+    const blank = await call('post', '/me/org-pages/legal/comments', U.named)
+      .send({ body: ' ' })
+      .expect(404);
+    expect(blank.body.message).toBe(ORG_PAGE_NOT_FOUND);
+    // On a published page the same requests are refused for what they are.
+    await call('post', '/me/org-pages/about/comments', U.nopage)
+      .send({ body: 'Not yet a member.' })
+      .expect(403);
+    await call('post', '/me/org-pages/about/comments', U.named)
+      .send({ body: ' ' })
+      .expect(400);
+  });
+
   it('votes, comments with a stance, edits, and keeps it all off the agreed list', async () => {
     const cast = await call('put', '/me/org-pages/about/vote', U.named)
       .send({ value: 'agree', baseSeq: 1 })

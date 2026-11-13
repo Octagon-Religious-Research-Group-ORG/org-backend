@@ -42,8 +42,16 @@ import { describeFailure } from '../comments/comment-limits';
 import { NO_SUCH_BELIEF } from '../comments/comments.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
 import { OrgSettingsService } from '../org-settings.service';
-import { NOT_AN_ORG_PAGE } from '../org-pages/org-page-targets';
-import { type OrgPage, OrgPagesService } from '../org-pages/org-pages.service';
+import {
+  isOrgPageId,
+  NOT_AN_ORG_PAGE,
+  orgPageThreadId,
+} from '../org-pages/org-page-targets';
+import {
+  ORG_PAGE_NOT_FOUND,
+  type OrgPage,
+  OrgPagesService,
+} from '../org-pages/org-pages.service';
 import { decideProfileAccess, type Viewer } from '../profile-access';
 import type {
   FullProfile,
@@ -341,21 +349,26 @@ export class VotesService {
 
   /**
    * Withdraws the voter's vote on an ORG page, on the current version or an
-   * earlier one. Never depends on being allowed to vote now; withdrawing a
-   * vote that is not there is no error.
+   * earlier one. Like a belief vote, taking it back never depends on being
+   * allowed to vote now, nor on the page still being published (review
+   * LOW 4); withdrawing a vote that is not there is no error. The page's
+   * votes are added only while it is published.
    *
-   * @throws NotFoundException for a page that is unknown or not published
+   * @throws NotFoundException for an id that is not one of ORG's pages
    */
   async withdrawOnOrgPage(
     viewer: Viewer & { userId: string },
     pageId: string,
-  ): Promise<OrgPageVotes & { withdrawn: true }> {
-    const page = await this.orgPages.find(pageId);
+  ): Promise<{ withdrawn: true } & Partial<OrgPageVotes>> {
+    if (!isOrgPageId(pageId)) throw new NotFoundException(ORG_PAGE_NOT_FOUND);
+    const tabId = orgPageThreadId(pageId);
     await this.repair(viewer.userId);
-    const row = await this.row(page.tabId, viewer.userId);
+    const row = await this.row(tabId, viewer.userId);
     if (row?.value !== undefined) {
-      await this.takeBack(viewer.userId, page.tabId, row);
+      await this.takeBack(viewer.userId, tabId, row);
     }
+    const page = await this.orgPages.current(pageId);
+    if (!page) return { withdrawn: true };
     return { withdrawn: true, ...(await this.orgPageState(page, viewer)) };
   }
 

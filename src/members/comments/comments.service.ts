@@ -90,6 +90,8 @@ export const STANCE_NEEDS_VOTE =
   'You have no vote on this belief, so the comment cannot say whether you agree. Please vote, then post.';
 export const STANCE_EARLIER_WORDING =
   'Your vote is on an earlier wording of this belief. Confirm it on the current wording first, then post.';
+export const STANCE_ONLY_TOP_LEVEL_ON_PAGE =
+  'Only a new comment on this page, not a reply, can say whether you agree.';
 export const STANCE_NEEDS_PAGE_VOTE =
   'You have no vote on this page, so the comment cannot say whether you agree. Please vote, then post.';
 export const STANCE_EARLIER_VERSION =
@@ -339,8 +341,10 @@ export class CommentsService {
    *   or a parent not on it
    */
   async createOnOrgPage(writer: CommentWriter, input: NewOrgPageCommentInput) {
-    const body = cleanCommentBody(input.body);
+    // The page first, so an unknown one is the same 404 whatever the text
+    // (review MEDIUM 1).
     const page = await this.orgPages.find(input.pageId);
+    const body = cleanCommentBody(input.body);
     return this.createIn(
       writer,
       { profileId: page._id, isOwner: false, orgPage: page },
@@ -429,7 +433,9 @@ export class CommentsService {
     stance: VoteValue,
   ) {
     if (tabId === undefined || parentCommentId !== undefined) {
-      throw new BadRequestException(STANCE_ONLY_ON_BELIEF);
+      throw new BadRequestException(
+        place.orgPage ? STANCE_ONLY_TOP_LEVEL_ON_PAGE : STANCE_ONLY_ON_BELIEF,
+      );
     }
     const vote = (await this.voteModel
       .findOne({ tabId, voterUserId: userId, value: { $exists: true } })

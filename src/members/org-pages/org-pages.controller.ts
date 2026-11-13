@@ -25,6 +25,7 @@ import {
   NoStoreWhenSignedInInterceptor,
 } from '../no-store.interceptor';
 import { VotesService } from '../votes/votes.service';
+import { OrgPagesService } from './org-pages.service';
 import {
   NewOrgPageCommentDto,
   OrgPageVoteDto,
@@ -97,6 +98,7 @@ export class OrgPageReactionWritesController {
     private readonly votes: VotesService,
     private readonly comments: CommentsService,
     private readonly writers: CommentWritersService,
+    private readonly orgPages: OrgPagesService,
   ) {}
 
   /** Casts, changes, or confirms on the current published revision. */
@@ -127,7 +129,11 @@ export class OrgPageReactionWritesController {
     );
   }
 
-  /** Answers with the comment as the writer now sees it. */
+  /**
+   * Answers with the comment as the writer now sees it. An unknown or
+   * unpublished page is 404 for everyone, before who writes is checked
+   * (review MEDIUM 1).
+   */
   @Post('comments')
   @WriteThrottle()
   async create(
@@ -135,6 +141,7 @@ export class OrgPageReactionWritesController {
     @Param('pageId') pageId: string,
     @Body() body: NewOrgPageCommentDto,
   ) {
+    await this.orgPages.find(pageId);
     const writer = await this.writers.requireWriter(request);
     const made = await this.comments.createOnOrgPage(writer, {
       pageId,

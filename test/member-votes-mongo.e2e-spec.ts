@@ -506,6 +506,22 @@ describeWithMongo('votes on a real MongoDB', () => {
       if (voted.status === 'fulfilled') outcomes.counted++;
       else outcomes.stale++;
     }
+    // As the writes left it, before any reader recounts (review): the last
+    // writer's own recount must already be exact, with no mark left.
+    const settled = await orgPages.find('about');
+    const stored = await m.VoteTally.findOne({ tabId }).lean();
+    const counted = await m.BeliefVote.find({
+      tabId,
+      value: { $exists: true },
+    }).lean();
+    expect(stored).toMatchObject({
+      live: true,
+      textSeq: settled.revision,
+      agreeMember: counted.filter((r) => r.textSeq === settled.revision).length,
+      earlierMember: counted.filter((r) => r.textSeq !== settled.revision)
+        .length,
+    });
+    expect(stored.writers ?? []).toHaveLength(0);
     // A reader recounts against the revision shown now.
     const now = await orgPages.find('about');
     const shown = await tallies.forPage(now._id, [
