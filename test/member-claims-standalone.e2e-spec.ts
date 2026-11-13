@@ -15,6 +15,8 @@ import {
   ClaimsService,
   CLAIMS_NEED_REPLICA_SET,
 } from '../src/members/claims/claims.service';
+import { NEEDS_REPLICA_SET } from '../src/db/transactions';
+import { AdminMembersService } from '../src/members/admin/admin-members.service';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
 
 const uri = process.env.MONGO_STANDALONE_URI;
@@ -96,6 +98,35 @@ describeStandalone('claims on a standalone MongoDB', () => {
       (await m.SocialProfile.findOne({ _id: profileId }).lean()).ownerUserId,
     ).toBeUndefined();
     expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it('admin page decisions (Chunk 12) answer 503 the same way, changing nothing', async () => {
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    const profileId = new Types.ObjectId();
+    await m.SocialProfile.collection.insertOne({
+      _id: profileId,
+      slug: 'standalone-waiting',
+      displayName: 'Synthetic',
+      visibility: 'public',
+      reviewStatus: 'pending',
+      source: 'native',
+      ownerUserId: 'user_waiting',
+    });
+    const admin = new AdminMembersService(
+      m.SocialProfile,
+      conn,
+      new ModerationLogService(m.ModerationLogEntry),
+      { closePageNotice: () => Promise.resolve() } as never,
+    );
+    await expect(
+      admin.approve('user_admin', 'standalone-waiting'),
+    ).rejects.toThrow(new ServiceUnavailableException(NEEDS_REPLICA_SET));
+    expect(
+      (await m.SocialProfile.findOne({ _id: profileId }).lean()).reviewStatus,
+    ).toBe('pending');
     error.mockRestore();
   });
 });

@@ -190,7 +190,15 @@
       "members/claims/claims.service.ts",
       "members/claims/legacy-links.service.ts",
       "members/claims/claims.controller.ts",
-      "members/claims/claim-request-throttle.guard.ts"
+      "members/claims/claim-request-throttle.guard.ts",
+      "admin-inbox/admin-inbox.service.ts",
+      "auth/clerk-admin-directory.service.ts",
+      "db/transactions.ts",
+      "members/admin/admin-roles.service.ts",
+      "members/admin/admin-members.service.ts",
+      "members/admin/admin-log.service.ts",
+      "members/admin/eam-requests.service.ts",
+      "members/admin/admin.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

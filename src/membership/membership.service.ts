@@ -4,9 +4,11 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Error as MongooseError, Model, Types } from 'mongoose';
+import { AdminInboxService } from '../admin-inbox/admin-inbox.service';
 import { ClerkUserInfoService } from '../auth/clerk-user-info.service';
 import { BlockVersionsService } from '../social/block-versions.service';
 import {
@@ -79,6 +81,10 @@ export const JOIN_CLAIM_STALE_MS = 10 * 60 * 1000;
 function staleClaimCutoff() {
   return new Date(Date.now() - JOIN_CLAIM_STALE_MS);
 }
+
+/** What a member whose page an admin removed is told (Chunk 12). */
+export const PAGE_REMOVED_MESSAGE =
+  'The member page on this account was removed by an admin, so a new one cannot be started here. Please contact an admin.';
 
 /** Claim rows carry no member data: consent is not recorded yet. */
 const CLAIM_PLACEHOLDER_NAME = '(joining)';
@@ -154,6 +160,8 @@ function clip(value: string | undefined, max: number) {
  */
 @Injectable()
 export class MembershipService {
+  private readonly logger = new Logger(MembershipService.name);
+
   constructor(
     @InjectModel(SocialProfile.name)
     private readonly profileModel: Model<SocialProfileDocument>,
@@ -169,6 +177,7 @@ export class MembershipService {
     private readonly visitModel: Model<VisitRecordDocument>,
     private readonly versions: BlockVersionsService,
     private readonly clerk: ClerkUserInfoService,
+    private readonly inbox: AdminInboxService,
   ) {}
 
   terms() {
@@ -379,7 +388,23 @@ export class MembershipService {
       throw withoutMemberText(error);
     }
 
+    await this.notifyAdmins(userId, profileId);
     return this.summary(userId);
+  }
+
+  /**
+   * Tells the admins a page is waiting (Chunk 12). The page is saved by now,
+   * and the approval queue lists it whatever happens here, so a failed
+   * notice is logged rather than failing the join.
+   */
+  private async notifyAdmins(userId: string, profileId: Types.ObjectId) {
+    try {
+      await this.inbox.notifyPageSubmitted(userId, profileId);
+    } catch (error) {
+      this.logger.error(
+        `A new page is waiting, but the admins' notice failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** Frees the owner and address held by a join that died before finishing. */
@@ -404,6 +429,9 @@ export class MembershipService {
       throw new ForbiddenException(
         'The member page on this account was deleted, so a new one cannot be started here. Please contact an admin.',
       );
+    }
+    if (existing.reviewStatus === 'removed') {
+      throw new ForbiddenException(PAGE_REMOVED_MESSAGE);
     }
     throw new ConflictException(
       existing.reviewStatus === 'claiming'

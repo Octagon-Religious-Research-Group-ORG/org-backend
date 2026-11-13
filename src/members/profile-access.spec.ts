@@ -49,10 +49,17 @@ const APPROVED: Record<ProfileVisibility, Row> = {
   unlisted: row('none', 'none', 'none', 'none', 'full', 'full'),
 };
 const PENDING = row('none', 'none', 'none', 'none', 'full', 'full');
+/** Removed by an admin (Chunk 12): admins only, the owner included out. */
+const REMOVED = row('none', 'none', 'none', 'none', 'none', 'full');
 const NOBODY = row('none', 'none', 'none', 'none', 'none', 'none');
 
 const VISIBILITIES = Object.keys(APPROVED) as ProfileVisibility[];
-const STATUSES: ProfileReviewStatus[] = ['approved', 'pending', 'claiming'];
+const STATUSES: ProfileReviewStatus[] = [
+  'approved',
+  'pending',
+  'claiming',
+  'removed',
+];
 const VIEWER_NAMES = Object.keys(VIEWERS);
 
 function expected(
@@ -61,6 +68,7 @@ function expected(
   deleted: boolean,
 ) {
   if (deleted || status === 'claiming') return NOBODY;
+  if (status === 'removed') return REMOVED;
   return status === 'pending' ? PENDING : APPROVED[visibility];
 }
 

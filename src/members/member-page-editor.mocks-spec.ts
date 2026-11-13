@@ -10,7 +10,7 @@ export const OWNER = 'user_owner';
 export const OWNED = {
   ownerUserId: OWNER,
   deletedAt: { $exists: false },
-  reviewStatus: { $ne: 'claiming' },
+  reviewStatus: { $nin: ['claiming', 'removed'] },
 };
 
 export function chain(value: unknown) {

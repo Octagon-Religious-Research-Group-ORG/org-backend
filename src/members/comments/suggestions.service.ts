@@ -209,7 +209,7 @@ export class SuggestionsService {
       .findOne({
         ownerUserId: userId,
         deletedAt: { $exists: false },
-        reviewStatus: { $ne: 'claiming' },
+        reviewStatus: { $nin: ['claiming', 'removed'] },
       })
       .select({ _id: 1 })
       .lean()

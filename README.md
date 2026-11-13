@@ -44,8 +44,8 @@ mongosh --eval "rs.initiate()"   # once
 
 and point the app at it with `?replicaSet=rs0`, for example
 `MONGODB_URI=mongodb://127.0.0.1:27017/org?replicaSet=rs0`. On a standalone
-server the app still starts and logs one warning; claim decisions then
-answer 503. The real-database e2e suites need the same: set
+server the app still starts and logs one warning; claim decisions and the
+admin dashboard's page decisions and inbox actions then answer 503. The real-database e2e suites need the same: set
 `MONGO_TEST_URI=mongodb://127.0.0.1:27017/org-test?replicaSet=rs0`.
 
 ### MongoDB Atlas DNS

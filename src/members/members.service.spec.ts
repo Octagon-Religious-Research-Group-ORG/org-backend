@@ -314,7 +314,7 @@ describe('MembersService.directory', () => {
     await service.directory(GUEST_VIEWER);
     expect(profileModel.find).toHaveBeenCalledWith({
       visibility: { $in: ['public', 'members', 'named-members'] },
-      reviewStatus: { $nin: ['claiming', 'pending'] },
+      reviewStatus: { $nin: ['claiming', 'pending', 'removed'] },
       deletedAt: { $exists: false },
     });
   });

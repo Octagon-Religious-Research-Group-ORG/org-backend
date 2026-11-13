@@ -24,13 +24,17 @@ export type ProfileVisibility = (typeof PROFILE_VISIBILITIES)[number];
  *   to anyone, and removed if the join fails or dies;
  * - `pending`: a new member's page waiting for an admin (the owner's approval
  *   step, plan §2d); shown only to its owner and admins;
- * - `approved`: shown according to its visibility.
+ * - `approved`: shown according to its visibility;
+ * - `removed`: taken off the site by an admin (Chunk 12). Shown to admins
+ *   only, its owner included out; nothing is deleted, and an admin can put
+ *   it back to the status kept in `removal.previousStatus`.
  * Rows written before this field existed read as approved (schema default).
  */
 export const PROFILE_REVIEW_STATUSES = [
   'claiming',
   'pending',
   'approved',
+  'removed',
 ] as const;
 export type ProfileReviewStatus = (typeof PROFILE_REVIEW_STATUSES)[number];
 
@@ -62,6 +66,34 @@ export class ContactEntry {
 }
 
 export const ContactEntrySchema = SchemaFactory.createForClass(ContactEntry);
+
+/** The statuses an admin removal can come from, and a restore goes back to. */
+export const REMOVABLE_STATUSES = ['pending', 'approved'] as const;
+export type RemovableStatus = (typeof REMOVABLE_STATUSES)[number];
+
+export const MAX_REMOVAL_REASON_LENGTH = 500;
+
+/** Why and by whom an admin took a page off the site (Chunk 12). */
+@Schema({ _id: false })
+export class ProfileRemoval {
+  @Prop({ type: Date, required: true })
+  at: Date;
+
+  /** Clerk user id of the admin. */
+  @Prop({ type: String, required: true })
+  by: string;
+
+  /** For admins only; the member is told just that the page was removed. */
+  @Prop({ type: String, required: true, maxlength: MAX_REMOVAL_REASON_LENGTH })
+  reason: string;
+
+  /** What a restore puts back: waiting for approval, or on the site. */
+  @Prop({ type: String, enum: REMOVABLE_STATUSES, required: true })
+  previousStatus: RemovableStatus;
+}
+
+export const ProfileRemovalSchema =
+  SchemaFactory.createForClass(ProfileRemoval);
 
 /** One tab removal in progress on a page (Chunk 8). */
 @Schema({ _id: false })
@@ -206,6 +238,10 @@ export class SocialProfile {
   @Prop({ type: Date })
   deletedAt?: Date;
 
+  /** Present while an admin has removed the page (`reviewStatus: removed`). */
+  @Prop({ type: ProfileRemovalSchema })
+  removal?: ProfileRemoval;
+
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -224,3 +260,5 @@ SocialProfileSchema.index(
   },
 );
 SocialProfileSchema.index({ visibility: 1, deletedAt: 1, displayName: 1 });
+// The admins' queue of pages waiting for approval, oldest first (Chunk 12).
+SocialProfileSchema.index({ reviewStatus: 1, createdAt: 1 });

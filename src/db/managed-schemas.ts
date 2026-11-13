@@ -1,4 +1,5 @@
 import type { Schema } from 'mongoose';
+import { AdminInboxEntrySchema } from '../admin-inbox/schemas/admin-inbox.schema';
 import { ConsentRecordSchema } from '../membership/schemas/consent-record.schema';
 import { MemberContactsSchema } from '../membership/schemas/member-contacts.schema';
 import { VisitRecordSchema } from '../membership/schemas/visit-record.schema';
@@ -42,4 +43,5 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'VoteHistoryEntry', schema: VoteHistoryEntrySchema },
     { name: 'VoteTally', schema: VoteTallySchema },
     { name: 'Claim', schema: ClaimSchema },
+    { name: 'AdminInboxEntry', schema: AdminInboxEntrySchema },
   ];

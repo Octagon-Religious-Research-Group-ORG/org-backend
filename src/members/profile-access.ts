@@ -60,7 +60,8 @@ function isMember(viewer: Viewer) {
  * later, falls through to no access rather than to the widest one.
  *
  * Unlisted means owner and admins only: everyone else, link holders included,
- * gets the 404 of a page that does not exist.
+ * gets the 404 of a page that does not exist. A page an admin removed is
+ * admins only.
  *
  * @returns the viewer's level for this page, whether the page may be listed,
  *   and whether the viewer owns it
@@ -77,6 +78,12 @@ export function decideProfileAccess(
   if (profile.deletedAt) return noAccess;
   if (reviewStatus === 'pending') {
     return isOwner || viewer.isAdmin
+      ? { level: 'full', listed: false, isOwner }
+      : noAccess;
+  }
+  // Removed by an admin (Chunk 12): admins only, its owner included out.
+  if (reviewStatus === 'removed') {
+    return viewer.isAdmin
       ? { level: 'full', listed: false, isOwner }
       : noAccess;
   }

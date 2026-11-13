@@ -4,6 +4,9 @@ import { HydratedDocument } from 'mongoose';
 export const ORG_SETTING_KEYS = [
   'voting-invite',
   'anonymous-may-vote',
+  // Held while an admin role change runs (Chunk 12), so two admins cannot
+  // demote each other at once and leave no admin. Not a setting anyone sees.
+  'role-change-lock',
 ] as const;
 export type OrgSettingKey = (typeof ORG_SETTING_KEYS)[number];
 

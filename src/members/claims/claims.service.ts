@@ -437,11 +437,15 @@ export class ClaimsService {
       if (bound.modifiedCount !== 1) {
         const page = await this.profileModel
           .findOne({ _id: claim.profileId })
-          .select({ deletedAt: 1 })
+          .select({ deletedAt: 1, reviewStatus: 1 })
           .session(session)
           .lean()
           .exec();
-        refusal = !page || page.deletedAt ? 'gone' : 'taken';
+        // A page an admin removed (Chunk 12) is gone for the claimant too.
+        refusal =
+          !page || page.deletedAt || page.reviewStatus === 'removed'
+            ? 'gone'
+            : 'taken';
         // Abort: the claim's change above must not commit either.
         throw new PageNotBindable();
       }

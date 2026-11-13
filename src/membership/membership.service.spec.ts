@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Logger,
 } from '@nestjs/common';
 import mongoose from 'mongoose';
 import { SocialProfileSchema } from '../social/schemas/social-profile.schema';
@@ -14,6 +15,7 @@ import {
   JOIN_CLAIM_STALE_MS,
   MAX_SIMILAR_NAMES,
   MembershipService,
+  PAGE_REMOVED_MESSAGE,
   splitParagraphs,
 } from './membership.service';
 import { MEMBERSHIP_TERMS, MEMBERSHIP_TERMS_HASH } from './membership-terms';
@@ -36,6 +38,7 @@ function setup(
     finalizeError?: Error;
     releaseError?: Error;
     existingNames?: Array<{ slug: string; displayName: string }>;
+    inboxError?: unknown;
   } = {},
 ) {
   const writes: string[] = [];
@@ -102,6 +105,15 @@ function setup(
       ),
     ),
   };
+  const inbox = {
+    notifyPageSubmitted: jest.fn(() => {
+      return options.inboxError
+        ? // Not always an Error: the join must survive any failure value.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          Promise.reject(options.inboxError)
+        : Promise.resolve();
+    }),
+  };
   const service = new MembershipService(
     profileModel as never,
     tabModel as never,
@@ -111,9 +123,11 @@ function setup(
     visitModel as never,
     versions as never,
     clerk as never,
+    inbox as never,
   );
   return {
     service,
+    inbox,
     writes,
     profileModel,
     tabModel,
@@ -830,6 +844,58 @@ describe('MembershipService', () => {
       );
       expect(ctx.writes).toEqual([]);
       expect(ctx.contactsModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('refuses a member whose page an admin removed, and says who to contact (Chunk 12)', async () => {
+      const ctx = setup({
+        owned: {
+          slug: 's',
+          displayName: 'S',
+          visibility: 'public',
+          reviewStatus: 'removed',
+        },
+      });
+      await expect(ctx.service.join('u', input(), origin)).rejects.toThrow(
+        new ForbiddenException(PAGE_REMOVED_MESSAGE),
+      );
+      expect(ctx.writes).toEqual([]);
+    });
+
+    it('tells the admins a new page is waiting, after the page is saved (Chunk 12)', async () => {
+      const ctx = setup();
+      await ctx.service.join('u', input(), origin);
+      expect(ctx.writes.at(-1)).toBe('finalize');
+      expect(
+        ctx.inbox.notifyPageSubmitted.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(ctx.profileModel.updateOne.mock.invocationCallOrder[0]);
+      const [userId, profileId] = ctx.inbox.notifyPageSubmitted.mock
+        .calls[0] as unknown as [string, unknown];
+      expect(userId).toBe('u');
+      expect(String(profileId)).toBe(
+        String(
+          (ctx.tabModel.create.mock.calls[0][0] as { profileId: unknown })
+            .profileId,
+        ),
+      );
+    });
+
+    it('still joins when the admins notice fails: the queue lists the page anyway', async () => {
+      const ctx = setup({ inboxError: new Error('synthetic inbox outage') });
+      const errorLog = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      await expect(
+        ctx.service.join('u', input(), origin),
+      ).resolves.toBeDefined();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('synthetic inbox outage'),
+      );
+      const raw = setup({ inboxError: 'raw failure' });
+      await raw.service.join('u', input(), origin);
+      expect(errorLog).toHaveBeenLastCalledWith(
+        expect.stringContaining('raw failure'),
+      );
+      errorLog.mockRestore();
     });
 
     it('does not count the account email as a backup contact', async () => {

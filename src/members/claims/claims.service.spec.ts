@@ -705,6 +705,13 @@ describe('ClaimsService.approve', () => {
     await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
       PAGE_GONE,
     );
+    // An admin removed it (Chunk 12): gone for the claimant too.
+    profileModel.findOne.mockReturnValueOnce(
+      chain({ reviewStatus: 'removed' }),
+    );
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      PAGE_GONE,
+    );
     expect(log.record).toHaveBeenLastCalledWith(
       expect.objectContaining({ reason: SITE_REASON_GONE }),
       session,

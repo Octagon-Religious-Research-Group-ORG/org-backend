@@ -38,6 +38,20 @@ function setup(value?: string) {
 }
 
 describe('OrgSettingsService', () => {
+  it('shows the admins every setting (Chunk 12)', async () => {
+    await expect(setup().service.adminView()).resolves.toEqual({
+      anonymousMayVote: false,
+    });
+    // One stored value answers both reads here: the invite is shown, and
+    // anything but `on` reads as anonymous voting off.
+    await expect(
+      setup('https://t.me/+synthetic').service.adminView(),
+    ).resolves.toEqual({
+      votingInvite: 'https://t.me/+synthetic',
+      anonymousMayVote: false,
+    });
+  });
+
   it('keeps anonymous voting off unless set to on (Chunk 10)', async () => {
     await expect(setup().service.anonymousMayVote()).resolves.toBe(false);
     await expect(setup('off').service.anonymousMayVote()).resolves.toBe(false);

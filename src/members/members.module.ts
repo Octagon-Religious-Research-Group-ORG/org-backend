@@ -1,6 +1,11 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { AdminInboxModule } from '../admin-inbox/admin-inbox.module';
 import { ModerationModule } from '../moderation/moderation.module';
+import {
+  ModerationLogEntry,
+  ModerationLogEntrySchema,
+} from '../moderation/schemas/moderation-log.schema';
 import {
   BeliefTab,
   BeliefTabSchema,
@@ -32,6 +37,16 @@ import {
   WebsitePage,
   WebsitePageSchema,
 } from '../content/schemas/website-page.schema';
+import {
+  AdminDashboardController,
+  AdminDashboardWritesController,
+  MyEamRequestController,
+  MyEamRequestWritesController,
+} from './admin/admin.controller';
+import { AdminLogService } from './admin/admin-log.service';
+import { AdminMembersService } from './admin/admin-members.service';
+import { AdminRolesService } from './admin/admin-roles.service';
+import { EamRequestsService } from './admin/eam-requests.service';
 import {
   AdminClaimsController,
   AdminClaimWritesController,
@@ -81,12 +96,14 @@ import { VotesService } from './votes/votes.service';
  * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9),
  * belief votes and the Beliefs page section (Chunk 10), the same votes
  * and comments on ORG's own pages (Chunk 10b), and claims on imported pages
- * with the linking of imported comments (Chunk 11).
+ * with the linking of imported comments (Chunk 11), and the admin dashboard
+ * with the "Request EaM" button (Chunk 12).
  */
 @Module({
   imports: [
     SocialModule,
     ModerationModule,
+    AdminInboxModule,
     MongooseModule.forFeature([
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },
@@ -97,6 +114,8 @@ import { VotesService } from './votes/votes.service';
       { name: BeliefVote.name, schema: BeliefVoteSchema },
       { name: VoteTally.name, schema: VoteTallySchema },
       { name: Claim.name, schema: ClaimSchema },
+      // Read only, for the admin dashboard's log view (Chunk 12).
+      { name: ModerationLogEntry.name, schema: ModerationLogEntrySchema },
       // Read only, for votes and comments on ORG's own pages (Chunk 10b).
       { name: WebsitePage.name, schema: WebsitePageSchema },
     ]),
@@ -115,6 +134,10 @@ import { VotesService } from './votes/votes.service';
     MyClaimWritesController,
     AdminClaimsController,
     AdminClaimWritesController,
+    AdminDashboardController,
+    AdminDashboardWritesController,
+    MyEamRequestController,
+    MyEamRequestWritesController,
   ],
   providers: [
     MembersService,
@@ -136,6 +159,10 @@ import { VotesService } from './votes/votes.service';
     ClaimsService,
     LegacyLinksService,
     ClaimRequestThrottleGuard,
+    AdminRolesService,
+    AdminMembersService,
+    AdminLogService,
+    EamRequestsService,
   ],
 })
 export class MembersModule {}

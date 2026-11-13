@@ -1,0 +1,198 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createClerkClient } from '@clerk/backend';
+import type { ClerkClient } from '@clerk/backend';
+import { type MemberRole, parseRole } from './roles';
+
+/** Users read per Clerk request (Clerk's maximum page). */
+export const CLERK_PAGE = 100;
+/**
+ * Pages read at most when looking for admins: far above ORG's size. Past it
+ * the list says it is incomplete, and nothing that depends on a complete
+ * count (the last-admin rule) acts on it.
+ */
+export const MAX_USER_PAGES = 20;
+
+export const ALREADY_INVITED =
+  'That address already has an account or a waiting invitation.';
+export const INVITATION_REFUSED =
+  'Clerk refused that invitation. Check the address and try again.';
+export const INVITATION_NOT_FOUND =
+  'That invitation does not exist or is no longer waiting.';
+export const CLERK_UNAVAILABLE =
+  'The sign-in service is not answering. Please try again in a moment.';
+
+/** An account holding a role, as the admin dashboard lists it. */
+export interface RoleHolder {
+  userId: string;
+  email?: string;
+  name?: string;
+}
+
+export interface PendingInvitation {
+  invitationId: string;
+  email: string;
+  /** The role the person gets on accepting; absent for a plain member. */
+  role?: MemberRole;
+  createdAt: string;
+}
+
+/**
+ * The Clerk calls behind the admin dashboard's Roles section (Chunk 12):
+ * who holds a role, and invitations by email. Authorisation and the
+ * moderation log belong to the caller.
+ */
+@Injectable()
+export class ClerkAdminDirectoryService {
+  private readonly clerk: ClerkClient;
+
+  constructor(config: ConfigService) {
+    this.clerk = createClerkClient({
+      secretKey: config.getOrThrow<string>('CLERK_SECRET_KEY'),
+    });
+  }
+
+  /**
+   * Every account whose Clerk role is `role`. Clerk cannot filter users by
+   * metadata, so this reads the user list page by page.
+   *
+   * @returns the holders, and whether every user was read
+   */
+  async holdersOf(
+    role: MemberRole,
+  ): Promise<{ holders: RoleHolder[]; complete: boolean }> {
+    const holders: RoleHolder[] = [];
+    for (let page = 0; page < MAX_USER_PAGES; page += 1) {
+      const { data } = await this.call(() =>
+        this.clerk.users.getUserList({
+          limit: CLERK_PAGE,
+          offset: page * CLERK_PAGE,
+          orderBy: '+created_at',
+        }),
+      );
+      for (const user of data) {
+        if (parseRole(user.publicMetadata) !== role) continue;
+        const primary = user.emailAddresses.find(
+          (address) => address.id === user.primaryEmailAddressId,
+        );
+        const name = [user.firstName, user.lastName]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        holders.push({
+          userId: user.id,
+          ...(primary ? { email: primary.emailAddress.toLowerCase() } : {}),
+          ...(name || user.username
+            ? { name: name || String(user.username) }
+            : {}),
+        });
+      }
+      if (data.length < CLERK_PAGE) return { holders, complete: true };
+    }
+    return { holders, complete: false };
+  }
+
+  /**
+   * Invites someone by email; Clerk sends the email. `role` is copied to the
+   * account's public metadata when they accept.
+   *
+   * @throws ConflictException when the address has an account or invitation
+   * @throws BadRequestException for an address Clerk refuses
+   */
+  async invite(
+    email: string,
+    role: MemberRole | null,
+    redirectUrl: string,
+  ): Promise<PendingInvitation> {
+    const invitation = await this.call(
+      () =>
+        this.clerk.invitations.createInvitation({
+          emailAddress: email,
+          redirectUrl,
+          notify: true,
+          ...(role ? { publicMetadata: { role } } : {}),
+        }),
+      'invite',
+    );
+    return this.view(invitation);
+  }
+
+  async pendingInvitations(): Promise<PendingInvitation[]> {
+    const { data } = await this.call(() =>
+      this.clerk.invitations.getInvitationList({
+        status: 'pending',
+        limit: CLERK_PAGE,
+      }),
+    );
+    return data.map((invitation) => this.view(invitation));
+  }
+
+  /** @throws NotFoundException for an unknown or no longer pending one */
+  async revoke(invitationId: string): Promise<void> {
+    await this.call(
+      () => this.clerk.invitations.revokeInvitation(invitationId),
+      'revoke',
+    );
+  }
+
+  private view(invitation: {
+    id: string;
+    emailAddress: string;
+    publicMetadata: Record<string, unknown> | null;
+    createdAt: number;
+  }): PendingInvitation {
+    const role = parseRole(invitation.publicMetadata);
+    return {
+      invitationId: invitation.id,
+      email: invitation.emailAddress,
+      ...(role ? { role } : {}),
+      createdAt: new Date(invitation.createdAt).toISOString(),
+    };
+  }
+
+  private async call<T>(
+    run: () => Promise<T>,
+    mode: ClerkCallMode = 'read',
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      throw translate(error, mode);
+    }
+  }
+}
+
+export type ClerkCallMode = 'read' | 'invite' | 'revoke';
+
+/** Clerk's answer, as the admin should read it; never Clerk's raw text. */
+export function translate(error: unknown, mode: ClerkCallMode) {
+  const status =
+    typeof error === 'object' && error !== null
+      ? (error as { status?: unknown }).status
+      : undefined;
+  const codes =
+    typeof error === 'object' &&
+    error !== null &&
+    Array.isArray((error as { errors?: unknown }).errors)
+      ? (error as { errors: Array<{ code?: unknown }> }).errors.map((e) =>
+          String(e.code),
+        )
+      : [];
+  const refused = status === 400 || status === 404 || status === 422;
+  if (mode === 'revoke' && refused) {
+    return new NotFoundException(INVITATION_NOT_FOUND);
+  }
+  if (mode === 'invite') {
+    if (codes.some((code) => /duplicate|exists|already/i.test(code))) {
+      return new ConflictException(ALREADY_INVITED);
+    }
+    if (refused) return new BadRequestException(INVITATION_REFUSED);
+  }
+  return new ServiceUnavailableException(CLERK_UNAVAILABLE);
+}

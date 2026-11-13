@@ -133,7 +133,7 @@ export class MemberPageEditorService {
     return {
       ownerUserId: userId,
       deletedAt: { $exists: false },
-      reviewStatus: { $ne: 'claiming' as const },
+      reviewStatus: { $nin: ['claiming', 'removed'] as const },
     };
   }
 

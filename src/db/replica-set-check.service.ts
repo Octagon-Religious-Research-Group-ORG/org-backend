@@ -6,7 +6,7 @@ import type { Connection } from 'mongoose';
 export type ReplicaSetStatus = 'replica-set' | 'standalone' | 'unknown';
 
 export const STANDALONE_WARNING =
-  'The database is not a replica set: claim decisions (Chunk 11) need transactions and will answer 503. Use a replica set (Atlas always is one; locally start mongod with --replSet rs0, run rs.initiate(), and add ?replicaSet=rs0 to MONGODB_URI).';
+  'The database is not a replica set: claim decisions (Chunk 11) and admin decisions (Chunk 12) need transactions and will answer 503. Use a replica set (Atlas always is one; locally start mongod with --replSet rs0, run rs.initiate(), and add ?replicaSet=rs0 to MONGODB_URI).';
 
 /**
  * Says at startup, once and plainly, when the database cannot run

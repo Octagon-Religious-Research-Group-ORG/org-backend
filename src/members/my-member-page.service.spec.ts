@@ -146,7 +146,7 @@ const fullPage = (overrides: Record<string, unknown> = {}) => ({
 const OWNED = {
   ownerUserId: 'u1',
   deletedAt: { $exists: false },
-  reviewStatus: { $ne: 'claiming' },
+  reviewStatus: { $nin: ['claiming', 'removed'] },
 };
 
 let warn: jest.SpyInstance;

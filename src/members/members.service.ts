@@ -168,7 +168,7 @@ export class MembersService {
     const rows = (await this.profileModel
       .find({
         visibility: { $in: ['public', 'members', 'named-members'] },
-        reviewStatus: { $nin: ['claiming', 'pending'] },
+        reviewStatus: { $nin: ['claiming', 'pending', 'removed'] },
         deletedAt: { $exists: false },
       })
       .select(PROFILE_FIELDS)

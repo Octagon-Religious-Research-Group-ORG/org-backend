@@ -22,6 +22,18 @@ export class OrgSettingsService {
     private readonly log: ModerationLogService,
   ) {}
 
+  /** Every setting the admin dashboard shows (Chunk 12); admins only. */
+  async adminView(): Promise<{
+    votingInvite?: string;
+    anonymousMayVote: boolean;
+  }> {
+    const [votingInvite, anonymousMayVote] = await Promise.all([
+      this.votingInvite(),
+      this.anonymousMayVote(),
+    ]);
+    return { ...(votingInvite ? { votingInvite } : {}), anonymousMayVote };
+  }
+
   async votingInvite(): Promise<string | undefined> {
     const setting = await this.settingModel
       .findOne({ key: VOTING_INVITE_KEY })

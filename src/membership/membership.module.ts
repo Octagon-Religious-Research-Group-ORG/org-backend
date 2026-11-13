@@ -12,6 +12,7 @@ import {
   SocialProfile,
   SocialProfileSchema,
 } from '../social/schemas/social-profile.schema';
+import { AdminInboxModule } from '../admin-inbox/admin-inbox.module';
 import { SocialModule } from '../social/social.module';
 import {
   MembershipController,
@@ -32,6 +33,7 @@ import { VisitRecord, VisitRecordSchema } from './schemas/visit-record.schema';
 @Module({
   imports: [
     SocialModule,
+    AdminInboxModule,
     MongooseModule.forFeature([
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },
