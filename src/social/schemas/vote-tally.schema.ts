@@ -15,8 +15,9 @@ import { HydratedDocument, Types } from 'mongoose';
  *   recount. A reader may recount (and save) while a mark is there, but
  *   never removes one, because its count may predate the write in flight.
  *   While any mark is there, every read recounts. A writer that died leaves
- *   its mark; the list read recounts it after 30 s and drops it once it is
- *   older than any live writer can be (`VoteTalliesService.repairLeftBehind`).
+ *   its mark; the list read recounts it after 30 s, least recently counted
+ *   first (`countedAt`), and the list read or a page read drops it once it
+ *   is older than any live writer can be (`VoteTalliesService`).
  *   (Fix round 1: a single shared "dirty" date, cleared by any recount, let
  *   a reader erase a live writer's mark, so a writer that then died left
  *   wrong counts nobody would ever recount.)
@@ -66,6 +67,10 @@ export class VoteTally {
   /** agreeMember + agreeAnon: the sort key while anonymous votes count. */
   @Prop({ type: Number, min: 0 }) agreeAll?: number;
 
+  /** When the counts were last saved; the repair takes the oldest first. */
+  @Prop({ type: Date })
+  countedAt?: Date;
+
   /** When the belief was added: the tie-break, newest first. */
   @Prop({ type: Date })
   tabCreatedAt?: Date;
@@ -83,8 +88,9 @@ VoteTallySchema.index({ profileId: 1 });
 // then newest, then the id as the cursor's last tie-break.
 VoteTallySchema.index({ live: 1, agreeMember: -1, tabCreatedAt: -1, tabId: 1 });
 VoteTallySchema.index({ live: 1, agreeAll: -1, tabCreatedAt: -1, tabId: 1 });
-// Tallies a writer may have left behind (multikey over the marks).
+// Tallies a writer may have left behind, least recently counted first
+// (multikey over the marks; only tallies with a mark are in it).
 VoteTallySchema.index(
-  { 'writers.at': 1 },
+  { countedAt: 1, 'writers.at': 1 },
   { partialFilterExpression: { 'writers.at': { $exists: true } } },
 );

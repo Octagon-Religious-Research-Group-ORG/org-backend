@@ -245,6 +245,76 @@ describe('VoteTalliesService', () => {
     expect(fresh.writers).toHaveLength(1);
   });
 
+  it('reaches every marked belief in turn, least recently counted first (fix round 2, item d)', async () => {
+    const h = harness();
+    const slow = new Date(Date.now() - TALLY_REPAIR_AFTER_MS - 30_000);
+    const marked = (tabId: string) => ({
+      _id: new Types.ObjectId(),
+      tabId,
+      profileId: ids.open,
+      rev: 1,
+      live: true,
+      textSeq: 1,
+      agreeMember: 0,
+      writers: [{ id: `w-${tabId}`, at: slow }],
+    });
+    // Twelve beliefs whose writers stopped, then the one we watch.
+    for (let i = 0; i < TALLY_REPAIRS_PER_READ + 2; i++) {
+      h.tallies.docs.push(marked(`hog${i}`));
+    }
+    h.tallies.docs.push(marked('tab_a'));
+    h.votes.docs.push(
+      vote('tab_a', 'a', 'agree', 1, 'member'),
+      vote('tab_a', 'b', 'agree', 1, 'member'),
+    );
+    const target = () => h.tallies.docs.find((t) => t.tabId === 'tab_a')!;
+    await h.talliesService.repairLeftBehind();
+    await h.talliesService.repairLeftBehind();
+    expect(target()).toMatchObject({ agreeMember: 2 });
+    expect(target().countedAt).toBeInstanceOf(Date);
+  });
+
+  it('a page read drops marks older than any live writer, and keeps live ones (fix round 2, item e)', async () => {
+    const h = harness();
+    const dead = new Date(Date.now() - WRITER_MARK_STALE_MS - 1000);
+    h.votes.docs.push(vote('tab_a', 'a', 'agree', 1, 'member'));
+    h.tallies.docs.push(
+      {
+        _id: new Types.ObjectId(),
+        tabId: 'tab_a',
+        profileId: ids.open,
+        rev: 1,
+        writers: [{ id: 'dead', at: dead }],
+      },
+      {
+        _id: new Types.ObjectId(),
+        tabId: 'tab_b',
+        profileId: ids.open,
+        rev: 1,
+        writers: [{ id: 'live', at: new Date() }],
+      },
+      // A tally no writer has marked yet has no marks at all.
+      {
+        _id: new Types.ObjectId(),
+        tabId: 'tab_unmarked',
+        profileId: ids.open,
+        rev: 0,
+        live: true,
+      },
+    );
+    const rows = await h.talliesService.forPage(ids.open, [
+      { tabId: 'tab_a', textSeq: 1 },
+      { tabId: 'tab_b', textSeq: 1 },
+    ]);
+    expect(rows.get('tab_a')).toMatchObject({ writers: [], agreeMember: 1 });
+    expect(isBehind(rows.get('tab_a') as never)).toBe(false);
+    expect(rows.get('tab_b')?.writers).toHaveLength(1);
+    // Nothing dead left: the next read drops nothing.
+    const spy = jest.spyOn(h.tallies, 'updateOne');
+    await h.talliesService.forPage(ids.open, [{ tabId: 'tab_a', textSeq: 1 }]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('names the sort field and what is behind', () => {
     expect(agreeField(true)).toBe('agreeAll');
     expect(agreeField(false)).toBe('agreeMember');

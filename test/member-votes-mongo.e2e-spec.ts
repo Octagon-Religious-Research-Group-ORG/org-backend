@@ -339,6 +339,54 @@ describeWithMongo('votes on a real MongoDB', () => {
     ).toMatchObject({ writers: [], agreeMember: 3 });
   });
 
+  it('every marked belief is recounted in turn, however many writers died (fix round 2, item d)', async () => {
+    // The reviewer's probe: twelve beliefs with stopped writers, then ours.
+    const profileId = new Types.ObjectId();
+    const slow = new Date(Date.now() - 60_000);
+    const hogs = Array.from({ length: 12 }, (_, i) => `tab_hog_${i}`);
+    for (const tabId of [...hogs, 'tab_target']) {
+      await m.BeliefTab.collection.insertOne({
+        profileId,
+        tabId,
+        title: tabId,
+        order: 0,
+        createdAt: new Date(),
+      });
+      await m.VoteTally.collection.insertOne({
+        tabId,
+        profileId,
+        rev: 1,
+        live: true,
+        textSeq: 0,
+        agreeMember: 0,
+        agreeAll: 0,
+        writers: [{ id: `w-${tabId}`, at: slow }],
+      });
+    }
+    for (const u of ['user_t1', 'user_t2']) {
+      await m.BeliefVote.collection.insertOne({
+        profileId,
+        tabId: 'tab_target',
+        voterUserId: u,
+        value: 'agree',
+        textSeq: 0,
+        voterTier: 'member',
+        historySeq: 1,
+      });
+    }
+    const target = async () =>
+      (await m.VoteTally.findOne({ tabId: 'tab_target' }).lean()).agreeMember;
+    const seen: number[] = [];
+    for (let read = 0; read < 2; read++) {
+      await tallies.repairLeftBehind();
+      seen.push(await target());
+    }
+    console.log('rotation: target agreeMember after each list read', seen);
+    expect(seen.at(-1)).toBe(2);
+    // Clean up so later tests see no stopped writers.
+    await m.VoteTally.collection.deleteMany({ profileId });
+  });
+
   it('five clicks at once make one vote and one history entry', async () => {
     await addMember('user_clicker');
     const seq = await headSeq('tab_b');
@@ -524,7 +572,7 @@ describeWithMongo('votes on a real MongoDB', () => {
     );
     await expectIndex(
       (e) => e.model === 'VoteTally' && 'writers.at' in e.filter,
-      'writers.at_1',
+      'countedAt_1_writers.at_1',
       'left-behind repair',
     );
     await expectIndex(

@@ -55,6 +55,8 @@ export interface TallyRow {
   earlierAnon?: number;
   agreeAll?: number;
   tabCreatedAt?: Date;
+  /** When the counts were last saved. */
+  countedAt?: Date;
 }
 
 /** What a reader is shown for one belief. */
@@ -80,6 +82,7 @@ export const TALLY_FIELDS = {
   earlierAnon: 1,
   agreeAll: 1,
   tabCreatedAt: 1,
+  countedAt: 1,
 };
 
 /**
@@ -257,6 +260,8 @@ export class VoteTalliesService {
             earlierAnon: count(earlier, 'anonymous'),
             agreeAll: agreeMember + agreeAnon,
             tabCreatedAt: tab?.createdAt ?? new Date(0),
+            // The repair recounts the least recently counted first.
+            countedAt: new Date(),
           },
         },
       )
@@ -285,7 +290,16 @@ export class VoteTalliesService {
             .exec()) as unknown as TallyRow[]
         ).map((row) => [row.tabId, row]),
       );
-    const rows = await read();
+    let rows = await read();
+    // Marks of writers that died are dropped here too, so a member page
+    // stops recounting on every read even when nobody opens the Beliefs
+    // list (fix round 2, item e).
+    const dead = new Date(Date.now() - WRITER_MARK_STALE_MS);
+    const withDead = [...rows.values()].filter((row) =>
+      (row.writers ?? []).some((mark) => mark.at < dead),
+    );
+    for (const row of withDead) await this.dropDeadMarks(row.tabId, dead);
+    if (withDead.length > 0) rows = await read();
     const behind = tabs.filter(({ tabId, textSeq }) => {
       const row = rows.get(tabId);
       return row !== undefined && (isBehind(row) || row.textSeq !== textSeq);
@@ -297,8 +311,11 @@ export class VoteTalliesService {
 
   /**
    * Recounts tallies whose writer has not settled for a while, a few per
-   * call, and drops marks older than any live writer can be: their writer
-   * died, and this recount is the one it never ran.
+   * call, least recently counted first, and drops marks older than any live
+   * writer can be: their writer died, and this recount is the one it never
+   * ran. Recounting sets `countedAt`, so the next call takes the next ones:
+   * every marked belief is reached, however many there are (fix round 2,
+   * item d: without the order, the same ten won every call).
    */
   async repairLeftBehind() {
     const now = Date.now();
@@ -309,20 +326,26 @@ export class VoteTalliesService {
           $lt: new Date(now - TALLY_REPAIR_AFTER_MS),
         },
       })
+      .sort({ countedAt: 1 })
       .limit(TALLY_REPAIRS_PER_READ)
       .select({ tabId: 1 })
       .lean()
       .exec()) as Array<{ tabId: string }>;
     const dead = new Date(now - WRITER_MARK_STALE_MS);
     for (const row of rows) {
-      await this.tallyModel
-        .updateOne(
-          { tabId: row.tabId, 'writers.at': { $lt: dead } },
-          { $inc: { rev: 1 }, $pull: { writers: { at: { $lt: dead } } } },
-        )
-        .exec();
+      await this.dropDeadMarks(row.tabId, dead);
       await this.recompute(row.tabId);
     }
+  }
+
+  /** Removes marks older than `dead`; bumps the revision if any went. */
+  private async dropDeadMarks(tabId: string, dead: Date) {
+    await this.tallyModel
+      .updateOne(
+        { tabId, 'writers.at': { $lt: dead } },
+        { $inc: { rev: 1 }, $pull: { writers: { at: { $lt: dead } } } },
+      )
+      .exec();
   }
 }
 
