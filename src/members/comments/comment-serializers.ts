@@ -1,5 +1,6 @@
 import type {
   CommentKind,
+  ModerationState,
   SuggestionStatus,
 } from '../../social/schemas/comment.schema';
 
@@ -55,7 +56,16 @@ export interface CommentView {
   /** The date Apple Pages showed; never proof of when it was written. */
   importedDate?: string;
   removed: boolean;
-  /** Absent when removed. */
+  /**
+   * A moderator hid or removed it (Chunk 13). Shown to every reader, in
+   * place, as "Hidden by a moderator" or "Removed by a moderator"; only an
+   * admin still receives its text, badge and suggested wording.
+   */
+  moderated?: ModerationState;
+  /**
+   * Absent when removed by its author, and for anyone but an admin when a
+   * moderator hid or removed it.
+   */
   body?: string;
   /** The highlighted text an imported comment was attached to. */
   anchorText?: string;
@@ -122,6 +132,7 @@ export interface CommentRow {
   stance?: 'agree' | 'disagree';
   createdAt: Date;
   removedAt?: Date;
+  moderation?: ModerationState;
   suggestion?: {
     proposedText: string;
     baseSeq: number;
@@ -134,6 +145,8 @@ export interface ViewContext {
   viewerUserId?: string;
   /** The viewer owns the page the comment is on. */
   viewerIsOwner: boolean;
+  /** An admin reads what a moderator hid or removed (Chunk 13). */
+  viewerIsAdmin?: boolean;
   /** The belief text's newest version, per tab (for `stale`). */
   tabTextSeq: Map<string, number>;
   /** The newest version of each site member's comment. */
@@ -150,10 +163,12 @@ function suggestionView(
   const status =
     suggestion.status === 'accepting' ? 'pending' : suggestion.status;
   const removed = Boolean(row.removedAt);
+  const moderated = row.moderation !== undefined;
+  const textHidden = removed || (moderated && !context.viewerIsAdmin);
   // A suggestion always names its belief tab.
   const current = context.tabTextSeq.get(String(row.tabId));
   return {
-    ...(removed ? {} : { proposedText: suggestion.proposedText }),
+    ...(textHidden ? {} : { proposedText: suggestion.proposedText }),
     baseSeq: suggestion.baseSeq,
     status,
     ...(suggestion.decidedAt
@@ -162,7 +177,8 @@ function suggestionView(
     ...(status === 'pending' && !removed
       ? {
           stale: current !== suggestion.baseSeq,
-          canDecide: context.viewerIsOwner,
+          // A hidden suggestion cannot be accepted (Chunk 13).
+          canDecide: context.viewerIsOwner && !moderated,
         }
       : {}),
   };
@@ -173,6 +189,11 @@ export function commentView(
   context: ViewContext,
 ): CommentView {
   const removed = Boolean(row.removedAt);
+  const moderated = row.moderation;
+  // Chunk 13: a moderator's decision hides the text, the highlighted text
+  // and the stance badge from everyone but an admin.
+  const textHidden =
+    removed || (moderated !== undefined && !context.viewerIsAdmin);
   const imported = row.source === 'migrated';
   const isSuggestion = row.kind === 'suggestion';
   // A suggestion is never edited; its one version records note and text.
@@ -189,21 +210,26 @@ export function commentView(
     kind: row.kind ?? 'comment',
     source: imported ? 'imported' : 'member',
     ...(row.parentCommentId ? { parentCommentId: row.parentCommentId } : {}),
-    ...(row.stance ? { stance: row.stance } : {}),
+    ...(row.stance && !textHidden ? { stance: row.stance } : {}),
     author: context.authorOf(row),
     postedAt: row.createdAt.toISOString(),
     ...(imported && row.legacyCreatedAt
       ? { importedDate: row.legacyCreatedAt.toISOString() }
       : {}),
     removed,
-    ...(removed ? {} : { body: head?.text ?? row.body }),
-    ...(!removed && imported && row.anchorText
+    ...(moderated ? { moderated } : {}),
+    ...(textHidden ? {} : { body: head?.text ?? row.body }),
+    ...(!textHidden && imported && row.anchorText
       ? { anchorText: row.anchorText }
       : {}),
     edited,
     ...(edited && head ? { editedAt: head.createdAt.toISOString() } : {}),
     mine: mine && !removed,
-    ...(mine && !removed && !isSuggestion ? { seq: head?.seq ?? 1 } : {}),
+    // No edit while a moderator's decision stands (Chunk 13): `seq` is what
+    // offers one.
+    ...(mine && !removed && !isSuggestion && !moderated
+      ? { seq: head?.seq ?? 1 }
+      : {}),
     ...(suggestion ? { suggestion } : {}),
   };
 }

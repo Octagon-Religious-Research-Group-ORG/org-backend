@@ -18,6 +18,8 @@ import {
 import { NEEDS_REPLICA_SET } from '../src/db/transactions';
 import { AdminMembersService } from '../src/members/admin/admin-members.service';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
+import { ModerationQueueService } from '../src/members/moderation/moderation-queue.service';
+import { ReportsStore } from '../src/moderation/reports.store';
 
 const uri = process.env.MONGO_STANDALONE_URI;
 const describeStandalone = uri ? describe : describe.skip;
@@ -120,6 +122,7 @@ describeStandalone('claims on a standalone MongoDB', () => {
       conn,
       new ModerationLogService(m.ModerationLogEntry),
       { closePageNotice: () => Promise.resolve() } as never,
+      { resolveOpen: () => Promise.resolve(0) } as never,
     );
     await expect(
       admin.approve('user_admin', 'standalone-waiting'),
@@ -127,6 +130,40 @@ describeStandalone('claims on a standalone MongoDB', () => {
     expect(
       (await m.SocialProfile.findOne({ _id: profileId }).lean()).reviewStatus,
     ).toBe('pending');
+    error.mockRestore();
+  });
+
+  it('moderation actions (Chunk 13) answer 503 the same way, changing nothing', async () => {
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    await m.Comment.collection.insertOne({
+      commentId: 'cmt_standalone',
+      profileId: new Types.ObjectId(),
+      legacyAuthorName: 'Synthetic Pages Author',
+      body: 'Synthetic.',
+      source: 'migrated',
+      createdAt: new Date(),
+    });
+    const queue = new ModerationQueueService(
+      m.Report,
+      m.Comment,
+      m.SocialProfile,
+      m.BeliefTab,
+      conn,
+      {} as never,
+      {} as never,
+      new ReportsStore(m.Report),
+      { closeReportNotice: () => Promise.resolve() } as never,
+      new ModerationLogService(m.ModerationLogEntry),
+    );
+    await expect(
+      queue.moderateComment('user_admin', 'cmt_standalone', 'hide', 'r'),
+    ).rejects.toThrow(new ServiceUnavailableException(NEEDS_REPLICA_SET));
+    expect(
+      (await m.Comment.findOne({ commentId: 'cmt_standalone' }).lean())
+        .moderation,
+    ).toBeUndefined();
     error.mockRestore();
   });
 });

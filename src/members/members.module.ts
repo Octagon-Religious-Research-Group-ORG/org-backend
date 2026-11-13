@@ -6,6 +6,7 @@ import {
   ModerationLogEntry,
   ModerationLogEntrySchema,
 } from '../moderation/schemas/moderation-log.schema';
+import { Report, ReportSchema } from '../moderation/schemas/report.schema';
 import {
   BeliefTab,
   BeliefTabSchema,
@@ -75,6 +76,13 @@ import { MemberPageEditorService } from './member-page-editor.service';
 import { MembersService } from './members.service';
 import { MemberWriteThrottleGuard } from './member-write-throttle.guard';
 import { MyMemberPageService } from './my-member-page.service';
+import {
+  AdminModerationController,
+  AdminModerationWritesController,
+  MyReportWritesController,
+} from './moderation/moderation.controller';
+import { ModerationQueueService } from './moderation/moderation-queue.service';
+import { ReportsService } from './moderation/reports.service';
 import { OrgSettingsService } from './org-settings.service';
 import {
   OrgPageReactionsController,
@@ -97,7 +105,8 @@ import { VotesService } from './votes/votes.service';
  * belief votes and the Beliefs page section (Chunk 10), the same votes
  * and comments on ORG's own pages (Chunk 10b), and claims on imported pages
  * with the linking of imported comments (Chunk 11), and the admin dashboard
- * with the "Request EaM" button (Chunk 12).
+ * with the "Request EaM" button (Chunk 12), and reports with the moderation
+ * queue (Chunk 13).
  */
 @Module({
   imports: [
@@ -116,6 +125,8 @@ import { VotesService } from './votes/votes.service';
       { name: Claim.name, schema: ClaimSchema },
       // Read only, for the admin dashboard's log view (Chunk 12).
       { name: ModerationLogEntry.name, schema: ModerationLogEntrySchema },
+      // Reports and the moderation queue (Chunk 13).
+      { name: Report.name, schema: ReportSchema },
       // Read only, for votes and comments on ORG's own pages (Chunk 10b).
       { name: WebsitePage.name, schema: WebsitePageSchema },
     ]),
@@ -138,6 +149,9 @@ import { VotesService } from './votes/votes.service';
     AdminDashboardWritesController,
     MyEamRequestController,
     MyEamRequestWritesController,
+    MyReportWritesController,
+    AdminModerationController,
+    AdminModerationWritesController,
   ],
   providers: [
     MembersService,
@@ -163,6 +177,8 @@ import { VotesService } from './votes/votes.service';
     AdminMembersService,
     AdminLogService,
     EamRequestsService,
+    ReportsService,
+    ModerationQueueService,
   ],
 })
 export class MembersModule {}

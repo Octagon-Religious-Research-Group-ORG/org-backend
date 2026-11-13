@@ -4,9 +4,11 @@ import { HydratedDocument, Types } from 'mongoose';
 /**
  * - `page-submitted`: a new member page is waiting for approval (plan §2d:
  *   replaces "message Tripp when you're done");
- * - `eam-request`: a member pressed "Request EaM" (plan §2d item 9).
+ * - `eam-request`: a member pressed "Request EaM" (plan §2d item 9);
+ * - `report`: a comment or member page has open reports (Chunk 13). One
+ *   entry per target; a new report re-opens and moves it up.
  */
-export const INBOX_KINDS = ['page-submitted', 'eam-request'] as const;
+export const INBOX_KINDS = ['page-submitted', 'eam-request', 'report'] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
 export const INBOX_STATUSES = ['open', 'handled'] as const;
@@ -40,9 +42,20 @@ export class AdminInboxEntry {
   @Prop({ type: String, enum: INBOX_STATUSES, required: true, default: 'open' })
   status: InboxStatus;
 
-  /** Clerk user id of the member the entry is about. */
+  /**
+   * Clerk user id of the member the entry is about. For a report: the
+   * reported content's author, or `imported:<commentId>` for an imported
+   * comment linked to no one.
+   */
   @Prop({ type: String, required: true })
   subjectUserId: string;
+
+  /** What a `report` entry is about (Chunk 13). */
+  @Prop({ type: String })
+  targetType?: string;
+
+  @Prop({ type: String })
+  targetId?: string;
 
   /** Their member page, when the entry is about one. */
   @Prop({ type: Types.ObjectId })
@@ -86,6 +99,11 @@ AdminInboxEntrySchema.index(
 /** The `dedupeKey` of a member's EaM request. */
 export function eamKey(userId: string) {
   return `eam:${userId}`;
+}
+
+/** The `dedupeKey` of a target's "has open reports" notice (Chunk 13). */
+export function reportKey(targetType: string, targetId: string) {
+  return `report:${targetType}:${targetId}`;
 }
 
 /** The `dedupeKey` of a page's "waiting for approval" notice. */

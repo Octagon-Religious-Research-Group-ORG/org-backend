@@ -199,7 +199,11 @@
       "members/admin/admin-log.service.ts",
       "members/admin/eam-requests.service.ts",
       "members/admin/admin.controller.ts",
-      "auth/write-outcome.ts"
+      "auth/write-outcome.ts",
+      "moderation/reports.store.ts",
+      "members/moderation/reports.service.ts",
+      "members/moderation/moderation-queue.service.ts",
+      "members/moderation/moderation.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

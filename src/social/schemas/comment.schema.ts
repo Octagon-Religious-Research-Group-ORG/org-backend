@@ -15,6 +15,10 @@ export const MAX_ANCHOR_TEXT_LENGTH = 20_000;
  * - `suggestion`: "Suggest a rewording" (plan §2d item 6): new full text for
  *   one belief's text, which its owner can accept or decline.
  */
+/** What a moderator did to a comment (Chunk 13). */
+export const MODERATION_STATES = ['hidden', 'removed'] as const;
+export type ModerationState = (typeof MODERATION_STATES)[number];
+
 export const COMMENT_KINDS = ['comment', 'suggestion'] as const;
 export type CommentKind = (typeof COMMENT_KINDS)[number];
 
@@ -202,6 +206,23 @@ export class Comment {
 
   @Prop({ type: String })
   removedBy?: string;
+
+  /**
+   * A moderator's decision (Chunk 13): `hidden` or `removed`. Both are a
+   * status only: the text, its versions and its place in the thread stay
+   * (plan §2b, five years), readers see "Hidden by a moderator" or "Removed
+   * by a moderator", and only admins read the text. A restore unsets all
+   * three fields; every change is in the moderation log.
+   */
+  @Prop({ type: String, enum: MODERATION_STATES })
+  moderation?: ModerationState;
+
+  /** Server time of the decision, and the admin's Clerk user id. */
+  @Prop({ type: Date })
+  moderatedAt?: Date;
+
+  @Prop({ type: String })
+  moderatedBy?: string;
 
   createdAt?: Date;
   updatedAt?: Date;

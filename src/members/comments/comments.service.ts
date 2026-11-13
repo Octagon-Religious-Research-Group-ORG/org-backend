@@ -25,7 +25,7 @@ import { MemberPageEditorService } from '../member-page-editor.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
 import { orgPageIdOfThread } from '../org-pages/org-page-targets';
 import { type OrgPage, OrgPagesService } from '../org-pages/org-pages.service';
-import type { Viewer } from '../profile-access';
+import { GUEST_VIEWER, type Viewer } from '../profile-access';
 import { CommentAuthorsService } from './comment-authors.service';
 import { COMMENT_HISTORY_PAGE_SIZE, describeFailure } from './comment-limits';
 import {
@@ -47,6 +47,10 @@ export const NO_SUCH_BELIEF = 'That belief is not on this page.';
 export const REPLY_TO_REMOVED =
   'That comment was removed by its author, so it cannot take new replies.';
 export const REMOVED_COMMENT = 'That comment was removed.';
+export const MODERATED_COMMENT =
+  'A moderator hid or removed that comment, so it cannot be changed.';
+export const REPLY_TO_MODERATED =
+  'A moderator hid or removed that comment, so it cannot take new replies.';
 export const COMMENT_BUSY =
   'This comment is being saved in another window. Please try again in a moment.';
 export const DECIDED_SUGGESTION =
@@ -322,6 +326,7 @@ export class CommentsService {
     const context = {
       ...(viewer.userId ? { viewerUserId: viewer.userId } : {}),
       viewerIsOwner,
+      viewerIsAdmin: viewer.isAdmin,
       tabTextSeq,
       heads,
       authorOf: (row: CommentRow) =>
@@ -391,6 +396,7 @@ export class CommentsService {
       );
       if (!root) throw new NotFoundException(COMMENT_NOT_FOUND);
       if (root.removedAt) throw new ConflictException(REPLY_TO_REMOVED);
+      if (root.moderation) throw new ConflictException(REPLY_TO_MODERATED);
       if (tabId !== undefined && tabId !== root.tabId) {
         throw new BadRequestException(
           'A reply belongs to the thread of the comment it answers.',
@@ -569,12 +575,20 @@ export class CommentsService {
       );
     }
     if (row.removedAt) throw new ConflictException(REMOVED_COMMENT);
+    // Decision (Chunk 13): no edit while a moderator's decision stands, so a
+    // restore never shows text no admin has seen. The turn checks it too.
+    if (row.moderation) throw new ConflictException(MODERATED_COMMENT);
     await this.requireOpenThread(row.profileId, row.tabId);
     const [head] = await this.versions.page(commentId, 0, 1);
     if (head && head.text === body) return { changed: false, seq: head.seq };
 
     const turn = await this.store.takeEditTurn(commentId, writer.userId);
-    if (turn === undefined) throw new ConflictException(REMOVED_COMMENT);
+    if (turn === undefined) {
+      const now = await this.store.one(commentId);
+      throw new ConflictException(
+        now?.moderation && !now.removedAt ? MODERATED_COMMENT : REMOVED_COMMENT,
+      );
+    }
     try {
       const saved = await this.versions.append({
         commentId,
@@ -648,12 +662,13 @@ export class CommentsService {
     page = 1,
   ): Promise<CommentHistoryPage> {
     const { profile } = await this.readablePage(slug, viewer);
-    return this.historyIn(profile, commentId, page);
+    return this.historyIn(profile, commentId, page, viewer);
   }
 
   /**
    * A comment's versions on one of ORG's own pages (Chunk 10b), for anyone.
    *
+   * @param viewer - an admin also reads a hidden comment's history (Chunk 13)
    * @throws NotFoundException for a page that is unknown or not published,
    *   or a comment not listed on it
    */
@@ -661,20 +676,32 @@ export class CommentsService {
     pageId: string,
     commentId: string,
     page = 1,
+    viewer: Viewer = GUEST_VIEWER,
   ): Promise<CommentHistoryPage> {
-    return this.historyIn(await this.orgPages.find(pageId), commentId, page);
+    return this.historyIn(
+      await this.orgPages.find(pageId),
+      commentId,
+      page,
+      viewer,
+    );
   }
 
+  /**
+   * A comment a moderator hid or removed has its history read by admins
+   * only (Chunk 13); anyone else gets the same 404 as for no comment.
+   */
   private async historyIn(
     profile: { _id: Types.ObjectId },
     commentId: string,
     page: number,
+    viewer: Viewer,
   ): Promise<CommentHistoryPage> {
     const row = await this.store.one(commentId);
     if (
       !row ||
       !row.profileId.equals(profile._id) ||
       row.removedAt ||
+      (row.moderation && !viewer.isAdmin) ||
       row.source !== 'native' ||
       row.kind === 'suggestion'
     ) {

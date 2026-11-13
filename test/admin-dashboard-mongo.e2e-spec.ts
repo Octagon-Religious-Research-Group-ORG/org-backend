@@ -29,6 +29,7 @@ import { EamRequestsService } from '../src/members/admin/eam-requests.service';
 import { MembersService } from '../src/members/members.service';
 import { decideProfileAccess } from '../src/members/profile-access';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
+import { ReportsStore } from '../src/moderation/reports.store';
 
 const uri = process.env.MONGO_TEST_URI;
 const describeWithMongo = uri ? describe : describe.skip;
@@ -110,7 +111,13 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
       conn,
       log,
     );
-    admin = new AdminMembersService(m.SocialProfile, conn, log, inbox);
+    admin = new AdminMembersService(
+      m.SocialProfile,
+      conn,
+      log,
+      inbox,
+      new ReportsStore(m.Report),
+    );
     eam = new EamRequestsService(m.SocialProfile, inbox);
     logView = new AdminLogService(m.ModerationLogEntry, m.SocialProfile);
   });
@@ -206,6 +213,7 @@ describeWithMongo('admin dashboard on a real MongoDB', () => {
       conn,
       failingLog as never,
       inbox,
+      new ReportsStore(m.Report),
     );
     await expect(broken.approve(ADMIN, page.slug)).rejects.toThrow(
       'synthetic log failure',

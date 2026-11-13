@@ -47,6 +47,7 @@ export const COMMENT_FIELDS = {
   stance: 1,
   createdAt: 1,
   removedAt: 1,
+  moderation: 1,
   suggestion: 1,
 };
 
@@ -80,7 +81,13 @@ async function importedIndex(
   const rows = (await commentModel
     .find({ profileId, source: 'migrated' })
     .sort({ createdAt: 1, _id: 1 })
-    .select({ commentId: 1, tabId: 1, parentCommentId: 1, removedAt: 1 })
+    .select({
+      commentId: 1,
+      tabId: 1,
+      parentCommentId: 1,
+      removedAt: 1,
+      moderation: 1,
+    })
     .lean()
     .exec()) as CommentSkeleton[];
   return { rows, index: indexThreads(rows) };
@@ -111,6 +118,7 @@ export async function commentCounts(
             source: 'native',
             bodySeq: { $exists: true },
             removedAt: { $exists: false },
+            moderation: { $exists: false },
           },
         },
         { $group: { _id: '$tabId', n: { $sum: 1 } } },
@@ -435,7 +443,14 @@ export class CommentStore {
     const id = randomUUID();
     const taken = await this.commentModel
       .updateOne(
-        { commentId, authorUserId, removedAt: { $exists: false }, ...LISTED },
+        {
+          commentId,
+          authorUserId,
+          removedAt: { $exists: false },
+          // Never while a moderator has hidden or removed it (Chunk 13).
+          moderation: { $exists: false },
+          ...LISTED,
+        },
         { $push: { editTurns: { id, at: new Date() } } },
       )
       .exec();

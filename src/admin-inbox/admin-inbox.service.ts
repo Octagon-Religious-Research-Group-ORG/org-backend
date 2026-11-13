@@ -25,6 +25,7 @@ import {
   type InboxStatus,
   MAX_INBOX_NOTE_LENGTH,
   pageSubmittedKey,
+  reportKey,
 } from './schemas/admin-inbox.schema';
 
 export const INBOX_PAGE_SIZE = 25;
@@ -50,6 +51,8 @@ export interface InboxEntryView {
   handledBy?: string;
   /** An EaM request still blocks the member from asking again. */
   blocksNewRequest?: boolean;
+  /** What a `report` notice is about (Chunk 13). */
+  target?: { type: string; id: string };
 }
 
 interface EntryRow {
@@ -60,6 +63,8 @@ interface EntryRow {
   profileId?: Types.ObjectId;
   note?: string;
   dedupeKey?: string;
+  targetType?: string;
+  targetId?: string;
   createdAt: Date;
   handledAt?: Date;
   handledBy?: string;
@@ -175,6 +180,77 @@ export class AdminInboxService {
       .exec();
   }
 
+  /**
+   * A comment or member page was reported (Chunk 13): writes its notice, or
+   * re-opens it and moves it to the top of the inbox. One per target, so a
+   * hundred reports are one line; the queue has the detail. The caller makes
+   * this best effort: a report stands even when the notice fails.
+   *
+   * @param subjectUserId - the reported content's author (an admin never
+   *   handles a notice about themselves)
+   */
+  async notifyReport(target: {
+    targetType: string;
+    targetId: string;
+    subjectUserId: string;
+    profileId?: Types.ObjectId;
+  }) {
+    const now = new Date();
+    // Through the driver, not Mongoose: Mongoose always moves `createdAt`
+    // into `$setOnInsert` (it is immutable), whatever the options, so an
+    // existing notice would never move up (measured on MongoDB 7.0.14).
+    // Every field is written here as the schema stores it.
+    const write = () =>
+      this.entryModel.collection.updateOne(
+        { dedupeKey: reportKey(target.targetType, target.targetId) },
+        {
+          // The newest report sets its place in the inbox.
+          $set: { status: 'open', createdAt: now, updatedAt: now },
+          $unset: { handledAt: 1, handledBy: 1 },
+          $setOnInsert: {
+            kind: 'report',
+            subjectUserId: target.subjectUserId,
+            targetType: target.targetType,
+            targetId: target.targetId,
+            ...(target.profileId ? { profileId: target.profileId } : {}),
+          },
+        },
+        { upsert: true },
+      );
+    try {
+      await write();
+    } catch (error) {
+      // Two first reports at once: one inserted, the other updates it.
+      if (!isDuplicateKey(error)) throw error;
+      await write();
+    }
+  }
+
+  /**
+   * Marks a target's report notice handled, inside the moderator's action on
+   * that target, which closed its reports.
+   */
+  async closeReportNotice(
+    targetType: string,
+    targetId: string,
+    adminId: string,
+    session: ClientSession,
+  ) {
+    await this.entryModel
+      .updateOne(
+        { dedupeKey: reportKey(targetType, targetId), status: 'open' },
+        {
+          $set: {
+            status: 'handled',
+            handledAt: new Date(),
+            handledBy: adminId,
+          },
+        },
+        { session },
+      )
+      .exec();
+  }
+
   async myEamRequest(userId: string): Promise<MyEamRequest> {
     const row = await this.entryModel
       .findOne({ dedupeKey: eamKey(userId) })
@@ -270,6 +346,9 @@ export class AdminInboxService {
           ...(row.handledBy ? { handledBy: row.handledBy } : {}),
           ...(row.kind === 'eam-request'
             ? { blocksNewRequest: row.dedupeKey !== undefined }
+            : {}),
+          ...(row.kind === 'report' && row.targetType && row.targetId
+            ? { target: { type: row.targetType, id: row.targetId } }
             : {}),
         };
       }),

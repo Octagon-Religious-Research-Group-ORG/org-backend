@@ -49,6 +49,8 @@ export const SUGGESTION_ALREADY_ACCEPTED =
   'This suggestion has already been accepted.';
 export const SUGGESTION_BUSY =
   'This suggestion is being accepted in another window. Reload in a moment.';
+export const SUGGESTION_MODERATED =
+  'A moderator hid this suggestion, so it cannot be accepted.';
 export const SUGGESTION_TOO_LONG = `A suggested belief can hold at most ${MAX_BLOCK_TEXT_LENGTH.toLocaleString('en-US')} characters.`;
 export const NOTE_TOO_LONG = `A note can hold at most ${MAX_COMMENT_LENGTH.toLocaleString('en-US')} characters.`;
 export const BELIEF_CHANGED_RELOAD =
@@ -74,6 +76,7 @@ interface SuggestionRow {
   tabId?: string;
   authorUserId?: string;
   removedAt?: Date;
+  moderation?: string;
   suggestion?: {
     proposedText: string;
     baseSeq: number;
@@ -258,6 +261,9 @@ export class SuggestionsService {
     if (status === 'accepted' || status === 'declined') {
       throw new ConflictException(SUGGESTION_ALREADY_DECIDED);
     }
+    // Chunk 13: a moderator's decision stands in the way; the lock below
+    // checks it again, in the same write.
+    if (row.moderation) throw new ConflictException(SUGGESTION_MODERATED);
 
     const lockId = randomUUID();
     const staleBefore = new Date(Date.now() - ACCEPT_LOCK_STALE_MS);
@@ -266,6 +272,7 @@ export class SuggestionsService {
         {
           commentId,
           removedAt: { $exists: false },
+          moderation: { $exists: false },
           $or: [
             { 'suggestion.status': 'pending' },
             {

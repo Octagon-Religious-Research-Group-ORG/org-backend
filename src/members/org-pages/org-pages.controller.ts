@@ -82,12 +82,20 @@ export class OrgPageReactionsController {
   }
 
   @Get('comments/:commentId/history')
-  history(
+  async history(
+    @Req() request: AuthenticatedRequest,
     @Param('pageId') pageId: string,
     @Param('commentId') commentId: string,
     @Query() query: CommentHistoryQueryDto,
   ) {
-    return this.comments.orgHistory(pageId, commentId, query.page);
+    // The reader decides only one thing here: an admin also reads a comment
+    // a moderator hid (Chunk 13).
+    return this.comments.orgHistory(
+      pageId,
+      commentId,
+      query.page,
+      await this.members.resolveViewer(request),
+    );
   }
 }
 

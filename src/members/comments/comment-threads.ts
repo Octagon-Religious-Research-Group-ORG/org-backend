@@ -25,6 +25,8 @@ export interface CommentSkeleton {
   tabId?: string;
   parentCommentId?: string;
   removedAt?: Date | null;
+  /** A moderator hid or removed it (Chunk 13). */
+  moderation?: string | null;
 }
 
 /** The thread key: a tab id, or this value for the page-level thread. */
@@ -89,8 +91,8 @@ export function indexThreads(rows: readonly CommentSkeleton[]): ThreadIndex {
 
 /**
  * Comments a reader sees in each thread: every comment in it, replies
- * included, minus those removed by their author (each still holds its place
- * as "removed", but is not counted).
+ * included, minus those removed by their author or hidden or removed by a
+ * moderator (Chunk 13): each still holds its place, but is not counted.
  */
 export function visibleCounts(
   rows: readonly CommentSkeleton[],
@@ -98,7 +100,7 @@ export function visibleCounts(
   const { threadOf } = indexThreads(rows);
   const counts = new Map<string, number>();
   for (const row of rows) {
-    if (row.removedAt) continue;
+    if (row.removedAt || row.moderation) continue;
     const thread = threadOf.get(row.commentId)!;
     counts.set(thread, (counts.get(thread) ?? 0) + 1);
   }

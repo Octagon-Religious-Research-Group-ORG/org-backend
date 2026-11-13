@@ -4,11 +4,13 @@
 // database. Named so neither the build (which leaves out `*spec.ts`) nor Jest
 // (which runs `*.spec.ts`) treats it as code or as a suite.
 //
-// Supported: find/findOne (sort, skip, limit, select ignored, lean), exists,
+// Supported: find/findOne (sort, skip, limit, select and session ignored,
+// lean), exists,
 // countDocuments, create (unique keys, timestamps), updateOne/updateMany/
 // findOneAndUpdate ($set, $unset, $inc, $push, $pull; updateOne also
 // upserts), and aggregate with
-// $match, $sort and $group ($first, $max, $sum). Not a database: no
+// $match, $sort, $group ($first, $min, $max, $sum, $push), $skip, $limit
+// and $project (1 and $slice). Not a database: no
 // projection, no validation, no transactions.
 import sift from 'sift';
 import { Types } from 'mongoose';
@@ -172,6 +174,8 @@ export interface FakeQuery {
   skip: (n: number) => FakeQuery;
   limit: (n: number) => FakeQuery;
   lean: () => FakeQuery;
+  /** Ignored: no transactions here. */
+  session: (session?: unknown) => FakeQuery;
   exec: () => Promise<unknown>;
 }
 
@@ -204,6 +208,7 @@ export function fakeModel(
         return q;
       },
       lean: () => q,
+      session: () => q,
       exec: () => {
         let found = matching(filter);
         if (sort) found = sortDocs(found, sort);
@@ -328,6 +333,12 @@ export function fakeModel(
             rows = sortDocs(rows, stage.$sort as Record<string, 1 | -1>);
           } else if ('$group' in stage) {
             rows = group(rows, stage.$group as Doc);
+          } else if ('$skip' in stage) {
+            rows = rows.slice(stage.$skip as number);
+          } else if ('$limit' in stage) {
+            rows = rows.slice(0, stage.$limit as number);
+          } else if ('$project' in stage) {
+            rows = rows.map((row) => project(row, stage.$project as Doc));
           } else {
             throw new Error('fake model: unsupported aggregate stage');
           }
@@ -339,6 +350,25 @@ export function fakeModel(
   return model;
 }
 
+/** `$project`: 1 keeps a field; `{ $slice: ['$f', n] }` keeps n items. */
+function project(row: Doc, spec: Doc): Doc {
+  const out: Doc = { _id: row._id };
+  for (const [name, rule] of Object.entries(spec)) {
+    if (rule === 1) {
+      if (name in row) out[name] = row[name];
+    } else if (typeof rule === 'object' && rule !== null && '$slice' in rule) {
+      const [path, n] = (rule as { $slice: [string, number] }).$slice;
+      out[name] = ((getPath(row, path.slice(1)) as unknown[]) ?? []).slice(
+        0,
+        n,
+      );
+    } else {
+      throw new Error('fake model: unsupported $project rule');
+    }
+  }
+  return out;
+}
+
 function group(rows: Doc[], spec: Doc): Doc[] {
   const field = (expression: unknown, row: Doc) =>
     typeof expression === 'string' && expression.startsWith('$')
@@ -346,8 +376,19 @@ function group(rows: Doc[], spec: Doc): Doc[] {
       : expression;
   const groups = new Map<unknown, Doc>();
   for (const row of rows) {
-    const id = field(spec._id, row);
-    const key = comparable(id);
+    const id =
+      typeof spec._id === 'object' && spec._id !== null
+        ? Object.fromEntries(
+            Object.entries(spec._id as Doc).map(([k, path]) => [
+              k,
+              field(path, row),
+            ]),
+          )
+        : field(spec._id, row);
+    const key =
+      typeof id === 'object' && id !== null && !(id instanceof Types.ObjectId)
+        ? JSON.stringify(id)
+        : comparable(id);
     const current = groups.get(key) ?? { _id: id };
     for (const [name, accumulator] of Object.entries(spec)) {
       if (name === '_id') continue;
@@ -355,6 +396,23 @@ function group(rows: Doc[], spec: Doc): Doc[] {
       const value = field(expression, row);
       if (op === '$first') {
         if (!(name in current)) current[name] = value;
+      } else if (op === '$min') {
+        if (!(name in current) || compare(value, current[name]) < 0) {
+          current[name] = value;
+        }
+      } else if (op === '$push') {
+        const pushed = (current[name] as unknown[] | undefined) ?? [];
+        pushed.push(
+          typeof expression === 'object' && expression !== null
+            ? Object.fromEntries(
+                Object.entries(expression as Doc).flatMap(([key, path]) => {
+                  const v = field(path, row);
+                  return v === undefined ? [] : [[key, v]];
+                }),
+              )
+            : value,
+        );
+        current[name] = pushed;
       } else if (op === '$max') {
         if (!(name in current) || compare(value, current[name]) > 0) {
           current[name] = value;

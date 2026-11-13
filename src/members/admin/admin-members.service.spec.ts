@@ -56,7 +56,9 @@ const pageRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function build(options: { page?: unknown; modified?: number } = {}) {
+function build(
+  options: { page?: unknown; modified?: number; reportsClosed?: number } = {},
+) {
   const profileModel = {
     find: jest.fn(() => chain([])),
     findOne: jest.fn(() =>
@@ -70,6 +72,10 @@ function build(options: { page?: unknown; modified?: number } = {}) {
   const inbox = {
     closePageNotice: jest.fn(() => Promise.resolve()),
     reopenPageNotice: jest.fn(() => Promise.resolve()),
+    closeReportNotice: jest.fn(() => Promise.resolve()),
+  };
+  const reports = {
+    resolveOpen: jest.fn(() => Promise.resolve(options.reportsClosed ?? 0)),
   };
   const { connection, session } = fakeConnection();
   const service = new AdminMembersService(
@@ -77,8 +83,9 @@ function build(options: { page?: unknown; modified?: number } = {}) {
     connection as never,
     log as never,
     inbox as never,
+    reports as never,
   );
-  return { service, profileModel, log, inbox, session };
+  return { service, profileModel, log, inbox, reports, session };
 }
 
 describe('AdminMembersService.list', () => {
@@ -291,6 +298,29 @@ describe('AdminMembersService decisions', () => {
       session,
     );
     expect(inbox.closePageNotice).toHaveBeenCalledWith(PAGE_ID, ADMIN, session);
+  });
+
+  it('closes the page’s open reports and their notice with a removal (Chunk 13)', async () => {
+    const quiet = build();
+    await quiet.service.remove(ADMIN, 'quiet-fern', 'r');
+    expect(quiet.reports.resolveOpen).toHaveBeenCalledWith(
+      'member-page',
+      String(PAGE_ID),
+      'member-removed',
+      ADMIN,
+      quiet.session,
+    );
+    // No report was open: no notice to close.
+    expect(quiet.inbox.closeReportNotice).not.toHaveBeenCalled();
+
+    const reported = build({ reportsClosed: 2 });
+    await reported.service.remove(ADMIN, 'quiet-fern', 'r');
+    expect(reported.inbox.closeReportNotice).toHaveBeenCalledWith(
+      'member-page',
+      String(PAGE_ID),
+      ADMIN,
+      reported.session,
+    );
   });
 
   it('removes an old row with no status, and an unclaimed imported page', async () => {

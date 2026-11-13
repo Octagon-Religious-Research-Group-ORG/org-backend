@@ -14,6 +14,7 @@ import {
   hasVisibleText,
 } from '../../membership/member-text';
 import { ModerationLogService } from '../../moderation/moderation-log.service';
+import { ReportsStore } from '../../moderation/reports.store';
 import {
   MAX_REMOVAL_REASON_LENGTH,
   type ProfileReviewStatus,
@@ -132,6 +133,7 @@ export class AdminMembersService {
     @InjectConnection() private readonly connection: Connection,
     private readonly log: ModerationLogService,
     private readonly inbox: AdminInboxService,
+    private readonly reports: ReportsStore,
   ) {}
 
   async list(
@@ -287,6 +289,25 @@ export class AdminMembersService {
         session,
       );
       await this.inbox.closePageNotice(page._id, adminId, session);
+      // Chunk 13: the moderation queue links a reported page here; taking
+      // the page off closes its open reports in the same transaction.
+      const target = String(page._id);
+      if (
+        (await this.reports.resolveOpen(
+          'member-page',
+          target,
+          'member-removed',
+          adminId,
+          session,
+        )) > 0
+      ) {
+        await this.inbox.closeReportNotice(
+          'member-page',
+          target,
+          adminId,
+          session,
+        );
+      }
     });
     return { reviewStatus: 'removed' as const };
   }

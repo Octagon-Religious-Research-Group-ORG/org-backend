@@ -72,10 +72,15 @@ describe('ORG page reaction controllers (Chunk 10b)', () => {
     expect(comments.orgThread).toHaveBeenCalledWith('about', viewer, 'cmt_0', {
       mayComment: true,
     });
-    await expect(reads.history('about', 'cmt_1', { page: 2 })).resolves.toBe(
-      'history',
+    await expect(
+      reads.history(request, 'about', 'cmt_1', { page: 2 }),
+    ).resolves.toBe('history');
+    expect(comments.orgHistory).toHaveBeenCalledWith(
+      'about',
+      'cmt_1',
+      2,
+      viewer,
     );
-    expect(comments.orgHistory).toHaveBeenCalledWith('about', 'cmt_1', 2);
   });
 
   it('passes only the validated fields to the writes', async () => {

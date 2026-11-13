@@ -22,6 +22,7 @@ import {
   eamKey,
   MAX_INBOX_NOTE_LENGTH,
   pageSubmittedKey,
+  reportKey,
 } from './schemas/admin-inbox.schema';
 
 const ADMIN = 'user_admin';
@@ -454,5 +455,110 @@ describe('admininbox schema', () => {
     }).validateSync();
     expect(error?.errors.note).toBeDefined();
     void connection.close();
+  });
+});
+
+describe('AdminInboxService: report notices (Chunk 13)', () => {
+  const target = {
+    targetType: 'comment',
+    targetId: 'cmt_1',
+    subjectUserId: MEMBER,
+  };
+
+  /** The driver call a report notice uses (see `notifyReport`). */
+  function withCollection() {
+    const built = build();
+    const collection = { updateOne: jest.fn(() => Promise.resolve({})) };
+    Object.assign(built.entryModel, { collection });
+    return { ...built, collection };
+  }
+
+  it('writes or re-opens one notice per target, moved to the top', async () => {
+    const { service, entryModel, collection } = withCollection();
+    await service.notifyReport({ ...target, profileId: PROFILE_ID });
+    expect(entryModel.updateOne).not.toHaveBeenCalled();
+    const [filter, update, options] = collection.updateOne.mock
+      .calls[0] as unknown as [
+      Record<string, unknown>,
+      {
+        $set: { status: string; createdAt: Date; updatedAt: Date };
+        $unset: Record<string, number>;
+        $setOnInsert: Record<string, unknown>;
+      },
+      Record<string, unknown>,
+    ];
+    expect(filter).toEqual({ dedupeKey: reportKey('comment', 'cmt_1') });
+    expect(update.$set.status).toBe('open');
+    expect(update.$set.createdAt).toBe(update.$set.updatedAt);
+    expect(update.$unset).toEqual({ handledAt: 1, handledBy: 1 });
+    expect(update.$setOnInsert).toEqual({
+      kind: 'report',
+      subjectUserId: MEMBER,
+      targetType: 'comment',
+      targetId: 'cmt_1',
+      profileId: PROFILE_ID,
+    });
+    expect(options).toEqual({ upsert: true });
+    await service.notifyReport(target);
+    const second = collection.updateOne.mock.calls[1] as unknown as [
+      unknown,
+      { $setOnInsert: Record<string, unknown> },
+    ];
+    expect(second[1].$setOnInsert).not.toHaveProperty('profileId');
+  });
+
+  it('retries once when two first reports race, and passes on anything else', async () => {
+    const { service, collection } = withCollection();
+    collection.updateOne.mockRejectedValueOnce(duplicate);
+    await service.notifyReport(target);
+    expect(collection.updateOne).toHaveBeenCalledTimes(2);
+    collection.updateOne.mockRejectedValueOnce(new Error('synthetic outage'));
+    await expect(service.notifyReport(target)).rejects.toThrow(
+      'synthetic outage',
+    );
+  });
+
+  it('marks a target’s notice handled inside the moderator’s action', async () => {
+    const { service, entryModel, session } = build();
+    await service.closeReportNotice(
+      'member-page',
+      'p1',
+      ADMIN,
+      session as never,
+    );
+    expect(entryModel.updateOne).toHaveBeenCalledWith(
+      { dedupeKey: reportKey('member-page', 'p1'), status: 'open' },
+      {
+        $set: {
+          status: 'handled',
+          handledAt: expect.any(Date) as unknown,
+          handledBy: ADMIN,
+        },
+      },
+      { session },
+    );
+  });
+
+  it('lists what a report notice is about', async () => {
+    const { service, entryModel } = build();
+    entryModel.find.mockReturnValueOnce(
+      chain([
+        entry({
+          kind: 'report',
+          dedupeKey: reportKey('comment', 'cmt_1'),
+          targetType: 'comment',
+          targetId: 'cmt_1',
+          profileId: undefined,
+        }),
+        entry({ kind: 'report', dedupeKey: undefined, profileId: undefined }),
+      ]),
+    );
+    const { entries } = await service.list('open', 1);
+    expect(entries[0]).toMatchObject({
+      kind: 'report',
+      target: { type: 'comment', id: 'cmt_1' },
+    });
+    expect(entries[0]).not.toHaveProperty('blocksNewRequest');
+    expect(entries[1]).not.toHaveProperty('target');
   });
 });
