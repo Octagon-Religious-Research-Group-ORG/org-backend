@@ -2,6 +2,11 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BlockVersionsService } from './block-versions.service';
 import { CommentVersionsService } from './comment-versions.service';
+import { VoteHistoryService } from './vote-history.service';
+import {
+  VoteHistoryEntry,
+  VoteHistoryEntrySchema,
+} from './schemas/vote-history.schema';
 import {
   BlockVersion,
   BlockVersionSchema,
@@ -21,7 +26,7 @@ import {
 
 /**
  * Members-area profiles: public pages, their paragraphs and the append-only,
- * hash-chained history of every paragraph and every site comment.
+ * hash-chained history of every paragraph, every site comment and every vote.
  */
 @Module({
   imports: [
@@ -30,9 +35,10 @@ import {
       { name: ProfileBlock.name, schema: ProfileBlockSchema },
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: CommentVersion.name, schema: CommentVersionSchema },
+      { name: VoteHistoryEntry.name, schema: VoteHistoryEntrySchema },
     ]),
   ],
-  providers: [BlockVersionsService, CommentVersionsService],
-  exports: [BlockVersionsService, CommentVersionsService],
+  providers: [BlockVersionsService, CommentVersionsService, VoteHistoryService],
+  exports: [BlockVersionsService, CommentVersionsService, VoteHistoryService],
 })
 export class SocialModule {}

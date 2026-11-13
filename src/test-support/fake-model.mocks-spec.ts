@@ -6,7 +6,8 @@
 //
 // Supported: find/findOne (sort, skip, limit, select ignored, lean), exists,
 // countDocuments, create (unique keys, timestamps), updateOne/updateMany/
-// findOneAndUpdate ($set, $unset, $inc, $push, $pull), and aggregate with
+// findOneAndUpdate ($set, $unset, $inc, $push, $pull; updateOne also
+// upserts), and aggregate with
 // $match, $sort and $group ($first, $max, $sum). Not a database: no
 // projection, no validation, no transactions.
 import sift from 'sift';
@@ -98,6 +99,16 @@ function structuredCloneWithIds(value: unknown): unknown {
   return value;
 }
 
+function isOperatorObject(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !(value instanceof Date) &&
+    !(value instanceof Types.ObjectId) &&
+    Object.keys(value).some((key) => key.startsWith('$'))
+  );
+}
+
 function applyUpdate(doc: Doc, update: Doc) {
   for (const [op, fields] of Object.entries(update)) {
     for (const [path, value] of Object.entries(fields as Doc)) {
@@ -137,7 +148,11 @@ export interface FakeModel {
   deleteOne: (filter: Filter) => FakeResult;
   countDocuments: (filter?: Filter) => { exec: () => Promise<number> };
   create: (doc: Doc) => Promise<Doc>;
-  updateOne: (filter: Filter, update: Doc) => FakeResult;
+  updateOne: (
+    filter: Filter,
+    update: Doc,
+    options?: { upsert?: boolean },
+  ) => FakeResult;
   updateMany: (filter: Filter, update: Doc) => FakeResult;
   findOneAndUpdate: (
     filter: Filter,
@@ -221,23 +236,38 @@ export function fakeModel(
     }
   };
 
-  const update = (many: boolean) => (filter: Filter, change: Doc) => ({
-    exec: () => {
-      options.beforeWrite?.(many ? 'updateMany' : 'updateOne', filter);
-      const targets = many ? matching(filter) : matching(filter).slice(0, 1);
-      for (const doc of targets) {
-        const next = copy(doc);
-        applyUpdate(next, change);
-        checkUnique(next, doc);
-        for (const key of Object.keys(doc)) delete doc[key];
-        Object.assign(doc, next);
-      }
-      return Promise.resolve({
-        matchedCount: targets.length,
-        modifiedCount: targets.length,
-      });
-    },
-  });
+  const update =
+    (many: boolean) =>
+    (filter: Filter, change: Doc, settings?: { upsert?: boolean }) => ({
+      exec: () => {
+        options.beforeWrite?.(many ? 'updateMany' : 'updateOne', filter);
+        const targets = many ? matching(filter) : matching(filter).slice(0, 1);
+        if (targets.length === 0 && settings?.upsert) {
+          // As MongoDB does: the filter's plain equalities, then the update.
+          const doc: Doc = { _id: new Types.ObjectId() };
+          for (const [key, value] of Object.entries(filter)) {
+            if (!key.startsWith('$') && !isOperatorObject(value)) {
+              setPath(doc, key, copy(value));
+            }
+          }
+          applyUpdate(doc, change);
+          checkUnique(doc);
+          docs.push(doc);
+          return Promise.resolve({ matchedCount: 0, modifiedCount: 0 });
+        }
+        for (const doc of targets) {
+          const next = copy(doc);
+          applyUpdate(next, change);
+          checkUnique(next, doc);
+          for (const key of Object.keys(doc)) delete doc[key];
+          Object.assign(doc, next);
+        }
+        return Promise.resolve({
+          matchedCount: targets.length,
+          modifiedCount: targets.length,
+        });
+      },
+    });
 
   const model: FakeModel = {
     docs,

@@ -9,6 +9,7 @@ import type {
   ProfileVisibility,
 } from '../social/schemas/social-profile.schema';
 import type { ProfileAccess } from './profile-access';
+import type { TabVotes } from './votes/vote-serializers';
 
 /**
  * Allowlist serialisers: every response field about a page is written out here
@@ -49,6 +50,8 @@ export interface TabView {
    * written against (Chunk 9). 0 when the belief has no text yet.
    */
   textSeq: number;
+  /** The belief's votes as this reader sees them (Chunk 10). */
+  votes?: TabVotes;
 }
 
 export interface ExtraSectionView {

@@ -1,0 +1,772 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, type Types } from 'mongoose';
+import {
+  BeliefTab,
+  type BeliefTabDocument,
+} from '../../social/schemas/belief-tab.schema';
+import {
+  BeliefVote,
+  type BeliefVoteDocument,
+  type VoteValue,
+  type VoterTier,
+} from '../../social/schemas/belief-vote.schema';
+import {
+  BlockVersion,
+  type BlockVersionDocument,
+} from '../../social/schemas/block-version.schema';
+import {
+  ProfileBlock,
+  type ProfileBlockDocument,
+} from '../../social/schemas/profile-block.schema';
+import {
+  SocialProfile,
+  type SocialProfileDocument,
+} from '../../social/schemas/social-profile.schema';
+import {
+  VoteTally,
+  type VoteTallyDocument,
+} from '../../social/schemas/vote-tally.schema';
+import {
+  VOTE_BUSY,
+  VoteHistoryService,
+} from '../../social/vote-history.service';
+import type { VoteAction } from '../../social/schemas/vote-history.schema';
+import { describeFailure } from '../comments/comment-limits';
+import { NO_SUCH_BELIEF } from '../comments/comments.service';
+import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
+import { OrgSettingsService } from '../org-settings.service';
+import { decideProfileAccess, type Viewer } from '../profile-access';
+import type {
+  FullProfile,
+  ProfileRow,
+  ProfileView,
+} from '../profile-serializers';
+import {
+  endTextTurn,
+  takeTextTurn,
+  TEXT_TURN_STALE_MS,
+} from '../tab-text-turns';
+import { type BeliefText, readBeliefTexts } from './belief-texts';
+import {
+  agreeField,
+  isBehind,
+  shownCounts,
+  TALLY_FIELDS,
+  type TallyRow,
+  VoteTalliesService,
+} from './vote-tallies.service';
+import {
+  type VotePage,
+  type VoteStatus,
+  VotersService,
+} from './voters.service';
+import type { AgreedBelief, AgreedPage, TabVotes } from './vote-serializers';
+
+export const VOTE_STALE =
+  'This belief was reworded since you opened it. Reload it to vote on the new wording.';
+
+/** A belief reaches the Beliefs page at this many agreeing votes (Tripp, Q04). */
+export const AGREED_THRESHOLD = 2;
+export const AGREED_PAGE_SIZE = 10;
+/** Tallies read per query while filling one page of the list. */
+export const AGREED_BATCH = 25;
+/** Tallies looked at per request at most; the cursor carries on from there. */
+export const AGREED_MAX_SCAN = 100;
+
+/** `<agrees>.<tab added, ms>.<tabId>`: where the next list page starts. */
+export const AGREED_CURSOR = /^(\d{1,9})\.(\d{1,15})\.([A-Za-z0-9_-]{1,80})$/;
+
+interface VoteRowState {
+  profileId: Types.ObjectId;
+  value?: VoteValue;
+  textSeq?: number;
+  voterTier?: VoterTier;
+  historySeq: number;
+  pending?: { seq: number; at: Date };
+}
+
+interface DesiredVote {
+  value?: VoteValue;
+  textSeq: number;
+  voterTier: VoterTier;
+}
+
+export interface CastInput {
+  slug: string;
+  tabId: string;
+  value: VoteValue;
+  /** The belief text's version the voter was looking at (`textSeq`). */
+  baseSeq: number;
+}
+
+/** The fields of a page read for the Beliefs page list. */
+const LIST_PAGE_FIELDS = {
+  slug: 1,
+  displayName: 1,
+  visibility: 1,
+  reviewStatus: 1,
+  ownerUserId: 1,
+  deletedAt: 1,
+};
+
+/**
+ * Belief votes (Chunk 10): five buttons on every belief tab, one vote per
+ * voter per belief, changeable and withdrawable, every change kept in an
+ * append-only, hash-chained history (`VoteHistoryService`).
+ *
+ * - Who may vote: `VotersService`.
+ * - A vote records the belief text's version it was cast on, checked while
+ *   holding a text turn on the belief (`tab-text-turns.ts`): a removal waits
+ *   for it, and an edit that lands meanwhile makes it a vote on the earlier
+ *   wording, which is exactly what the voter saw.
+ * - Counts: `VoteTalliesService`, current wording only.
+ */
+@Injectable()
+export class VotesService {
+  private readonly logger = new Logger(VotesService.name);
+
+  constructor(
+    @InjectModel(BeliefVote.name)
+    private readonly voteModel: Model<BeliefVoteDocument>,
+    @InjectModel(VoteTally.name)
+    private readonly tallyModel: Model<VoteTallyDocument>,
+    @InjectModel(BeliefTab.name)
+    private readonly tabModel: Model<BeliefTabDocument>,
+    @InjectModel(SocialProfile.name)
+    private readonly profileModel: Model<SocialProfileDocument>,
+    @InjectModel(ProfileBlock.name)
+    private readonly blockModel: Model<ProfileBlockDocument>,
+    @InjectModel(BlockVersion.name)
+    private readonly versionModel: Model<BlockVersionDocument>,
+    private readonly members: MembersService,
+    private readonly voters: VotersService,
+    private readonly tallies: VoteTalliesService,
+    private readonly history: VoteHistoryService,
+    private readonly settings: OrgSettingsService,
+  ) {}
+
+  /**
+   * Casts, changes or confirms the voter's vote on a belief.
+   *
+   * @throws NotFoundException for a page the voter may not read in full, or
+   *   a belief not live on it
+   * @throws ForbiddenException for the voter's own belief or a page not
+   *   approved
+   * @throws ConflictException when the belief was reworded since `baseSeq`,
+   *   or another window is saving this voter's vote
+   */
+  async cast(viewer: Viewer, input: CastInput) {
+    const anonymousCount = await this.settings.anonymousMayVote();
+    const voter = await this.voters.requireVoter(viewer, anonymousCount);
+    const { profile, access } = await this.members.findVisible(
+      input.slug,
+      voter,
+    );
+    if (access.level !== 'full') throw new NotFoundException(PROFILE_NOT_FOUND);
+    this.voters.requireOnPage(pageFacts(profile, access.isOwner));
+    await this.repair(voter.userId);
+    const turn = await takeTextTurn(this.tabModel, profile._id, input.tabId);
+    if (turn === undefined) throw new NotFoundException(NO_SUCH_BELIEF);
+    try {
+      // Marked before anything is written, recounted whatever happens.
+      await this.tallies.touch(input.tabId, profile._id);
+      const text = (
+        await readBeliefTexts(this.blockModel, this.versionModel, [
+          { profileId: profile._id, tabId: input.tabId },
+        ])
+      ).get(input.tabId);
+      if (text?.textSeq !== input.baseSeq) {
+        throw new ConflictException(VOTE_STALE);
+      }
+      await this.write(voter.userId, profile._id, input.tabId, {
+        value: input.value,
+        textSeq: input.baseSeq,
+        voterTier: voter.tier,
+      });
+    } finally {
+      await endTextTurn(this.tabModel, input.tabId, turn, (message) =>
+        this.logger.warn(message),
+      );
+      await this.tallies.settle(input.tabId, profile._id);
+    }
+    return this.oneBelief(profile, access.isOwner, input.tabId, voter);
+  }
+
+  /**
+   * Withdraws the voter's vote. Taking one's own vote back never depends on
+   * being allowed to vote now, nor on the page's settings; withdrawing a
+   * vote that is not there is no error.
+   *
+   * @returns the belief's vote state when the reader may still read it
+   * @throws NotFoundException for a page that does not exist
+   */
+  async withdraw(
+    viewer: Viewer & { userId: string },
+    slug: string,
+    tabId: string,
+  ) {
+    const profile = (await this.profileModel
+      .findOne({ slug: slug.toLowerCase() })
+      .select({ _id: 1 })
+      .lean()
+      .exec()) as { _id: Types.ObjectId } | null;
+    if (!profile) throw new NotFoundException(PROFILE_NOT_FOUND);
+    await this.repair(viewer.userId);
+    const row = await this.row(tabId, viewer.userId);
+    // A vote on another page's belief is not this page's to withdraw.
+    if (row?.value !== undefined && profile._id.equals(row.profileId)) {
+      await this.tallies.touch(tabId, profile._id);
+      try {
+        await this.write(viewer.userId, profile._id, tabId, {
+          // A counted vote always has both.
+          textSeq: row.textSeq as number,
+          voterTier: row.voterTier as VoterTier,
+        });
+      } finally {
+        await this.tallies.settle(tabId, profile._id);
+      }
+    }
+    let readable: Awaited<ReturnType<MembersService['findVisible']>>;
+    try {
+      readable = await this.members.findVisible(slug, viewer);
+    } catch {
+      return { withdrawn: true };
+    }
+    const live = await this.tabModel
+      .exists({ profileId: profile._id, tabId, removedAt: { $exists: false } })
+      .exec();
+    if (readable.access.level !== 'full' || !live) return { withdrawn: true };
+    return {
+      withdrawn: true,
+      ...(await this.oneBelief(
+        readable.profile,
+        readable.access.isOwner,
+        tabId,
+        viewer,
+      )),
+    };
+  }
+
+  private async row(tabId: string, voterUserId: string) {
+    return (await this.voteModel
+      .findOne({ tabId, voterUserId })
+      .select({
+        profileId: 1,
+        value: 1,
+        textSeq: 1,
+        voterTier: 1,
+        historySeq: 1,
+        pending: 1,
+      })
+      .lean()
+      .exec()) as VoteRowState | null;
+  }
+
+  /**
+   * Claims the row, appends the history entry, then confirms the row: a
+   * vote is counted only once its history entry exists. The row is first
+   * brought up to its history, so a write that died after recording its
+   * entry is never mistaken for "no change".
+   */
+  private async write(
+    voterUserId: string,
+    profileId: Types.ObjectId,
+    tabId: string,
+    desired: DesiredVote,
+  ) {
+    await this.catchUp(tabId, voterUserId);
+    const row = await this.row(tabId, voterUserId);
+    if (row?.pending) throw new ConflictException(VOTE_BUSY);
+    if (row && sameVote(row, desired)) return;
+    const base = row?.historySeq ?? 0;
+    const action: VoteAction =
+      desired.value === undefined
+        ? 'withdraw'
+        : row?.value === undefined
+          ? 'cast'
+          : row.value !== desired.value
+            ? 'change'
+            : 'confirm';
+    const pending = { seq: base + 1, ...desired, at: new Date() };
+    await this.claim(row, { voterUserId, profileId, tabId }, pending);
+    let saved: { seq: number; createdAt: Date };
+    try {
+      saved = await this.history.append({
+        tabId,
+        voterUserId,
+        action,
+        ...desired,
+        expectedSeq: base,
+      });
+    } catch (error) {
+      await this.voteModel
+        .updateOne(
+          { tabId, voterUserId, 'pending.seq': pending.seq },
+          { $unset: { pending: 1 } },
+        )
+        .exec();
+      // The history may be ahead of the row (a write that died after its
+      // entry): bring the row up to it, so the voter's retry can succeed.
+      await this.catchUp(tabId, voterUserId);
+      throw error;
+    }
+    await this.confirmTo(
+      tabId,
+      voterUserId,
+      saved.seq,
+      desired,
+      saved.createdAt,
+    );
+  }
+
+  /** @throws ConflictException when another window holds the row */
+  private async claim(
+    row: VoteRowState | null,
+    key: { voterUserId: string; profileId: Types.ObjectId; tabId: string },
+    pending: DesiredVote & { seq: number; at: Date },
+  ) {
+    if (!row) {
+      try {
+        await this.voteModel.create({ ...key, historySeq: 0, pending });
+        return;
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 11000) {
+          throw new ConflictException(VOTE_BUSY);
+        }
+        throw error;
+      }
+    }
+    const claimed = await this.voteModel
+      .updateOne(
+        {
+          tabId: key.tabId,
+          voterUserId: key.voterUserId,
+          historySeq: row.historySeq,
+          pending: { $exists: false },
+        },
+        { $set: { pending } },
+      )
+      .exec();
+    if (claimed.modifiedCount !== 1) throw new ConflictException(VOTE_BUSY);
+  }
+
+  /**
+   * Shows history entry `seq` on the row, unless the row already shows it or
+   * a newer one: confirms only ever move forward.
+   */
+  private async confirmTo(
+    tabId: string,
+    voterUserId: string,
+    seq: number,
+    state: DesiredVote,
+    at: Date,
+  ) {
+    const fields = {
+      textSeq: state.textSeq,
+      voterTier: state.voterTier,
+      castAt: at,
+      historySeq: seq,
+    };
+    await this.voteModel
+      .updateOne(
+        { tabId, voterUserId, historySeq: { $lt: seq } },
+        state.value === undefined
+          ? { $set: fields, $unset: { pending: 1, value: 1 } }
+          : { $set: { ...fields, value: state.value }, $unset: { pending: 1 } },
+      )
+      .exec();
+  }
+
+  /** Brings the row up to the newest history entry, if it is behind. */
+  private async catchUp(tabId: string, voterUserId: string) {
+    const head = await this.history.head(tabId, voterUserId);
+    if (!head) return;
+    await this.confirmTo(tabId, voterUserId, head.seq, head, head.createdAt);
+  }
+
+  /**
+   * Finishes or undoes this voter's writes that stopped part-way: a claim
+   * older than {@link TEXT_TURN_STALE_MS} is dropped, and the row is brought
+   * up to its history (so a write that recorded its entry counts). Never
+   * fails the new vote: a failure is logged and retried next time.
+   */
+  async repair(voterUserId: string) {
+    try {
+      const stale = (await this.voteModel
+        .find({
+          voterUserId,
+          'pending.at': { $lt: new Date(Date.now() - TEXT_TURN_STALE_MS) },
+        })
+        .select({ tabId: 1, profileId: 1, pending: 1 })
+        .lean()
+        .exec()) as unknown as Array<{
+        tabId: string;
+        profileId: Types.ObjectId;
+        pending: { seq: number };
+      }>;
+      for (const row of stale) {
+        await this.voteModel
+          .updateOne(
+            { tabId: row.tabId, voterUserId, 'pending.seq': row.pending.seq },
+            { $unset: { pending: 1 } },
+          )
+          .exec();
+        await this.catchUp(row.tabId, voterUserId);
+        await this.tallies.settle(row.tabId, row.profileId);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not repair unfinished votes: ${describeFailure(error)}`,
+      );
+    }
+  }
+
+  /** The vote state of one belief for this reader, after a write. */
+  private async oneBelief(
+    profile: { _id: Types.ObjectId; reviewStatus?: string },
+    isOwner: boolean,
+    tabId: string,
+    viewer: Viewer,
+  ) {
+    const anonymousCount = await this.settings.anonymousMayVote();
+    const text = (
+      await readBeliefTexts(this.blockModel, this.versionModel, [
+        { profileId: profile._id, tabId },
+      ])
+    ).get(tabId) as BeliefText;
+    const tallies = await this.tallies.forPage(profile._id, [
+      { tabId, textSeq: text.textSeq },
+    ]);
+    const mine = await this.myVotes(viewer.userId, { profileId: profile._id });
+    const status = this.voters.onPage(
+      await this.voters.status(viewer, anonymousCount),
+      pageFacts(profile, isOwner),
+    );
+    return {
+      tabId,
+      textSeq: text.textSeq,
+      votes: tabVotes(
+        tallies.get(tabId),
+        text.textSeq,
+        mine.get(tabId),
+        status,
+        anonymousCount,
+      ),
+    };
+  }
+
+  /** The reader's confirmed votes, keyed by belief. */
+  private async myVotes(
+    userId: string | undefined,
+    where: { profileId: Types.ObjectId } | { tabIds: string[] },
+  ) {
+    if (userId === undefined) return new Map<string, MyVote>();
+    const rows = (await this.voteModel
+      .find({
+        voterUserId: userId,
+        ...('profileId' in where
+          ? { profileId: where.profileId }
+          : { tabId: { $in: where.tabIds } }),
+        value: { $exists: true },
+      })
+      .select({ tabId: 1, value: 1, textSeq: 1 })
+      .lean()
+      .exec()) as unknown as Array<MyVote & { tabId: string }>;
+    return new Map(rows.map((row) => [row.tabId, row]));
+  }
+
+  /**
+   * Adds each belief's vote state to a page the reader may read in full; a
+   * name-only page has no beliefs to vote on.
+   */
+  async withVotes(view: ProfileView, viewer: Viewer): Promise<ProfileView> {
+    if (view.access !== 'full') return view;
+    const anonymousCount = await this.settings.anonymousMayVote();
+    const { profile, access } = await this.members.findVisible(
+      view.slug,
+      viewer,
+    );
+    const status = this.voters.onPage(
+      await this.voters.status(viewer, anonymousCount),
+      pageFacts(profile, access.isOwner),
+    );
+    const tallies = await this.tallies.forPage(profile._id, view.tabs);
+    const mine = await this.myVotes(viewer.userId, { profileId: profile._id });
+    const full: FullProfile = {
+      ...view,
+      tabs: view.tabs.map((tab) => ({
+        ...tab,
+        votes: tabVotes(
+          tallies.get(tab.tabId),
+          tab.textSeq,
+          mine.get(tab.tabId),
+          status,
+          anonymousCount,
+        ),
+      })),
+    };
+    return full;
+  }
+
+  /**
+   * The Beliefs page section (Tripp Q04, "2+ is all it takes"): every belief
+   * whose current wording has at least {@link AGREED_THRESHOLD} counted
+   * agreeing votes, that this reader may read; most agrees first, then
+   * newest. Disagrees are shown and never take a belief off.
+   *
+   * Paged by cursor through the tally index. Pages the reader may not read
+   * are skipped, so a page can be short; at most {@link AGREED_MAX_SCAN}
+   * tallies are looked at per request, and the cursor carries on from there.
+   *
+   * @throws BadRequestException for a cursor this list did not make
+   */
+  async agreedPage(
+    viewer: Viewer,
+    after: string | undefined,
+  ): Promise<AgreedPage> {
+    const anonymousCount = await this.settings.anonymousMayVote();
+    await this.tallies.repairLeftBehind();
+    const field = agreeField(anonymousCount);
+    let cursor = after === undefined ? undefined : parseCursor(after);
+    const found: Listed[] = [];
+    let scanned = 0;
+    let nextAfter: string | undefined;
+    for (;;) {
+      const rows = await this.candidates(field, cursor);
+      const shown = await this.readable(rows, viewer);
+      let stoppedAt = -1;
+      for (const [index, row] of rows.entries()) {
+        scanned++;
+        cursor = pointOf(row, field);
+        const listed = shown.get(row.tabId);
+        if (listed) found.push(listed);
+        if (found.length === AGREED_PAGE_SIZE) {
+          stoppedAt = index;
+          break;
+        }
+      }
+      const batchFull = rows.length === AGREED_BATCH;
+      const rowsLeft = stoppedAt !== -1 && stoppedAt < rows.length - 1;
+      if (found.length === AGREED_PAGE_SIZE) {
+        if (rowsLeft || batchFull) nextAfter = encodeCursor(cursor);
+        break;
+      }
+      if (!batchFull) break;
+      if (scanned >= AGREED_MAX_SCAN) {
+        nextAfter = encodeCursor(cursor);
+        break;
+      }
+    }
+    return this.finish(found, nextAfter, viewer, anonymousCount);
+  }
+
+  private async candidates(field: AgreeField, after: CursorPoint | undefined) {
+    return (await this.tallyModel
+      .find({
+        live: true,
+        [field]: { $gte: AGREED_THRESHOLD },
+        ...(after
+          ? {
+              $or: [
+                { [field]: { $lt: after.agrees } },
+                { [field]: after.agrees, tabCreatedAt: { $lt: after.at } },
+                {
+                  [field]: after.agrees,
+                  tabCreatedAt: after.at,
+                  tabId: { $gt: after.tabId },
+                },
+              ],
+            }
+          : {}),
+      })
+      .sort({ [field]: -1, tabCreatedAt: -1, tabId: 1 })
+      .limit(AGREED_BATCH)
+      .select(TALLY_FIELDS)
+      .lean()
+      .exec()) as unknown as TallyRow[];
+  }
+
+  /**
+   * The rows this reader may read, as list entries: the page approved and
+   * readable in full, the belief live, and the tally counted for the wording
+   * the page shows now (else recounted first).
+   */
+  private async readable(rows: TallyRow[], viewer: Viewer) {
+    const shown = new Map<string, Listed>();
+    if (rows.length === 0) return shown;
+    const pages = (await this.profileModel
+      .find({ _id: { $in: rows.map((row) => row.profileId) } })
+      .select(LIST_PAGE_FIELDS)
+      .lean()
+      .exec()) as unknown as Array<ProfileRow & { _id: Types.ObjectId }>;
+    const pageOf = new Map(pages.map((page) => [String(page._id), page]));
+    const open = rows.filter((row) => {
+      const page = pageOf.get(String(row.profileId));
+      return (
+        page !== undefined &&
+        (page.reviewStatus ?? 'approved') === 'approved' &&
+        decideProfileAccess(viewer, page).level === 'full'
+      );
+    });
+    const tabs = (await this.tabModel
+      .find({
+        tabId: { $in: open.map((row) => row.tabId) },
+        removedAt: { $exists: false },
+      })
+      .select({ tabId: 1, title: 1 })
+      .lean()
+      .exec()) as unknown as Array<{ tabId: string; title: string }>;
+    const titleOf = new Map(tabs.map((tab) => [tab.tabId, tab.title]));
+    const live = open.filter((row) => titleOf.has(row.tabId));
+    const texts = await readBeliefTexts(
+      this.blockModel,
+      this.versionModel,
+      live.map(({ profileId, tabId }) => ({ profileId, tabId })),
+    );
+    for (const row of live) {
+      // Every live tab asked for is in the answer.
+      const text = texts.get(row.tabId) as BeliefText;
+      let tally = row;
+      if (isBehind(row) || row.textSeq !== text.textSeq) {
+        await this.tallies.recompute(row.tabId);
+        tally = (await this.tallyModel
+          .findOne({ tabId: row.tabId })
+          .select(TALLY_FIELDS)
+          .lean()
+          .exec()) as unknown as TallyRow;
+      }
+      const page = pageOf.get(String(row.profileId)) as ProfileRow;
+      shown.set(row.tabId, {
+        belief: {
+          slug: page.slug,
+          tabId: row.tabId,
+          title: titleOf.get(row.tabId) as string,
+          paragraphs: text.paragraphs,
+          textSeq: text.textSeq,
+          // The reader may read the whole page (checked above), so the name
+          // and the link are both theirs to see (Chunk 9 naming rule).
+          author: { displayName: page.displayName, slug: page.slug },
+        },
+        tally,
+        isOwner:
+          viewer.userId !== undefined && viewer.userId === page.ownerUserId,
+      });
+    }
+    return shown;
+  }
+
+  private async finish(
+    found: Listed[],
+    nextAfter: string | undefined,
+    viewer: Viewer,
+    anonymousCount: boolean,
+  ): Promise<AgreedPage> {
+    const general = await this.voters.status(viewer, anonymousCount);
+    const mine = await this.myVotes(viewer.userId, {
+      tabIds: found.map((listed) => listed.belief.tabId),
+    });
+    const beliefs = found.flatMap(({ belief, tally, isOwner }) => {
+      const votes = tabVotes(
+        tally,
+        belief.textSeq,
+        mine.get(belief.tabId),
+        this.voters.onPage(general, { isOwner, approved: true }),
+        anonymousCount,
+      );
+      // Recounted below the threshold just now: not listed.
+      return votes.agree >= AGREED_THRESHOLD ? [{ ...belief, votes }] : [];
+    });
+    return { beliefs, ...(nextAfter !== undefined ? { nextAfter } : {}) };
+  }
+}
+
+type AgreeField = ReturnType<typeof agreeField>;
+
+/** Where a list page starts: after this (agrees, added, tabId). */
+interface CursorPoint {
+  agrees: number;
+  at: Date;
+  tabId: string;
+}
+
+interface Listed {
+  belief: Omit<AgreedBelief, 'votes'>;
+  tally: TallyRow;
+  isOwner: boolean;
+}
+
+function pointOf(row: TallyRow, field: AgreeField): CursorPoint {
+  return {
+    // The list reads only rows with at least the threshold here.
+    agrees: row[field] as number,
+    at: row.tabCreatedAt ?? new Date(0),
+    tabId: row.tabId,
+  };
+}
+
+function encodeCursor(point: CursorPoint | undefined): string {
+  const { agrees, at, tabId } = point as CursorPoint;
+  return `${agrees}.${at.getTime()}.${tabId}`;
+}
+
+/** @throws BadRequestException for a cursor this list did not make */
+export function parseCursor(after: string): CursorPoint {
+  const match = AGREED_CURSOR.exec(after);
+  if (!match) {
+    throw new BadRequestException('That list position is not valid.');
+  }
+  return {
+    agrees: Number(match[1]),
+    at: new Date(Number(match[2])),
+    tabId: match[3],
+  };
+}
+
+interface MyVote {
+  value: VoteValue;
+  textSeq: number;
+}
+
+function pageFacts(
+  profile: { reviewStatus?: string },
+  isOwner: boolean,
+): VotePage {
+  return {
+    isOwner,
+    approved: (profile.reviewStatus ?? 'approved') === 'approved',
+  };
+}
+
+function sameVote(row: VoteRowState, desired: DesiredVote) {
+  if (desired.value === undefined) return row.value === undefined;
+  return (
+    row.value === desired.value &&
+    row.textSeq === desired.textSeq &&
+    row.voterTier === desired.voterTier
+  );
+}
+
+/** One belief's vote state as a reader sees it. */
+export function tabVotes(
+  tally: TallyRow | undefined,
+  textSeq: number,
+  mine: MyVote | undefined,
+  status: VoteStatus,
+  anonymousCount: boolean,
+): TabVotes {
+  const onCurrent = mine !== undefined && mine.textSeq === textSeq;
+  return {
+    ...shownCounts(tally, anonymousCount),
+    ...(mine && onCurrent ? { myVote: mine.value } : {}),
+    ...(mine && !onCurrent ? { myVoteOnEarlierWording: mine.value } : {}),
+    mayVote: status.mayVote,
+    ...(status.block ? { viewerVoteBlock: status.block } : {}),
+  };
+}

@@ -1,7 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 
-export const ORG_SETTING_KEYS = ['voting-invite'] as const;
+export const ORG_SETTING_KEYS = [
+  'voting-invite',
+  'anonymous-may-vote',
+] as const;
 export type OrgSettingKey = (typeof ORG_SETTING_KEYS)[number];
 
 /**

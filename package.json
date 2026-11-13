@@ -174,7 +174,13 @@
       "members/comments/comments.service.ts",
       "members/comments/suggestions.service.ts",
       "members/comments/comment-store.ts",
-      "members/tab-text-turns.ts"
+      "members/tab-text-turns.ts",
+      "social/vote-history.service.ts",
+      "members/votes/belief-texts.ts",
+      "members/votes/vote-tallies.service.ts",
+      "members/votes/voters.service.ts",
+      "members/votes/votes.service.ts",
+      "members/votes/votes.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

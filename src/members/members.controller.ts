@@ -37,6 +37,8 @@ import {
   SetVotingInviteDto,
   TabHistoryQueryDto,
 } from './members.dto';
+import { VoteEligibilityDto } from './votes/votes.dto';
+import { VotesService } from './votes/votes.service';
 import { MemberHistoryService } from './member-history.service';
 import { MemberPageEditorService } from './member-page-editor.service';
 import { MembersService } from './members.service';
@@ -61,6 +63,7 @@ export class MembersController {
   constructor(
     private readonly members: MembersService,
     private readonly history: MemberHistoryService,
+    private readonly votes: VotesService,
   ) {}
 
   @Get('directory')
@@ -81,9 +84,10 @@ export class MembersController {
     @Req() request: AuthenticatedRequest,
     @Param('slug') slug: string,
   ) {
-    return this.members.profile(
-      slug,
-      await this.members.resolveViewer(request),
+    const viewer = await this.members.resolveViewer(request);
+    return this.votes.withVotes(
+      await this.members.profile(slug, viewer),
+      viewer,
     );
   }
 
@@ -269,5 +273,23 @@ export class AdminSettingsController {
     @Body() body: SetVotingInviteDto,
   ) {
     return this.settings.setVotingInvite(body.inviteUrl, getUserSub(request));
+  }
+
+  /** Whether anonymous members may vote (Chunk 10; the screen is Chunk 12). */
+  @Get('vote-eligibility')
+  async voteEligibility() {
+    return { anonymousMayVote: await this.settings.anonymousMayVote() };
+  }
+
+  @Put('vote-eligibility')
+  @WriteThrottle()
+  setVoteEligibility(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: VoteEligibilityDto,
+  ) {
+    return this.settings.setAnonymousMayVote(
+      body.anonymousMayVote,
+      getUserSub(request),
+    );
   }
 }

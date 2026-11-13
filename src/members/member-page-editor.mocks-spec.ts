@@ -158,6 +158,11 @@ export function setup(options: Options = {}) {
       ),
     ),
   };
+  // Vote tallies (Chunk 10) are specified in vote-tallies.service.spec.ts.
+  const tallies = {
+    touch: jest.fn(() => Promise.resolve()),
+    settle: jest.fn(() => Promise.resolve()),
+  };
   let seq = 0;
   const versions = {
     appendVersion: jest.fn((input: { expectedSeq?: number }) => {
@@ -171,9 +176,11 @@ export function setup(options: Options = {}) {
     blockModel as never,
     versionModel as never,
     versions as never,
+    tallies as never,
   );
   return {
     service,
+    tallies,
     profileModel,
     tabModel,
     blockModel,

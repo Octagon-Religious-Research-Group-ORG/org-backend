@@ -32,6 +32,8 @@ import { MembersService } from '../src/members/members.service';
 import { MyMemberPageService } from '../src/members/my-member-page.service';
 import { OrgSettingsService } from '../src/members/org-settings.service';
 import { PictureStore } from '../src/members/picture-store.service';
+import { VoteTalliesService } from '../src/members/votes/vote-tallies.service';
+import { VotesService } from '../src/members/votes/votes.service';
 import { OrgSetting } from '../src/members/schemas/org-setting.schema';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
 import { BlockVersionsService } from '../src/social/block-versions.service';
@@ -254,6 +256,19 @@ export async function createMembersApp(): Promise<INestApplication<App>> {
         },
       },
       CommentAuthorsService,
+      // Votes (Chunk 10) have their own e2e app; here profiles pass through
+      // and edits touch no tally.
+      {
+        provide: VotesService,
+        useValue: { withVotes: (view: unknown) => Promise.resolve(view) },
+      },
+      {
+        provide: VoteTalliesService,
+        useValue: {
+          touch: () => Promise.resolve(),
+          settle: () => Promise.resolve(),
+        },
+      },
     ],
   })
     .overrideGuard(OptionalClerkAuthGuard)

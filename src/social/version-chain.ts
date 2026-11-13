@@ -20,6 +20,12 @@ const SUGGESTED_HASH_SCHEME = 'org-blockversion-v2-suggestion';
 /** Comment versions (Chunk 9): same chain rules, their own scheme. */
 export const COMMENT_HASH_SCHEME = 'org-commentversion-v1';
 
+/**
+ * Belief votes (Chunk 10): one chain per voter and belief, same rules, their
+ * own scheme. The vote's event is the chain's `text` (see `voteEventText`).
+ */
+export const VOTE_HASH_SCHEME = 'org-votehistory-v1';
+
 /** The fields of a block version that its hash commits to. */
 export interface VersionHashInput {
   blockId: string;

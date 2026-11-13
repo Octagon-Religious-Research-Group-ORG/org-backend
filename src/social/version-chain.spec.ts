@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   COMMENT_HASH_SCHEME,
+  VOTE_HASH_SCHEME,
   computeVersionHash,
   GENESIS_HASH,
   type StoredVersion,
@@ -235,6 +236,34 @@ describe('hash schemes (Chunk 9)', () => {
     expect(computeVersionHash({ ...base, suggestionId: 'cmt_1' })).not.toBe(
       expected,
     );
+  });
+
+  it('keeps every existing hash when the vote scheme is added (Chunk 10)', () => {
+    // Values computed with the code BEFORE Chunk 10 added VOTE_HASH_SCHEME.
+    const pinned = {
+      blockId: 'blk-pin',
+      seq: 2,
+      text: 'Synthetic pinned text.',
+      authorUserId: 'user_pin',
+      createdAt: new Date('2026-11-12T08:00:00.000Z'),
+      prevHash: GENESIS_HASH,
+    };
+    expect(computeVersionHash(pinned)).toBe(
+      '6d731fe90045c867d0dc65f6fd2ee58e5c18fe7e646c9bc099466deef6810518',
+    );
+    expect(
+      computeVersionHash({
+        ...pinned,
+        suggestionId: 'cmt_pin',
+        suggestedBy: 'user_sugg',
+      }),
+    ).toBe('eab8e5600d39001f7053c44fa09d61ca5130f995b1a680765f1cf2671ee85ec8');
+    expect(computeVersionHash(pinned, COMMENT_HASH_SCHEME)).toBe(
+      '661558add08efaca75358a361d06dff29c5c18fa53a931da8077646c102326b6',
+    );
+    const vote = computeVersionHash(pinned, VOTE_HASH_SCHEME);
+    expect(vote).not.toBe(computeVersionHash(pinned, COMMENT_HASH_SCHEME));
+    expect(vote).not.toBe(computeVersionHash(pinned));
   });
 
   it('never hashes a comment version like a block version', () => {

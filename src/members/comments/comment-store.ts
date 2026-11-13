@@ -43,6 +43,7 @@ export const COMMENT_FIELDS = {
   source: 1,
   kind: 1,
   writtenAsAdmin: 1,
+  stance: 1,
   createdAt: 1,
   removedAt: 1,
   suggestion: 1,

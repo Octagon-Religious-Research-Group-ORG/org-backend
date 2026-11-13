@@ -49,6 +49,7 @@ import {
   NO_TEXT_TURNS,
   takeTextTurn,
 } from './tab-text-turns';
+import { VoteTalliesService } from './votes/vote-tallies.service';
 
 const NO_PAGE = "You don't have a member page yet.";
 const NO_TAB = 'That belief is not on your page.';
@@ -124,6 +125,7 @@ export class MemberPageEditorService {
     @InjectModel(BlockVersion.name)
     private readonly versionModel: Model<BlockVersionDocument>,
     private readonly versions: BlockVersionsService,
+    private readonly tallies: VoteTalliesService,
   ) {}
 
   /** Same rule as the Chunk 7 owner tools: live, and not a join in progress. */
@@ -183,17 +185,25 @@ export class MemberPageEditorService {
   ) {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
-    const saved = await this.withTextTurn(page._id, tabId, () =>
-      this.saveText(
-        {
-          where: { profileId: page._id, section: 'beliefs', tabId },
-          newBlockId: firstTextBlockId('tab', tabId),
-          emptyRefusal: 'A belief needs some text.',
-          tooLong: BELIEF_TOO_LONG,
-        },
-        { userId, text, baseSeq, ...(origin ? { origin } : {}) },
-      ),
-    );
+    // A new wording changes which votes count (Chunk 10): the tally is
+    // marked before the version and recounted after it, whatever happens.
+    await this.tallies.touch(tabId, page._id);
+    let saved: SaveResult;
+    try {
+      saved = await this.withTextTurn(page._id, tabId, () =>
+        this.saveText(
+          {
+            where: { profileId: page._id, section: 'beliefs', tabId },
+            newBlockId: firstTextBlockId('tab', tabId),
+            emptyRefusal: 'A belief needs some text.',
+            tooLong: BELIEF_TOO_LONG,
+          },
+          { userId, text, baseSeq, ...(origin ? { origin } : {}) },
+        ),
+      );
+    } finally {
+      await this.tallies.settle(tabId, page._id);
+    }
     if (saved.changed) await this.markReviewed(tabId);
     return saved;
   }
@@ -505,6 +515,16 @@ export class MemberPageEditorService {
   async removeTab(userId: string, tabId: string) {
     const page = await this.ownedPage(userId);
     await this.liveTab(page._id, tabId);
+    // A removed belief keeps its votes but leaves every listing (Chunk 10).
+    await this.tallies.touch(tabId, page._id);
+    try {
+      return await this.removeLiveTab(userId, page, tabId);
+    } finally {
+      await this.tallies.settle(tabId, page._id);
+    }
+  }
+
+  private async removeLiveTab(userId: string, page: OwnedPage, tabId: string) {
     if (page.liveTabCount === undefined || page.nextTabOrder === undefined) {
       await this.startTabCounters(userId, page._id);
     }

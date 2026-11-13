@@ -38,6 +38,40 @@ function setup(value?: string) {
 }
 
 describe('OrgSettingsService', () => {
+  it('keeps anonymous voting off unless set to on (Chunk 10)', async () => {
+    await expect(setup().service.anonymousMayVote()).resolves.toBe(false);
+    await expect(setup('off').service.anonymousMayVote()).resolves.toBe(false);
+    await expect(setup('yes').service.anonymousMayVote()).resolves.toBe(false);
+    await expect(setup('on').service.anonymousMayVote()).resolves.toBe(true);
+  });
+
+  it.each([true, false])(
+    'sets anonymous voting to %s, audited before and after',
+    async (on) => {
+      const { service, calls, model, log } = setup();
+      await expect(service.setAnonymousMayVote(on, 'admin_1')).resolves.toEqual(
+        { anonymousMayVote: on },
+      );
+      expect(calls).toEqual([
+        'setting.change.requested',
+        'write',
+        'setting.change.applied',
+      ]);
+      expect(model.updateOne).toHaveBeenCalledWith(
+        { key: 'anonymous-may-vote' },
+        { $set: { value: on ? 'on' : 'off', updatedBy: 'admin_1' } },
+        { upsert: true, runValidators: true },
+      );
+      expect(log.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorUserId: 'admin_1',
+          targetId: 'anonymous-may-vote',
+          details: { anonymousMayVote: on },
+        }),
+      );
+    },
+  );
+
   it('reads the invite, or nothing when unset', async () => {
     await expect(setup('https://t.me/+a').service.votingInvite()).resolves.toBe(
       'https://t.me/+a',

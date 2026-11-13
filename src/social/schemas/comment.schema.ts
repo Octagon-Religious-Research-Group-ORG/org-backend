@@ -1,6 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { MAX_BLOCK_TEXT_LENGTH } from './block-version.schema';
+import { VOTE_VALUES, type VoteValue } from './belief-vote.schema';
 
 export const COMMENT_SOURCES = ['migrated', 'native'] as const;
 export type CommentSource = (typeof COMMENT_SOURCES)[number];
@@ -153,6 +154,14 @@ export class Comment {
    */
   @Prop({ type: Boolean })
   writtenAsAdmin?: boolean;
+
+  /**
+   * Written with "Agree and comment" or "Disagree and comment" (Chunk 10):
+   * the badge the thread shows. Only on a top-level comment on a belief, by
+   * a member whose vote on it said the same when the comment was posted.
+   */
+  @Prop({ type: String, enum: VOTE_VALUES })
+  stance?: VoteValue;
 
   @Prop({ type: SuggestionSchema })
   suggestion?: Suggestion;

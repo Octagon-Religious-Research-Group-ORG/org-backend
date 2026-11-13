@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -8,6 +9,10 @@ import {
   Min,
 } from 'class-validator';
 import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
+import {
+  VOTE_VALUES,
+  type VoteValue,
+} from '../../social/schemas/belief-vote.schema';
 import { Utf16Length } from '../../membership/utf16-length';
 import {
   MAX_CLIENT_SEQ,
@@ -80,6 +85,14 @@ export class NewCommentDto {
   @IsString()
   @Utf16Length(1, MAX_COMMENT_INPUT)
   body: string;
+
+  /**
+   * "Agree and comment" / "Disagree and comment" (Chunk 10): the writer's
+   * vote on this belief, which they cast first.
+   */
+  @IsOptional()
+  @IsIn(VOTE_VALUES)
+  stance?: VoteValue;
 }
 
 export class EditCommentDto {

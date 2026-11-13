@@ -74,7 +74,7 @@ export class CommentWritersService {
   ) {}
 
   /** @throws whatever the Clerk lookup throws; nothing is remembered then */
-  private async emailVerified(userId: string): Promise<boolean> {
+  async emailVerified(userId: string): Promise<boolean> {
     const until = this.verified.get(userId);
     if (until !== undefined && Date.now() < until) return true;
     const identity = await this.clerk.getIdentity(userId);

@@ -59,6 +59,8 @@ export interface CommentView {
   suggestion?: SuggestionView;
   /** On a reply: the comment it answers. */
   parentCommentId?: string;
+  /** "Agree and comment" / "Disagree and comment" (Chunk 10). */
+  stance?: 'agree' | 'disagree';
   /** Top-level comments only. */
   replies?: CommentView[];
 }
@@ -106,6 +108,7 @@ export interface CommentRow {
   source: 'migrated' | 'native';
   kind?: CommentKind;
   writtenAsAdmin?: boolean;
+  stance?: 'agree' | 'disagree';
   createdAt: Date;
   removedAt?: Date;
   suggestion?: {
@@ -175,6 +178,7 @@ export function commentView(
     kind: row.kind ?? 'comment',
     source: imported ? 'imported' : 'member',
     ...(row.parentCommentId ? { parentCommentId: row.parentCommentId } : {}),
+    ...(row.stance ? { stance: row.stance } : {}),
     author: context.authorOf(row),
     postedAt: row.createdAt.toISOString(),
     ...(imported && row.legacyCreatedAt

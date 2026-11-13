@@ -8,6 +8,7 @@ import {
 } from './schemas/org-setting.schema';
 
 const VOTING_INVITE_KEY = 'voting-invite';
+const ANONYMOUS_VOTING_KEY = 'anonymous-may-vote';
 
 /** A Telegram group address or private invite link, and nothing else. */
 const TELEGRAM_INVITE = /^https:\/\/t\.me\/(?:\+|joinchat\/)?[A-Za-z0-9_-]+$/;
@@ -68,5 +69,43 @@ export class OrgSettingsService {
     }
     await this.log.record({ ...entry, action: 'setting.change.applied' });
     return { set: !cleared };
+  }
+
+  /**
+   * Whether members with an anonymous page may vote, and have their votes
+   * counted (Chunk 10). OFF unless an admin turned it on: the members decide
+   * it in a vote of their own (plan §2b item 5). Anything stored other than
+   * `on` reads as off.
+   */
+  async anonymousMayVote(): Promise<boolean> {
+    const setting = await this.settingModel
+      .findOne({ key: ANONYMOUS_VOTING_KEY })
+      .select({ value: 1 })
+      .lean()
+      .exec();
+    return setting?.value === 'on';
+  }
+
+  /** Turns anonymous voting on or off; logged like every setting change. */
+  async setAnonymousMayVote(on: boolean, actorUserId: string) {
+    const entry = {
+      actorUserId,
+      targetType: 'org-setting',
+      targetId: ANONYMOUS_VOTING_KEY,
+      reason: on
+        ? 'Admin let anonymous members vote.'
+        : 'Admin stopped anonymous members voting.',
+      details: { anonymousMayVote: on },
+    };
+    await this.log.record({ ...entry, action: 'setting.change.requested' });
+    await this.settingModel
+      .updateOne(
+        { key: ANONYMOUS_VOTING_KEY },
+        { $set: { value: on ? 'on' : 'off', updatedBy: actorUserId } },
+        { upsert: true, runValidators: true },
+      )
+      .exec();
+    await this.log.record({ ...entry, action: 'setting.change.applied' });
+    return { anonymousMayVote: on };
   }
 }

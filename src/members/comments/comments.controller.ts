@@ -124,6 +124,7 @@ export class CommentWritesController {
       ...(body.parentCommentId !== undefined
         ? { parentCommentId: body.parentCommentId }
         : {}),
+      ...(body.stance !== undefined ? { stance: body.stance } : {}),
     });
     return this.withView(made, made.commentId, writer);
   }

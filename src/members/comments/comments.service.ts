@@ -15,6 +15,11 @@ import {
   type BeliefTabDocument,
 } from '../../social/schemas/belief-tab.schema';
 import { MAX_COMMENT_LENGTH } from '../../social/schemas/comment.schema';
+import {
+  BeliefVote,
+  type BeliefVoteDocument,
+  type VoteValue,
+} from '../../social/schemas/belief-vote.schema';
 import { normaliseFieldText } from '../editable-fields';
 import { MemberPageEditorService } from '../member-page-editor.service';
 import { MembersService, PROFILE_NOT_FOUND } from '../members.service';
@@ -53,7 +58,14 @@ export interface NewCommentInput {
   body: string;
   tabId?: string;
   parentCommentId?: string;
+  /** "Agree and comment" / "Disagree and comment" (Chunk 10). */
+  stance?: VoteValue;
 }
+
+export const STANCE_ONLY_ON_BELIEF =
+  'Only a new comment on a belief can say whether you agree.';
+export const STANCE_NEEDS_VOTE =
+  'Your vote on this belief is not saved yet, so the comment cannot say it. Please vote, then post.';
 
 /** Cleans a comment as an edit of page text is cleaned (Chunk 8 rules). */
 export function cleanCommentBody(raw: string): string {
@@ -88,6 +100,8 @@ export class CommentsService {
     private readonly editor: MemberPageEditorService,
     private readonly versions: CommentVersionsService,
     private readonly authors: CommentAuthorsService,
+    @InjectModel(BeliefVote.name)
+    private readonly voteModel: Model<BeliefVoteDocument>,
   ) {}
 
   /**
@@ -248,6 +262,14 @@ export class CommentsService {
       parentCommentId = root.commentId;
     }
     if (tabId !== undefined) await this.requireLiveTab(profile._id, tabId);
+    if (input.stance !== undefined) {
+      await this.requireStance(
+        writer.userId,
+        tabId,
+        parentCommentId,
+        input.stance,
+      );
+    }
     await this.repair(writer.userId);
 
     const commentId = `cmt_${randomUUID()}`;
@@ -262,6 +284,7 @@ export class CommentsService {
         source: 'native',
         kind: 'comment',
         ...(writer.writesAsAdmin ? { writtenAsAdmin: true } : {}),
+        ...(input.stance !== undefined ? { stance: input.stance } : {}),
       },
       () =>
         this.versions.append({
@@ -272,6 +295,29 @@ export class CommentsService {
         }),
     );
     return { commentId, seq };
+  }
+
+  /**
+   * A stance badge says what the writer's vote says (Chunk 10): only on a
+   * new top-level comment on a belief, and only matching their counted or
+   * earlier-wording vote on it right now.
+   *
+   * @throws BadRequestException on a reply or the page's own thread
+   * @throws ConflictException when their vote does not say the same
+   */
+  private async requireStance(
+    userId: string,
+    tabId: string | undefined,
+    parentCommentId: string | undefined,
+    stance: VoteValue,
+  ) {
+    if (tabId === undefined || parentCommentId !== undefined) {
+      throw new BadRequestException(STANCE_ONLY_ON_BELIEF);
+    }
+    const vote = await this.voteModel
+      .exists({ tabId, voterUserId: userId, value: stance })
+      .exec();
+    if (!vote) throw new ConflictException(STANCE_NEEDS_VOTE);
   }
 
   /**

@@ -91,6 +91,18 @@ describe('comment controllers', () => {
       tabId: 't',
       parentCommentId: 'p',
     });
+    await t.writes.create(req, {
+      slug: 's',
+      body: 'b',
+      tabId: 't',
+      stance: 'agree',
+    });
+    expect(t.comments.create).toHaveBeenLastCalledWith(writer, {
+      slug: 's',
+      body: 'b',
+      tabId: 't',
+      stance: 'agree',
+    });
     await t.writes.edit(req, 'cmt_1', { body: 'b', baseSeq: 3 });
     expect(t.comments.edit).toHaveBeenCalledWith(writer, 'cmt_1', 'b', 3);
     await t.writes.suggest(req, {
@@ -116,7 +128,7 @@ describe('comment controllers', () => {
       writer,
       expect.objectContaining({ note: 'n' }),
     );
-    expect(t.writers.requireWriter).toHaveBeenCalledTimes(5);
+    expect(t.writers.requireWriter).toHaveBeenCalledTimes(6);
   });
 
   it('removes, accepts and declines as the token user', async () => {

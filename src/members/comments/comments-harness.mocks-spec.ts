@@ -18,6 +18,10 @@ import { CommentWritersService } from './comment-writers';
 import { CommentsService } from './comments.service';
 import { CommentStore } from './comment-store';
 import { SuggestionsService } from './suggestions.service';
+import { VoteHistoryService } from '../../social/vote-history.service';
+import { VotersService } from '../votes/voters.service';
+import { VoteTalliesService } from '../votes/vote-tallies.service';
+import { VotesService } from '../votes/votes.service';
 
 export const ids = {
   open: new Types.ObjectId(),
@@ -235,6 +239,15 @@ export interface Harness {
   suggestions: SuggestionsService;
   writers: CommentWritersService;
   clerk: { getIdentity: jest.Mock };
+  votes: FakeModel;
+  tallies: FakeModel;
+  voteHistory: FakeModel;
+  /** The admin setting; flip `anonymous` to let anonymous votes count. */
+  settings: { anonymous: boolean; anonymousMayVote: jest.Mock };
+  talliesService: VoteTalliesService;
+  voteHistoryService: VoteHistoryService;
+  voters: VotersService;
+  votesService: VotesService;
   /** The viewer as the server resolves it from a token. */
   viewer: (userId?: string) => ReturnType<MembersService['resolveViewer']>;
   /** A writer, or the refusal. */
@@ -252,7 +265,11 @@ export interface Harness {
 }
 
 export function harness(
-  faults: { comments?: FakeModelOptions['beforeWrite'] } = {},
+  faults: {
+    comments?: FakeModelOptions['beforeWrite'];
+    votes?: FakeModelOptions['beforeWrite'];
+    voteHistory?: FakeModelOptions['beforeWrite'];
+  } = {},
 ): Harness {
   const seeded = seedBlocks();
   const profiles = fakeModel(seedProfiles());
@@ -271,6 +288,20 @@ export function harness(
     beforeWrite: faults.comments,
   });
   const commentVersions = fakeModel([], { unique: [['commentId', 'seq']] });
+  const votes = fakeModel([], {
+    unique: [['tabId', 'voterUserId']],
+    timestamps: true,
+    beforeWrite: faults.votes,
+  });
+  const tallies = fakeModel([], { unique: [['tabId']], timestamps: true });
+  const voteHistory = fakeModel([], {
+    unique: [['voteKey', 'seq']],
+    beforeWrite: faults.voteHistory,
+  });
+  const setting = { anonymous: false };
+  const settings = Object.assign(setting, {
+    anonymousMayVote: jest.fn(() => Promise.resolve(setting.anonymous)),
+  });
 
   const adminAccess = {
     isAdminForRead: jest.fn((req: { auth: { payload: { sub: string } } }) =>
@@ -304,12 +335,20 @@ export function harness(
     versions as never,
     blocks as never,
   );
+  const talliesService = new VoteTalliesService(
+    tallies as never,
+    votes as never,
+    tabs as never,
+    blocks as never,
+    versions as never,
+  );
   const editor = new MemberPageEditorService(
     profiles as never,
     tabs as never,
     blocks as never,
     versions as never,
     blockVersions,
+    talliesService,
   );
   const commentVersionService = new CommentVersionsService(
     commentVersions as never,
@@ -323,6 +362,7 @@ export function harness(
     editor,
     commentVersionService,
     authors,
+    votes as never,
   );
   const suggestions = new SuggestionsService(
     comments as never,
@@ -335,6 +375,21 @@ export function harness(
     commentVersionService,
   );
   const writers = new CommentWritersService(members, clerk as never);
+  const voters = new VotersService(writers);
+  const voteHistoryService = new VoteHistoryService(voteHistory as never);
+  const votesService = new VotesService(
+    votes as never,
+    tallies as never,
+    tabs as never,
+    profiles as never,
+    blocks as never,
+    versions as never,
+    members,
+    voters,
+    talliesService,
+    voteHistoryService,
+    settings as never,
+  );
   const history = new MemberHistoryService(
     members,
     tabs as never,
@@ -358,6 +413,14 @@ export function harness(
     writers,
     clerk,
     store,
+    votes,
+    tallies,
+    voteHistory,
+    settings,
+    talliesService,
+    voteHistoryService,
+    voters,
+    votesService,
     viewer: (userId) => members.resolveViewer(request(userId)),
     thread: async (slug, viewer, tabId, after) =>
       commentsService.thread(

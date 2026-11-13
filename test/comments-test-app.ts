@@ -1,4 +1,5 @@
-// The comments API under test (Chunk 9): real controllers, pipe, guards,
+// The comments API (Chunk 9) and the votes API (Chunk 10) under test: real
+// controllers, pipe, guards,
 // throttles, access code and services, over in-memory models that honour the
 // filters (`fake-model`). Only Clerk and the database are stand-ins.
 import type { INestApplication } from '@nestjs/common';
@@ -32,9 +33,23 @@ import { MemberHistoryService } from '../src/members/member-history.service';
 import { MemberPageEditorService } from '../src/members/member-page-editor.service';
 import { MemberWriteThrottleGuard } from '../src/members/member-write-throttle.guard';
 import {
+  AdminSettingsController,
   MembersController,
   MyMemberPageController,
 } from '../src/members/members.controller';
+import { OrgSetting } from '../src/members/schemas/org-setting.schema';
+import { AdminRoleGuard } from '../src/auth/admin-role.guard';
+import {
+  AgreedBeliefsController,
+  VoteWritesController,
+} from '../src/members/votes/votes.controller';
+import { VotersService } from '../src/members/votes/voters.service';
+import { VoteTalliesService } from '../src/members/votes/vote-tallies.service';
+import { VotesService } from '../src/members/votes/votes.service';
+import { VoteHistoryService } from '../src/social/vote-history.service';
+import { BeliefVote } from '../src/social/schemas/belief-vote.schema';
+import { VoteHistoryEntry } from '../src/social/schemas/vote-history.schema';
+import { VoteTally } from '../src/social/schemas/vote-tally.schema';
 import { MembersService } from '../src/members/members.service';
 import { MyMemberPageService } from '../src/members/my-member-page.service';
 import { OrgSettingsService } from '../src/members/org-settings.service';
@@ -62,7 +77,11 @@ export interface CommentsApp {
     | 'blocks'
     | 'versions'
     | 'comments'
-    | 'commentVersions',
+    | 'commentVersions'
+    | 'votes'
+    | 'tallies'
+    | 'voteHistory'
+    | 'settings',
     FakeModel
   >;
 }
@@ -86,6 +105,13 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       timestamps: true,
     }),
     commentVersions: fakeModel([], { unique: [['commentId', 'seq']] }),
+    votes: fakeModel([], {
+      unique: [['tabId', 'voterUserId']],
+      timestamps: true,
+    }),
+    tallies: fakeModel([], { unique: [['tabId']], timestamps: true }),
+    voteHistory: fakeModel([], { unique: [['voteKey', 'seq']] }),
+    settings: fakeModel([], { unique: [['key']], timestamps: true }),
   };
   const isAdmin = (req: { auth: { payload: { sub: string } } }) =>
     Promise.resolve(req.auth.payload.sub.startsWith('user_admin'));
@@ -96,6 +122,9 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       MyMemberPageController,
       CommentThreadsController,
       CommentWritesController,
+      AgreedBeliefsController,
+      VoteWritesController,
+      AdminSettingsController,
     ],
     providers: [
       { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -112,6 +141,12 @@ export async function createCommentsApp(): Promise<CommentsApp> {
       CommentWritersService,
       BlockVersionsService,
       CommentVersionsService,
+      VotesService,
+      VotersService,
+      VoteTalliesService,
+      VoteHistoryService,
+      OrgSettingsService,
+      AdminRoleGuard,
       {
         provide: AdminAccessService,
         useValue: { isAdminForRead: isAdmin, hasAdminAccess: isAdmin },
@@ -131,8 +166,17 @@ export async function createCommentsApp(): Promise<CommentsApp> {
         provide: PictureStore,
         useValue: { currentPicture: () => Promise.resolve(undefined) },
       },
-      { provide: OrgSettingsService, useValue: {} },
-      { provide: ModerationLogService, useValue: {} },
+      {
+        provide: ModerationLogService,
+        useValue: { record: () => Promise.resolve({}) },
+      },
+      { provide: getModelToken(BeliefVote.name), useValue: models.votes },
+      { provide: getModelToken(VoteTally.name), useValue: models.tallies },
+      {
+        provide: getModelToken(VoteHistoryEntry.name),
+        useValue: models.voteHistory,
+      },
+      { provide: getModelToken(OrgSetting.name), useValue: models.settings },
       { provide: getModelToken(SocialProfile.name), useValue: models.profiles },
       { provide: getModelToken(BeliefTab.name), useValue: models.tabs },
       { provide: getModelToken(ProfileBlock.name), useValue: models.blocks },

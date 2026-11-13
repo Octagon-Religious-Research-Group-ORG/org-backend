@@ -18,6 +18,14 @@ import {
   SocialProfileSchema,
 } from '../social/schemas/social-profile.schema';
 import { Comment, CommentSchema } from '../social/schemas/comment.schema';
+import {
+  BeliefVote,
+  BeliefVoteSchema,
+} from '../social/schemas/belief-vote.schema';
+import {
+  VoteTally,
+  VoteTallySchema,
+} from '../social/schemas/vote-tally.schema';
 import { SocialModule } from '../social/social.module';
 import { CommentAuthorsService } from './comments/comment-authors.service';
 import { CommentStore } from './comments/comment-store';
@@ -41,10 +49,18 @@ import { MyMemberPageService } from './my-member-page.service';
 import { OrgSettingsService } from './org-settings.service';
 import { PictureStore } from './picture-store.service';
 import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
+import {
+  AgreedBeliefsController,
+  VoteWritesController,
+} from './votes/votes.controller';
+import { VotersService } from './votes/voters.service';
+import { VoteTalliesService } from './votes/vote-tallies.service';
+import { VotesService } from './votes/votes.service';
 
 /**
  * The directory, member pages, owner tools and the ORG chats panel (Chunk 7),
- * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9).
+ * editing and history (Chunk 8), comments and rewording suggestions (Chunk 9),
+ * belief votes and the Beliefs page section (Chunk 10).
  */
 @Module({
   imports: [
@@ -57,6 +73,8 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: OrgSetting.name, schema: OrgSettingSchema },
       { name: Comment.name, schema: CommentSchema },
+      { name: BeliefVote.name, schema: BeliefVoteSchema },
+      { name: VoteTally.name, schema: VoteTallySchema },
     ]),
   ],
   controllers: [
@@ -65,6 +83,8 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
     AdminSettingsController,
     CommentThreadsController,
     CommentWritesController,
+    AgreedBeliefsController,
+    VoteWritesController,
   ],
   providers: [
     MembersService,
@@ -79,6 +99,9 @@ import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
     SuggestionsService,
     CommentAuthorsService,
     CommentWritersService,
+    VotesService,
+    VotersService,
+    VoteTalliesService,
   ],
 })
 export class MembersModule {}

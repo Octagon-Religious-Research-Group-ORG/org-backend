@@ -14,8 +14,13 @@ import type { MemberPageEditorService } from './member-page-editor.service';
 import type { MembersService } from './members.service';
 
 const NO_HISTORY = {} as MemberHistoryService;
+/** Profiles pass through unchanged; votes are specified in votes.service.spec.ts. */
+const PASS_VOTES = {
+  withVotes: (view: unknown) => Promise.resolve(view),
+} as unknown as VotesService;
 import type { MyMemberPageService } from './my-member-page.service';
 import type { OrgSettingsService } from './org-settings.service';
+import type { VotesService } from './votes/votes.service';
 
 const request = {
   auth: { payload: { sub: 'u1' } },
@@ -56,6 +61,7 @@ describe('MembersController', () => {
     const controller = new MembersController(
       service as unknown as MembersService,
       NO_HISTORY,
+      PASS_VOTES,
     );
     await expect(controller.directory(request)).resolves.toBe('directory');
     await expect(controller.chats(request)).resolves.toBe('chats');
@@ -63,6 +69,16 @@ describe('MembersController', () => {
     expect(service.directory).toHaveBeenCalledWith(viewer);
     expect(service.chats).toHaveBeenCalledWith(viewer);
     expect(service.profile).toHaveBeenCalledWith('x', viewer);
+    // Each page gets its votes for the same viewer (Chunk 10).
+    const votes = { withVotes: jest.fn(() => Promise.resolve('with votes')) };
+    await expect(
+      new MembersController(
+        service as unknown as MembersService,
+        NO_HISTORY,
+        votes as unknown as VotesService,
+      ).profile(request, 'x'),
+    ).resolves.toBe('with votes');
+    expect(votes.withVotes).toHaveBeenCalledWith('profile', viewer);
   });
 
   it('never lets a restricted picture be cached or loaded cross-origin', async () => {
@@ -71,6 +87,7 @@ describe('MembersController', () => {
     await new MembersController(
       service as unknown as MembersService,
       NO_HISTORY,
+      PASS_VOTES,
     ).picture(request, res, 'x');
     expect(res.set).toHaveBeenCalledTimes(1);
     expect(res.set).toHaveBeenCalledWith({
@@ -88,6 +105,7 @@ describe('MembersController', () => {
     await new MembersController(
       service as unknown as MembersService,
       NO_HISTORY,
+      PASS_VOTES,
     ).picture(request, res, 'x');
     expect(res.set).toHaveBeenCalledWith(
       expect.objectContaining({ 'Cache-Control': PUBLIC_PICTURE_CACHE }),
@@ -106,6 +124,7 @@ describe('MembersController', () => {
     await new MembersController(
       service as unknown as MembersService,
       NO_HISTORY,
+      PASS_VOTES,
     ).picture(
       { ...request, headers: { 'if-none-match': '"f1"' } } as never,
       res,
@@ -182,6 +201,7 @@ describe('MembersController history', () => {
     const controller = new MembersController(
       service as unknown as MembersService,
       history as unknown as MemberHistoryService,
+      PASS_VOTES,
     );
     await expect(
       controller.bioHistory(request, 'quiet-fern', { page: 2 }),
@@ -213,6 +233,23 @@ describe('AdminSettingsController', () => {
       'done',
     );
     expect(settings.setVotingInvite).toHaveBeenCalledWith('u', 'u1');
+  });
+
+  it('reads and sets whether anonymous members may vote, as the signed-in admin', async () => {
+    const settings = {
+      anonymousMayVote: jest.fn(() => Promise.resolve(false)),
+      setAnonymousMayVote: jest.fn(() => 'set'),
+    };
+    const controller = new AdminSettingsController(
+      settings as unknown as OrgSettingsService,
+    );
+    await expect(controller.voteEligibility()).resolves.toEqual({
+      anonymousMayVote: false,
+    });
+    expect(
+      controller.setVoteEligibility(request, { anonymousMayVote: true }),
+    ).toBe('set');
+    expect(settings.setAnonymousMayVote).toHaveBeenCalledWith(true, 'u1');
   });
 });
 
