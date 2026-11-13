@@ -38,6 +38,32 @@ const entry = {
 };
 
 describe('RolesService.setRole', () => {
+  it('never lets a failing log write replace an unknown outcome (round 4, MEDIUM-1)', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const { service, clerk, log } = setup('admin');
+    const onUnknown = jest.fn();
+    clerk.setRole.mockRejectedValueOnce(new ClerkTimedOut());
+    log.record.mockResolvedValueOnce({}).mockRejectedValueOnce('mongo down');
+    await expect(
+      service.setRole({ ...change, onUnknown }),
+    ).rejects.toBeInstanceOf(ClerkTimedOut);
+    // The caller heard it first, before the log write was even tried.
+    expect(onUnknown.mock.invocationCallOrder[0]).toBeLessThan(
+      log.record.mock.invocationCallOrder[1],
+    );
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('mongo down'));
+    // A failed "failed" entry does not replace the refusal either.
+    clerk.setRole.mockRejectedValueOnce(new Error('refused'));
+    log.record
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('mongo down again'));
+    await expect(service.setRole(change)).rejects.toThrow('refused');
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining('mongo down again'),
+    );
+    logged.mockRestore();
+  });
+
   it('logs a Clerk timeout as an unknown outcome, never as failed (review round 3)', async () => {
     const { service, clerk, log } = setup('admin');
     clerk.setRole.mockRejectedValueOnce(new ClerkTimedOut());

@@ -5,11 +5,16 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/backend';
-import { CLERK_TIMEOUT_MS, ClerkTimedOut } from './clerk-user-info.service';
+import {
+  CLERK_READ_UNAVAILABLE,
+  CLERK_TIMEOUT_MS,
+  ClerkOutcomeUnknown,
+} from './clerk-user-info.service';
 import {
   ALREADY_INVITED,
   CLERK_PAGE,
   CLERK_UNAVAILABLE,
+  CLERK_WRITE_REFUSED_HERE,
   ClerkAdminDirectoryService,
   INVITATION_NOT_FOUND,
   INVITATION_REFUSED,
@@ -300,8 +305,11 @@ describe('usersByEmail (MEDIUM-2)', () => {
       .usersByEmail(['a@example.org'])
       .catch((e: unknown) => e);
     await jest.advanceTimersByTimeAsync(CLERK_TIMEOUT_MS + 1);
-    // An unknown outcome stays one (review round 3).
-    expect(await result).toBeInstanceOf(ClerkTimedOut);
+    // A read: nothing changed, so a plain 503, not an unknown outcome.
+    expect(await result).toEqual(
+      new ServiceUnavailableException(CLERK_READ_UNAVAILABLE),
+    );
+    expect(await result).not.toBeInstanceOf(ClerkOutcomeUnknown);
     jest.useRealTimers();
   });
 
@@ -312,6 +320,27 @@ describe('usersByEmail (MEDIUM-2)', () => {
 });
 
 describe('translate', () => {
+  it('a write Clerk definitely refused for another reason changed nothing (round 4)', () => {
+    for (const mode of ['invite', 'revoke'] as const) {
+      const refused = translate({ status: 403, errors: [] }, mode);
+      expect(refused.message).toBe(CLERK_WRITE_REFUSED_HERE);
+      expect(refused).not.toBeInstanceOf(ClerkOutcomeUnknown);
+    }
+    for (const mode of ['invite', 'revoke'] as const) {
+      expect(translate({ status: 502, errors: [] }, mode)).toBeInstanceOf(
+        ClerkOutcomeUnknown,
+      );
+      expect(translate(new TypeError('boom'), mode)).toBeInstanceOf(
+        ClerkOutcomeUnknown,
+      );
+    }
+    const unknown = new ClerkOutcomeUnknown();
+    expect(translate(unknown, 'invite')).toBe(unknown);
+    // A read keeps a plain 503 as it is.
+    const read = new ServiceUnavailableException('read');
+    expect(translate(read, 'read')).toBe(read);
+  });
+
   it.each([
     [{ status: 404 }, 'revoke', NotFoundException],
     [{ status: 422 }, 'revoke', NotFoundException],

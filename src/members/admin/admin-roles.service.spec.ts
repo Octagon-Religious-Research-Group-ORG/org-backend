@@ -18,6 +18,7 @@ import {
   emailForLog,
   invitationLeads,
   isTheirs,
+  FOLLOW_UP_UNKNOWN,
   FOLLOW_UP_WARNING,
   INVITATION_MATCH_SLACK_MS,
   LAST_ADMIN,
@@ -99,8 +100,9 @@ function build(
     }),
   };
   const settingModel = {
-    updateOne: jest.fn(() => {
-      order.push('lock');
+    updateOne: jest.fn((filter: { value?: string }) => {
+      // Taking the lock names no token; restarting its window does.
+      order.push(filter.value === undefined ? 'lock' : 'lock-bumped');
       return { exec: () => Promise.resolve({}) };
     }),
     deleteOne: jest.fn(() => {
@@ -282,6 +284,7 @@ describe('AdminRolesService', () => {
         targetUserId: MEMBER,
         role: 'admin',
         reason: 'Synthetic reason',
+        onUnknown: expect.any(Function) as unknown,
       });
       expect(order).toEqual(['lock', 'actor-check', 'setRole', 'unlock']);
       const [filter, update, options] = settingModel.updateOne.mock
@@ -411,7 +414,7 @@ describe('AdminRolesService', () => {
       await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
         new ServiceUnavailableException(OUTCOME_UNKNOWN),
       );
-      expect(order).toEqual(['lock', 'actor-check']);
+      expect(order).toEqual(['lock', 'actor-check', 'lock-bumped']);
       expect(settingModel.deleteOne).not.toHaveBeenCalled();
     });
 
@@ -422,6 +425,32 @@ describe('AdminRolesService', () => {
         'refused',
       );
       expect(settingModel.deleteOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the lock even when restarting its stale window fails (round 4, LOW-2)', async () => {
+      const errorLog = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      const { service, roles, settingModel } = build();
+      roles.setRole.mockRejectedValueOnce(new ClerkTimedOut());
+      settingModel.updateOne
+        .mockImplementationOnce(() => ({ exec: () => Promise.resolve({}) }))
+        .mockImplementationOnce(() => ({
+          exec: () => Promise.reject(new Error('bump failed')),
+        }));
+      await expect(service.promote(ADMIN, MEMBER, 'r')).rejects.toThrow(
+        OUTCOME_UNKNOWN,
+      );
+      expect(settingModel.updateOne).toHaveBeenLastCalledWith(
+        { key: ROLE_LOCK_KEY, value: expect.any(String) as unknown },
+        { $set: { updatedAt: expect.any(Date) as unknown } },
+        { timestamps: false },
+      );
+      expect(settingModel.deleteOne).not.toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('bump failed'),
+      );
+      errorLog.mockRestore();
     });
 
     it('treats a timed-out read as a plain 503, and frees the lock (nothing was written)', async () => {
@@ -474,8 +503,9 @@ describe('AdminRolesService', () => {
     it('logs a timed-out withdrawal as unknown, and keeps the lock (round 3)', async () => {
       const { service, directory, log, settingModel } = build();
       directory.revoke.mockRejectedValueOnce(new ClerkTimedOut());
+      // The admin hears the outcome is unknown, with the pause (round 4).
       await expect(service.revokeInvitation(ADMIN, 'inv_1')).rejects.toThrow(
-        ClerkTimedOut,
+        new ServiceUnavailableException(OUTCOME_UNKNOWN),
       );
       expect(log.record).toHaveBeenLastCalledWith(
         expect.objectContaining({ action: 'invitation.revoke.unknown' }),
@@ -524,7 +554,7 @@ describe('AdminRolesService', () => {
         timedOut.service.demote(ADMIN, OTHER, 'r'),
       ).resolves.toStrictEqual({
         role: null,
-        followUpWarning: FOLLOW_UP_WARNING,
+        followUpWarning: FOLLOW_UP_UNKNOWN,
       });
       expect(timedOut.directory.revoke).toHaveBeenCalledTimes(1);
       expect(timedOut.settingModel.deleteOne).not.toHaveBeenCalled();
@@ -583,6 +613,38 @@ describe('AdminRolesService', () => {
         role: null,
       });
       expect(directory.revoke).not.toHaveBeenCalled();
+    });
+
+    it('leaves alone an invitation inside the window of an attempt that ended (round 4, LOW-4)', () => {
+      const at = new Date('2026-11-13T10:00:00Z');
+      const hash = emailForLog('x@example.org').emailHash;
+      // A's attempt to x@ completed (sent); its invitation is gone.
+      const { openWindows, sentIds } = invitationLeads([
+        {
+          action: 'invitation.requested',
+          at,
+          details: { emailHash: hash, attemptId: 'a1' },
+        },
+        {
+          action: 'invitation.sent',
+          at,
+          details: { emailHash: hash, attemptId: 'a1', invitationId: 'inv_a' },
+        },
+      ]);
+      expect(openWindows).toEqual([]);
+      // B invites x@ as an admin five seconds later, well inside the window.
+      expect(
+        isTheirs(
+          {
+            invitationId: 'inv_b',
+            email: 'x@example.org',
+            role: 'admin',
+            createdAt: new Date(at.getTime() + 5_000).toISOString(),
+          },
+          sentIds,
+          openWindows,
+        ),
+      ).toBe(false);
     });
 
     it('matches an open request only inside its window', () => {
@@ -668,6 +730,7 @@ describe('AdminRolesService', () => {
         targetUserId: OTHER,
         role: null,
         reason: 'Stepping back',
+        onUnknown: expect.any(Function) as unknown,
       });
       expect(adminAccess.forgetRole).toHaveBeenCalledWith(OTHER);
       expect(order).toEqual([

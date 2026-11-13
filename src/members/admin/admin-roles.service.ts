@@ -18,7 +18,7 @@ import {
   type RoleHolder,
 } from '../../auth/clerk-admin-directory.service';
 import {
-  ClerkTimedOut,
+  ClerkOutcomeUnknown,
   ClerkUserInfoService,
 } from '../../auth/clerk-user-info.service';
 import { MAX_REASON_LENGTH, RolesService } from '../../auth/roles.service';
@@ -75,9 +75,11 @@ export const ROLE_CHANGE_BUSY =
 export const ROLE_CHANGE_LOST =
   'This change took too long and was stopped before anything was changed. Please try again.';
 export const OUTCOME_UNKNOWN =
-  'The sign-in service did not answer in time, so this change may or may not have happened. Role changes are paused for up to 5 minutes; then check the list and the moderation log.';
+  'The sign-in service did not confirm this change, so it may or may not have happened. Role changes are paused for up to 5 minutes; then check the list and the moderation log.';
 export const DEMOTION_UNKNOWN =
-  'The sign-in service did not answer in time, so the admin role may or may not have been removed. Role changes are paused for up to 5 minutes; then check the list, and if the role is gone, withdraw any invitations they sent.';
+  'The sign-in service did not confirm the removal, so the admin role may or may not have been removed. Role changes are paused for up to 5 minutes; then check the list, and if the role is gone, withdraw any invitations they sent.';
+export const FOLLOW_UP_UNKNOWN =
+  'The role was removed, but the sign-in service did not confirm whether one of their pending admin invitations was withdrawn. Role changes are paused for up to 5 minutes; then check the invitation list.';
 export const FOLLOW_UP_WARNING =
   'The role was removed, but their pending admin invitations could not all be checked or withdrawn. Check the invitation list.';
 
@@ -271,9 +273,10 @@ export class AdminRolesService {
           targetUserId: userId,
           role: 'admin',
           reason,
+          onUnknown: () => change.unknown(),
         });
       } catch (error) {
-        if (!(error instanceof ClerkTimedOut)) throw error;
+        if (!(error instanceof ClerkOutcomeUnknown)) throw error;
         change.unknown();
         throw new ServiceUnavailableException(OUTCOME_UNKNOWN);
       }
@@ -313,9 +316,10 @@ export class AdminRolesService {
           targetUserId: userId,
           role: null,
           reason,
+          onUnknown: () => change.unknown(),
         });
       } catch (error) {
-        if (!(error instanceof ClerkTimedOut)) throw error;
+        if (!(error instanceof ClerkOutcomeUnknown)) throw error;
         change.unknown();
         // Harmless either way: it only makes the next check ask Clerk.
         await this.forgetRole(userId);
@@ -324,7 +328,12 @@ export class AdminRolesService {
       const done = await this.afterDemotion(change, adminId, userId);
       return {
         role: null,
-        ...(done ? {} : { followUpWarning: FOLLOW_UP_WARNING }),
+        ...(done === 'done'
+          ? {}
+          : {
+              followUpWarning:
+                done === 'unknown' ? FOLLOW_UP_UNKNOWN : FOLLOW_UP_WARNING,
+            }),
       };
     });
   }
@@ -385,9 +394,10 @@ export class AdminRolesService {
           as === 'admin' ? ADMIN_INVITATION_DAYS : undefined,
         );
       } catch (error) {
-        const unknown = error instanceof ClerkTimedOut;
+        // Marked before anything else can fail (review round 4).
+        const unknown = error instanceof ClerkOutcomeUnknown;
         if (unknown) change.unknown();
-        await this.log.record({
+        await this.recordOrReport({
           ...entry,
           action: unknown ? 'invitation.unknown' : 'invitation.failed',
           details: { as, ...hidden, attemptId, error: describe(error) },
@@ -421,12 +431,19 @@ export class AdminRolesService {
     return this.withRoleLock(adminId, async (change) => {
       await this.requireActorAdmin(adminId);
       await change.check();
-      await this.revokeLogged(
-        change,
-        adminId,
-        invitationId,
-        'Admin withdrew an invitation.',
-      );
+      try {
+        await this.revokeLogged(
+          change,
+          adminId,
+          invitationId,
+          'Admin withdrew an invitation.',
+        );
+      } catch (error) {
+        if (error instanceof ClerkOutcomeUnknown) {
+          throw new ServiceUnavailableException(OUTCOME_UNKNOWN);
+        }
+        throw error;
+      }
       return { revoked: true };
     });
   }
@@ -438,14 +455,17 @@ export class AdminRolesService {
    * thrown. Before each withdrawal it checks the deadline and the fence, and
    * stops at the first that fails.
    *
-   * @returns false when something could not be done or checked
+   * @returns `done`; `warn` when something could not be done or checked;
+   *   `unknown` when a withdrawal had an unknown outcome (lock kept)
    */
   private async afterDemotion(
     change: Change,
     adminId: string,
     userId: string,
-  ): Promise<boolean> {
+  ): Promise<'done' | 'warn' | 'unknown'> {
     let done = await this.forgetRole(userId);
+    let unknown = false;
+    const result = () => (unknown ? 'unknown' : done ? 'done' : 'warn');
     try {
       const rows = (await this.logModel
         .find({
@@ -463,7 +483,7 @@ export class AdminRolesService {
         .select({ action: 1, at: 1, details: 1 })
         .lean()
         .exec()) as unknown as InvitationRow[];
-      if (rows.length === 0) return done;
+      if (rows.length === 0) return result();
       const { sentIds, openWindows } = invitationLeads(rows);
       const { invitations, complete } =
         await this.directory.pendingInvitations();
@@ -481,7 +501,11 @@ export class AdminRolesService {
         } catch (error) {
           done = false;
           // Lost the lock or the deadline, or an unknown outcome: stop here.
-          if (error instanceof ClerkTimedOut || error instanceof LockLost) {
+          if (error instanceof ClerkOutcomeUnknown) unknown = true;
+          if (
+            error instanceof ClerkOutcomeUnknown ||
+            error instanceof LockLost
+          ) {
             break;
           }
         }
@@ -492,7 +516,7 @@ export class AdminRolesService {
         `Could not withdraw the invitations ${userId} sent: ${describe(error)}`,
       );
     }
-    return done;
+    return result();
   }
 
   /** @returns false when the cached role could not be cleared (logged) */
@@ -524,9 +548,10 @@ export class AdminRolesService {
     try {
       await this.directory.revoke(invitationId);
     } catch (error) {
-      const unknown = error instanceof ClerkTimedOut;
+      // Marked before anything else can fail (review round 4).
+      const unknown = error instanceof ClerkOutcomeUnknown;
       if (unknown) change.unknown();
-      await this.log.record({
+      await this.recordOrReport({
         ...entry,
         action: unknown
           ? 'invitation.revoke.unknown'
@@ -536,6 +561,19 @@ export class AdminRolesService {
       throw error;
     }
     await this.log.record({ ...entry, action: 'invitation.revoke.applied' });
+  }
+
+  /** An audit entry that must never replace the outcome being recorded. */
+  private async recordOrReport(
+    entry: Parameters<ModerationLogService['record']>[0],
+  ) {
+    try {
+      await this.log.record(entry);
+    } catch (error) {
+      this.logger.error(
+        `The "${entry.action}" audit entry for ${entry.targetId} failed: ${describe(error)}`,
+      );
+    }
   }
 
   /**
@@ -548,11 +586,7 @@ export class AdminRolesService {
     try {
       isAdmin = await this.adminAccess.isAdminNow(adminId);
     } catch (error) {
-      if (
-        error instanceof HttpException &&
-        error.getStatus() === 401 &&
-        !(error instanceof ClerkTimedOut)
-      ) {
+      if (error instanceof HttpException && error.getStatus() === 401) {
         throw new ForbiddenException(NO_LONGER_ADMIN);
       }
       throw error;
@@ -601,6 +635,7 @@ export class AdminRolesService {
       throw error;
     }
     let outcomeUnknown = false;
+    let bump: Promise<void> = Promise.resolve();
     const change: Change = {
       check: async () => {
         const held =
@@ -611,13 +646,31 @@ export class AdminRolesService {
         if (!held) throw new LockLost();
       },
       unknown: () => {
+        if (outcomeUnknown) return;
         outcomeUnknown = true;
+        // The stale window starts now, when the outcome became unknown.
+        bump = this.settingModel
+          .updateOne(
+            { key: ROLE_LOCK_KEY, value: token },
+            { $set: { updatedAt: new Date() } },
+            { timestamps: false },
+          )
+          .exec()
+          .then(
+            () => undefined,
+            (error: unknown) => {
+              this.logger.error(
+                `Could not restart the role lock's stale window: ${describe(error)}`,
+              );
+            },
+          );
       },
     };
     try {
       return await work(change);
     } finally {
       if (outcomeUnknown) {
+        await bump;
         this.logger.warn(
           'A Clerk write timed out: the role lock is kept until it goes stale.',
         );

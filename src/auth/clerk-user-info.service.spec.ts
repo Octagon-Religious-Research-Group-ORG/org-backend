@@ -4,7 +4,11 @@ import {
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/backend';
 import {
+  CLERK_READ_UNAVAILABLE,
+  CLERK_TIMED_OUT,
   CLERK_TIMEOUT_MS,
+  ClerkOutcomeUnknown,
+  ClerkTimedOut,
   ClerkUserInfoService,
   withClerkTimeout,
 } from './clerk-user-info.service';
@@ -205,6 +209,23 @@ describe('Clerk timeouts (Chunk 12, review round 2)', () => {
     expect(await read).toBeInstanceOf(ServiceUnavailableException);
     expect(await write).toBeInstanceOf(ServiceUnavailableException);
     expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('passes its own timeouts through unchanged: a read stays a read, a write stays unknown (round 4)', async () => {
+    jest.useFakeTimers();
+    getUser.mockReturnValue(new Promise(() => undefined));
+    updateUserMetadata.mockReturnValue(new Promise(() => undefined));
+    const service = build();
+    const read = service.getIdentity('user_1').catch((e: unknown) => e);
+    const write = service.setRole('user_1', null).catch((e: unknown) => e);
+    await jest.advanceTimersByTimeAsync(CLERK_TIMEOUT_MS + 1);
+    // Not rewritten as "temporarily unavailable" by the read translation.
+    expect(await read).toEqual(
+      new ServiceUnavailableException(CLERK_READ_UNAVAILABLE),
+    );
+    expect(await read).not.toBeInstanceOf(ClerkOutcomeUnknown);
+    expect(await write).toBeInstanceOf(ClerkTimedOut);
+    expect(((await write) as Error).message).toBe(CLERK_TIMED_OUT);
   });
 
   it('leaves no timer behind when Clerk answers', async () => {

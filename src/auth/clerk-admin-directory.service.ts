@@ -8,7 +8,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createClerkClient } from '@clerk/backend';
 import type { ClerkClient } from '@clerk/backend';
-import { ClerkTimedOut, withClerkTimeout } from './clerk-user-info.service';
+import {
+  CLERK_TIMEOUT_MS,
+  unknownWriteOutcome,
+  withClerkTimeout,
+} from './clerk-user-info.service';
 import { type MemberRole, parseRole } from './roles';
 
 /** Users read per Clerk request (Clerk's maximum page). */
@@ -29,6 +33,8 @@ export const INVITATION_REFUSED =
   'Clerk refused that invitation. Check the address and try again.';
 export const INVITATION_NOT_FOUND =
   'That invitation does not exist or is no longer waiting.';
+export const CLERK_WRITE_REFUSED_HERE =
+  'The sign-in service refused the request, so nothing was changed. Please try again later.';
 export const CLERK_UNAVAILABLE =
   'The sign-in service is not answering. Please try again in a moment.';
 
@@ -199,7 +205,11 @@ export class ClerkAdminDirectoryService {
   ): Promise<T> {
     try {
       // Bounded, so work a caller stopped waiting for still settles soon.
-      return await withClerkTimeout(run());
+      return await withClerkTimeout(
+        run(),
+        CLERK_TIMEOUT_MS,
+        mode === 'read' ? 'read' : 'write',
+      );
     } catch (error) {
       throw translate(error, mode);
     }
@@ -242,8 +252,13 @@ export function holderView(user: ClerkUserRow): {
 
 /** Clerk's answer, as the admin should read it; never Clerk's raw text. */
 export function translate(error: unknown, mode: ClerkCallMode) {
-  // An unknown outcome stays one (review round 3).
-  if (error instanceof ClerkTimedOut) return error;
+  if (mode !== 'read') {
+    // A write is unknown unless Clerk definitely refused it (review round 4).
+    const unknown = unknownWriteOutcome(error);
+    if (unknown) return unknown;
+  } else if (error instanceof ServiceUnavailableException) {
+    return error;
+  }
   const status =
     typeof error === 'object' && error !== null
       ? (error as { status?: unknown }).status
@@ -265,6 +280,10 @@ export function translate(error: unknown, mode: ClerkCallMode) {
       return new ConflictException(ALREADY_INVITED);
     }
     if (refused) return new BadRequestException(INVITATION_REFUSED);
+  }
+  if (mode !== 'read') {
+    // Refused for another reason (401/403/409/429): nothing was changed.
+    return new ServiceUnavailableException(CLERK_WRITE_REFUSED_HERE);
   }
   return new ServiceUnavailableException(CLERK_UNAVAILABLE);
 }

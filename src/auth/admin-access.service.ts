@@ -27,13 +27,13 @@ export const MAX_REMEMBERED_READ_ANSWERS = 2_000;
  * client has no timeout, so without this a hung request would hold everyone
  * using that token.
  */
+export const MAX_SHARED_READ_LOOKUP_MS = 10_000;
+
 /**
  * Clock difference allowed between server instances when comparing a role
  * read with a revocation (review round 3).
  */
 export const ROLE_CLOCK_SKEW_MS = 5_000;
-
-export const MAX_SHARED_READ_LOOKUP_MS = 10_000;
 
 /**
  * Decides who has website-admin access.

@@ -5,7 +5,10 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ModerationLogService } from '../moderation/moderation-log.service';
-import { ClerkTimedOut, ClerkUserInfoService } from './clerk-user-info.service';
+import {
+  ClerkOutcomeUnknown,
+  ClerkUserInfoService,
+} from './clerk-user-info.service';
 import type { MemberRole } from './roles';
 
 export interface RoleChange {
@@ -14,6 +17,11 @@ export interface RoleChange {
   /** The new role; `null` removes any role. */
   role: MemberRole | null;
   reason: string;
+  /**
+   * Called first when the write's outcome becomes unknown, before anything
+   * else can fail: the caller keeps its lock (review round 4).
+   */
+  onUnknown?: () => void;
 }
 
 export const MAX_REASON_LENGTH = 500;
@@ -67,22 +75,20 @@ export class RolesService {
     try {
       await this.clerk.setRole(change.targetUserId, change.role);
     } catch (error) {
-      if (error instanceof ClerkTimedOut) {
-        // The request may still land: the log must not say "failed".
-        await this.log.record({
-          ...entry,
-          action: 'role.change.timeout',
-          details: { ...details, outcome: 'unknown' },
-        });
-        throw error;
-      }
-      await this.log.record({
+      const unknown = error instanceof ClerkOutcomeUnknown;
+      if (unknown) change.onUnknown?.();
+      // Neither entry may replace what happened: if the log write fails, it
+      // is reported here and the original outcome is what the caller gets.
+      await this.recordOrReport({
         ...entry,
-        action: 'role.change.failed',
-        details: {
-          ...details,
-          error: error instanceof Error ? error.message : String(error),
-        },
+        // The request may still land: the log must not say "failed".
+        action: unknown ? 'role.change.timeout' : 'role.change.failed',
+        details: unknown
+          ? { ...details, outcome: 'unknown' }
+          : {
+              ...details,
+              error: error instanceof Error ? error.message : String(error),
+            },
       });
       throw error;
     }
@@ -100,6 +106,20 @@ export class RolesService {
         }`,
       );
       throw new InternalServerErrorException(ROLE_AUDIT_INCOMPLETE_MESSAGE);
+    }
+  }
+
+  private async recordOrReport(
+    entry: Parameters<ModerationLogService['record']>[0],
+  ) {
+    try {
+      await this.log.record(entry);
+    } catch (error) {
+      this.logger.error(
+        `The "${entry.action}" audit entry for ${entry.targetId} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 }
