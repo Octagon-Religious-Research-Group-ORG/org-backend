@@ -22,6 +22,8 @@ import {
   invitationLeads,
   isTheirs,
   DEMOTION_AUDIT_INCOMPLETE,
+  demotionWarning,
+  FOLLOW_UP_AUDIT_INCOMPLETE,
   FOLLOW_UP_UNKNOWN,
   INVITE_AUDIT_INCOMPLETE,
   REVOKE_AUDIT_INCOMPLETE,
@@ -175,6 +177,39 @@ describe('AdminRolesService', () => {
     expect(FOLLOW_UP_WARNING).toContain(
       'could not all be checked or withdrawn',
     );
+  });
+
+  it('builds one demotion warning, with its lead said once (round 7, LOW 3)', () => {
+    const clean = { outcome: 'done', auditGap: false } as const;
+    expect(demotionWarning(false, clean)).toBeUndefined();
+    // Alone: each case keeps its own whole sentence.
+    expect(demotionWarning(true, clean)).toBe(DEMOTION_AUDIT_INCOMPLETE);
+    expect(demotionWarning(false, { ...clean, auditGap: true })).toBe(
+      FOLLOW_UP_AUDIT_INCOMPLETE,
+    );
+    expect(demotionWarning(false, { ...clean, outcome: 'warn' })).toBe(
+      FOLLOW_UP_WARNING,
+    );
+    expect(demotionWarning(false, { ...clean, outcome: 'unknown' })).toBe(
+      FOLLOW_UP_UNKNOWN,
+    );
+    // Together: one lead, then each part.
+    expect(demotionWarning(false, { outcome: 'warn', auditGap: true })).toBe(
+      'The role was removed. One of their admin invitations was withdrawn, but its audit record is incomplete. Their pending admin invitations could not all be checked or withdrawn. Check the invitation list.',
+    );
+    const all = demotionWarning(true, { outcome: 'unknown', auditGap: true });
+    expect(all).toBe(
+      'The role was removed. Its audit record is incomplete: it shows the change as requested, not applied. One of their admin invitations was withdrawn, but its audit record is incomplete. The sign-in service did not confirm whether one of their pending admin invitations was withdrawn. Role changes are paused for up to 5 minutes; then check the invitation list.',
+    );
+    for (const roleGap of [false, true]) {
+      for (const auditGap of [false, true]) {
+        for (const outcome of ['done', 'warn', 'unknown'] as const) {
+          const text = demotionWarning(roleGap, { outcome, auditGap }) ?? '';
+          expect(text.split('The role was removed').length - 1).toBeLessThan(2);
+          expect(text.split('removed, but').length - 1).toBeLessThan(2);
+        }
+      }
+    }
   });
 
   afterEach(() => jest.useRealTimers());
@@ -637,7 +672,9 @@ describe('AdminRolesService', () => {
         both.service.demote(ADMIN, OTHER, 'r'),
       ).resolves.toStrictEqual({
         role: null,
-        followUpWarning: `${DEMOTION_AUDIT_INCOMPLETE} ${FOLLOW_UP_WARNING}`,
+        // One lead, never "The role was removed, but…" twice (round 7, LOW 3).
+        followUpWarning:
+          'The role was removed. Its audit record is incomplete: it shows the change as requested, not applied. Their pending admin invitations could not all be checked or withdrawn. Check the invitation list.',
       });
     });
 
@@ -736,14 +773,46 @@ describe('AdminRolesService', () => {
           ? Promise.reject(new Error('mongo down'))
           : Promise.resolve({}),
       );
+      // Both withdrawn; only an audit entry is missing, so the warning says
+      // exactly that, not "could not all be withdrawn" (round 7, LOW 3).
       await expect(
         ctx.service.demote(ADMIN, OTHER, 'r'),
       ).resolves.toStrictEqual({
         role: null,
-        followUpWarning: FOLLOW_UP_WARNING,
+        followUpWarning: FOLLOW_UP_AUDIT_INCOMPLETE,
       });
+      expect(FOLLOW_UP_AUDIT_INCOMPLETE).toBe(
+        'The role was removed and their pending admin invitations were withdrawn, but an audit record is incomplete.',
+      );
       expect(ctx.directory.revoke.mock.calls).toEqual([['inv_a'], ['inv_b']]);
       expect(ctx.settingModel.deleteOne).toHaveBeenCalledTimes(1);
+      // The same gap while the list was incomplete: both said, one lead.
+      const partial = build({ identity: { role: 'admin' } });
+      partial.logModel.find.mockReturnValueOnce(
+        chain([
+          {
+            action: 'invitation.sent',
+            at: new Date(),
+            details: { invitationId: 'inv_a' },
+          },
+        ]),
+      );
+      partial.directory.pendingInvitations.mockResolvedValueOnce({
+        invitations: [{ invitationId: 'inv_a', email: 'a@example.org' }],
+        complete: false,
+      });
+      partial.log.record.mockImplementation((entry: { action: string }) =>
+        entry.action === 'invitation.revoke.applied'
+          ? Promise.reject(new Error('mongo down'))
+          : Promise.resolve({}),
+      );
+      await expect(
+        partial.service.demote(ADMIN, OTHER, 'r'),
+      ).resolves.toStrictEqual({
+        role: null,
+        followUpWarning:
+          'The role was removed. One of their admin invitations was withdrawn, but its audit record is incomplete. Their pending admin invitations could not all be checked or withdrawn. Check the invitation list.',
+      });
       // Withdrawn by an admin, the same failure: said plainly, lock freed.
       const single = build();
       single.log.record.mockImplementation((entry: { action: string }) =>

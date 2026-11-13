@@ -99,6 +99,57 @@ export const REVOKE_AUDIT_INCOMPLETE =
   'The invitation was withdrawn, but the audit record is incomplete.';
 export const FOLLOW_UP_WARNING =
   'The role was removed, but their pending admin invitations could not all be checked or withdrawn. Check the invitation list.';
+export const FOLLOW_UP_AUDIT_INCOMPLETE =
+  'The role was removed and their pending admin invitations were withdrawn, but an audit record is incomplete.';
+
+/**
+ * The parts of a demotion's warning, for when more than one applies: one
+ * "The role was removed." and then each part, so the lead is never repeated
+ * (round 7, LOW 3). Each part's message on its own is the constant above.
+ */
+export const DEMOTION_NOTE_PARTS = {
+  roleAudit: {
+    alone: DEMOTION_AUDIT_INCOMPLETE,
+    part: 'Its audit record is incomplete: it shows the change as requested, not applied.',
+  },
+  followUpAudit: {
+    alone: FOLLOW_UP_AUDIT_INCOMPLETE,
+    part: 'One of their admin invitations was withdrawn, but its audit record is incomplete.',
+  },
+  warn: {
+    alone: FOLLOW_UP_WARNING,
+    part: 'Their pending admin invitations could not all be checked or withdrawn. Check the invitation list.',
+  },
+  unknown: {
+    alone: FOLLOW_UP_UNKNOWN,
+    part: 'The sign-in service did not confirm whether one of their pending admin invitations was withdrawn. Role changes are paused for up to 5 minutes; then check the invitation list.',
+  },
+} as const;
+
+/** What the follow-ups of a demotion came to. */
+export interface FollowUp {
+  /** `warn`: something could not be done or checked; `unknown`: a withdrawal's outcome is unknown (lock kept). */
+  outcome: 'done' | 'warn' | 'unknown';
+  /** A withdrawal landed but its `invitation.revoke.applied` entry failed. */
+  auditGap: boolean;
+}
+
+/** The one warning a demotion answers with, or undefined when all went well. */
+export function demotionWarning(
+  roleAuditGap: boolean,
+  followUp: FollowUp,
+): string | undefined {
+  const parts = [
+    ...(roleAuditGap ? [DEMOTION_NOTE_PARTS.roleAudit] : []),
+    ...(followUp.auditGap ? [DEMOTION_NOTE_PARTS.followUpAudit] : []),
+    ...(followUp.outcome === 'done'
+      ? []
+      : [DEMOTION_NOTE_PARTS[followUp.outcome]]),
+  ];
+  if (parts.length === 0) return undefined;
+  if (parts.length === 1) return parts[0].alone;
+  return ['The role was removed.', ...parts.map((p) => p.part)].join(' ');
+}
 
 /** An admin as the dashboard lists it. */
 export interface AdminView extends RoleHolder {
@@ -359,17 +410,9 @@ export class AdminRolesService {
           throw new ServiceUnavailableException(DEMOTION_UNKNOWN);
         }
       }
-      const done = await this.afterDemotion(change, adminId, userId);
-      const warnings = [
-        ...(auditGap ? [DEMOTION_AUDIT_INCOMPLETE] : []),
-        ...(done === 'done'
-          ? []
-          : [done === 'unknown' ? FOLLOW_UP_UNKNOWN : FOLLOW_UP_WARNING]),
-      ];
-      return {
-        role: null,
-        ...(warnings.length ? { followUpWarning: warnings.join(' ') } : {}),
-      };
+      const followUp = await this.afterDemotion(change, adminId, userId);
+      const warning = demotionWarning(auditGap, followUp);
+      return { role: null, ...(warning ? { followUpWarning: warning } : {}) };
     });
   }
 
@@ -517,17 +560,22 @@ export class AdminRolesService {
    * thrown. Before each withdrawal it checks the deadline and the fence, and
    * stops at the first that fails.
    *
-   * @returns `done`; `warn` when something could not be done or checked;
-   *   `unknown` when a withdrawal had an unknown outcome (lock kept)
+   * @returns the outcome (`done`; `warn` when something could not be done or
+   *   checked; `unknown` when a withdrawal had an unknown outcome, lock
+   *   kept), and whether a withdrawal landed with its audit entry failing
    */
   private async afterDemotion(
     change: Change,
     adminId: string,
     userId: string,
-  ): Promise<'done' | 'warn' | 'unknown'> {
+  ): Promise<FollowUp> {
     let done = await this.forgetRole(userId);
     let unknown = false;
-    const result = () => (unknown ? 'unknown' : done ? 'done' : 'warn');
+    let auditGap = false;
+    const result = (): FollowUp => ({
+      outcome: unknown ? 'unknown' : done ? 'done' : 'warn',
+      auditGap,
+    });
     try {
       const rows = (await this.logModel
         .find({
@@ -566,16 +614,16 @@ export class AdminRolesService {
             'The admin who sent this invitation is no longer an admin.',
           );
         } catch (error) {
-          done = false;
-          // Refused, or withdrawn with only its audit entry failing: try
-          // the next. Not sent (lock, deadline, log): stop. Anything else is
-          // an unknown outcome: stop, the lock is kept.
-          if (
-            settledAs(error) === 'refused' ||
-            settledAs(error) === 'applied'
-          ) {
+          // Withdrawn, only its audit entry failed: not a failure to
+          // withdraw (round 7, LOW 3); try the next.
+          if (settledAs(error) === 'applied') {
+            auditGap = true;
             continue;
           }
+          done = false;
+          // Refused: try the next. Not sent (lock, deadline, log): stop.
+          // Anything else is an unknown outcome: stop, the lock is kept.
+          if (settledAs(error) === 'refused') continue;
           if (!(error instanceof LockLost || settledAs(error) === 'not-sent')) {
             unknown = true;
           }
