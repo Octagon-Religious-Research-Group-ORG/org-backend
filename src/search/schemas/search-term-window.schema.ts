@@ -27,7 +27,7 @@ export class SearchTermWindow {
   @Prop({ type: Number, required: true, min: 0 })
   window: number;
 
-  /** Different searchers in that window (see `searcher-counter.ts`). */
+  /** Different searchers in that window (deduplicated in `searchfragmentpairs`, see `fragment-keys.ts`). */
   @Prop({ type: Number, required: true, min: 0 })
   searchers: number;
 

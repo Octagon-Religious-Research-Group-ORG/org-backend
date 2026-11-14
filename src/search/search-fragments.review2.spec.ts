@@ -123,20 +123,28 @@ describe('Suggested Fragments, round-2 review', () => {
     const counted = [
       { _id: 'lamp light', searchers: 9 },
       { _id: 'copper bell', searchers: 8 },
+      { _id: 'quiet term', searchers: 7 },
     ];
     const { service, search, setScope, bump } = build({ counted });
+    search.publicPhraseCount.mockImplementation((term: string) =>
+      Promise.resolve(term === 'quiet term' ? 0 : 1),
+    );
     expect(await service.fragments(NOW)).toEqual(['lamp light', 'copper bell']);
     const checks = () => search.publicPhraseCount.mock.calls.length;
     const first = checks();
+    expect(first).toBe(3);
+    // Nothing changed: only the two shown terms are checked again.
     await service.fragments(new Date(NOW.getTime() + 1000));
-    expect(checks()).toBe(first);
+    expect(checks()).toBe(first + 2);
     // A page becomes private: the guest scope differs, so it checks again.
     setScope({ listed: [new Types.ObjectId()], full: [] });
     search.publicPhraseCount.mockImplementation((term: string) =>
       Promise.resolve(term === 'lamp light' ? 0 : 1),
     );
+    // ("quiet term" now matches too, so it takes the freed place.)
     expect(await service.fragments(new Date(NOW.getTime() + 2000))).toEqual([
       'copper bell',
+      'quiet term',
     ]);
     const second = checks();
     // The index changed: checks again.
@@ -190,15 +198,35 @@ describe('Suggested Fragments without a server secret (M-A)', () => {
 });
 
 describe('Suggested Fragments per-searcher memory (L1)', () => {
-  it('stops counting new searchers once the window remembers too many', async () => {
+  it('still counts a new searcher when the memory is full, forgetting the oldest (round-3 L2)', async () => {
     const { service, windows } = build();
-    const counts = (service as any).perVisitor;
-    (service as any).visitorCounts(windowIndex(NOW, 30));
-    for (let n = 0; n < 100_000; n += 1) {
-      (service as any).perVisitor.counts.set(`v${n}`, 1);
-    }
-    expect(counts).toBeDefined();
+    const counts: Map<string, number> = (service as any).visitorCounts(
+      windowIndex(NOW, 30),
+    );
+    for (let n = 0; n < 100_000; n += 1) counts.set(`v${n}`, 1);
     await service.record('lamp', 1, 'ip:new', NOW);
-    expect(windows.updateOne).not.toHaveBeenCalled();
+    expect(windows.updateOne).toHaveBeenCalledTimes(1);
+    const now: Map<string, number> = (service as any).perVisitor.counts;
+    expect(now.size).toBe(100_000);
+    expect(now.has('v0')).toBe(false);
+  });
+});
+
+describe('Suggested Fragments re-check, round-3 review', () => {
+  it('never serves a cached term that stopped matching, and fills its place', async () => {
+    const { service, search } = build({
+      counted: [
+        { _id: 'lamp light', searchers: 9 },
+        { _id: 'copper bell', searchers: 8 },
+      ],
+    });
+    expect(await service.fragments(NOW)).toEqual(['lamp light', 'copper bell']);
+    // The belief holding "lamp light" is removed; nothing else changed.
+    search.publicPhraseCount.mockImplementation((term: string) =>
+      Promise.resolve(term === 'lamp light' ? 0 : 1),
+    );
+    expect(await service.fragments(new Date(NOW.getTime() + 1000))).toEqual([
+      'copper bell',
+    ]);
   });
 });

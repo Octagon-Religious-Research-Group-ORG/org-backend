@@ -52,8 +52,9 @@ export class SearchController {
     const viewer = await this.members.resolveViewer(request);
     const response = await this.search.search(q, type, page, viewer);
     if (page === 1) {
-      // Counted after answering and never awaited by the reader; the
-      // visitor key is used in memory only (searcher-counter.ts).
+      // Counted after answering and never awaited by the reader. The
+      // visitor key is never stored: only HMACs of it under a key derived
+      // from the server secret (fragment-keys.ts).
       void this.fragments.record(
         q,
         response.total,

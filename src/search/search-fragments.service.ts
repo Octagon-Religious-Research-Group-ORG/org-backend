@@ -32,10 +32,14 @@ const MAX_CANDIDATES = 50;
  */
 export const CANDIDATES_CACHE_MS = 10 * 60_000;
 /**
- * How long the public list is reused while nothing it depends on changed:
- * the candidates, what a guest may see (the guest scope, read on every
- * request) and the search index (`indexGeneration`). A page made private
- * changes the guest scope, so its words go at once (round-2 review L2).
+ * How long the full eligibility pass over the candidates is reused while
+ * nothing it depends on changed: the candidates, what a guest may see (the
+ * guest scope, read on every request) and the search index
+ * (`indexGeneration`). Even then, every term it showed is checked again on
+ * every request through the same live visibility filter as a search, so a
+ * term whose page went private, or whose belief was removed, edited or
+ * moderated, is never served, whether or not the indexer has run
+ * (round-3 review). Those are at most {@link MAX_FRAGMENTS} small queries.
  */
 export const ELIGIBLE_CACHE_MS = 60_000;
 /**
@@ -45,7 +49,13 @@ export const ELIGIBLE_CACHE_MS = 60_000;
  * a minute bounds it further.
  */
 export const MAX_TERMS_PER_VISITOR = 50;
-/** Searchers the per-searcher limit remembers per window, at most. */
+/**
+ * Searchers the per-searcher limit remembers per window, at most. When it
+ * is full the searcher seen LONGEST AGO is forgotten (round-3 review L2), so
+ * a new searcher is always counted: nobody is frozen out. A forgotten
+ * searcher may add up to {@link MAX_TERMS_PER_VISITOR} terms again, which
+ * takes this many other new searchers arriving after them first.
+ */
 const MAX_TRACKED_VISITORS = 100_000;
 const DAY_MS = 86_400_000;
 
@@ -220,14 +230,18 @@ export class SearchFragmentsService {
   private underVisitorLimit(window: number, visitor: string) {
     const counts = this.visitorCounts(window);
     const id = (this.keys as FragmentKeys).visitorId(window, visitor);
-    if (!counts.has(id) && counts.size >= MAX_TRACKED_VISITORS) return false;
     return (counts.get(id) ?? 0) < MAX_TERMS_PER_VISITOR;
   }
 
   private countVisitor(window: number, visitor: string) {
     const counts = this.visitorCounts(window);
     const id = (this.keys as FragmentKeys).visitorId(window, visitor);
-    counts.set(id, (counts.get(id) ?? 0) + 1);
+    const known = counts.get(id);
+    if (known === undefined && counts.size >= MAX_TRACKED_VISITORS) {
+      // A Map keeps insertion order: its first key was seen longest ago.
+      counts.delete(counts.keys().next().value as string);
+    }
+    counts.set(id, (known ?? 0) + 1);
   }
 
   /** The fragments readers see, most searched first; eligibility kept current. */
@@ -250,7 +264,14 @@ export class SearchFragmentsService {
       this.eligible?.key === key &&
       Math.abs(now.getTime() - this.eligible.at) < ELIGIBLE_CACHE_MS
     ) {
-      return this.eligible.fragments;
+      const still: string[] = [];
+      for (const term of this.eligible.fragments) {
+        if ((await this.search.publicPhraseCount(term, scope)) > 0) {
+          still.push(term);
+        }
+      }
+      if (still.length === this.eligible.fragments.length) return still;
+      // One went: run the full pass, so the next candidate can take its place.
     }
     const views = await this.check(this.cache, true, scope);
     const fragments = views

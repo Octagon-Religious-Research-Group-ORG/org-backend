@@ -405,3 +405,26 @@ describe('SearchIndexerService page ids, round-2 review L3', () => {
     expect(indexer.generation()).toBeGreaterThan(before);
   });
 });
+
+describe('SearchIndexerService generation, round-3 review', () => {
+  it('counts a refresh that only deletes entries as a change', async () => {
+    const { indexer, entries, profiles, tabs } = build({
+      pages: [],
+      blocks: [],
+    });
+    profiles.find.mockReturnValue(chain([]));
+    tabs.find.mockReturnValue(chain([]));
+    entries.deleteMany.mockReturnValue(exec({ deletedCount: 1 }));
+    await indexer.refresh({ full: true });
+    expect(entries.bulkWrite).not.toHaveBeenCalled();
+    expect(indexer.generation()).toBeGreaterThan(0);
+  });
+
+  it('does not count a delete that removed nothing', async () => {
+    const { indexer, profiles, tabs } = build({ pages: [], blocks: [] });
+    profiles.find.mockReturnValue(chain([]));
+    tabs.find.mockReturnValue(chain([]));
+    await indexer.refresh({ full: true });
+    expect(indexer.generation()).toBe(0);
+  });
+});

@@ -234,15 +234,27 @@ pair row is about. Nothing outlives its window by more than a day.
 - **Fragments stay off without it:** if `CLERK_SECRET_KEY` is empty, nothing
   is counted, the Perforated Index shows its built-in suggestions, and this is
   logged once.
-- **Residual exposure:** someone holding BOTH the database and the Clerk
-  secret could test a guessed address against a term in the current window.
-  On a replica set, the oplog briefly shows a pair row and a term count being
-  written together; it still names nobody.
+- **Residual exposure, stated plainly:** anyone holding BOTH the database and
+  the Clerk secret can recompute the keys and test, exhaustively:
+  - every member (`user:<Clerk id>`; the ids are in the database) against
+    every counted term;
+  - every IPv4 address (about 4 billion) against a term, for guests.
+
+  This reveals who searched which counted term in the current and previous
+  windows; the TTL removes older rows. The Clerk secret already grants full
+  administration of every user account, so whoever holds it has more than
+  this anyway. On a replica set the oplog also briefly shows a pair row and a
+  term count written together. The privacy property holds against the
+  database ALONE (a leaked backup or a database user), not against the host's
+  secrets.
 
 **Per-searcher limit.** One searcher adds at most 50 different terms per
-window. This limit is kept in memory only (a restart resets it), so the store
-is bounded by roughly 50 rows per searcher per window, on top of the 30
-searches a minute rate limit. A term is checked for public content before
+window. The limit is kept in memory only (a restart resets it), for up to
+100,000 searchers per window. When that is full, the searcher seen longest ago
+is forgotten, so new searchers are always counted. A forgotten searcher could
+add up to 50 terms again, but only after 100,000 other new searchers have
+arrived. The store is therefore bounded by roughly 50 rows per searcher per
+window, on top of the 30 searches a minute rate limit. A term is checked for public content before
 anything is written, so searches for private or empty terms store nothing.
 
 **When a term is suggested.** Its count in the current window, or in the
@@ -255,9 +267,13 @@ The two counts are never added. The term must also:
   at most four words; no long numbers or `@`);
 - be neither hidden nor contain a hidden word or phrase (whole words).
 
-The public list is reused for at most a minute while nothing it depends on
-changed: the candidates, the guest scope (read on every request, so a page
-made private drops its words at once) and the search index.
+The full check over the candidates is reused for at most a minute while
+nothing it depends on changed: the candidates, the guest scope (read on every
+request) and the search index (every write or delete counts). Even then, each
+term it showed is checked again on every request through the same live
+visibility filter as a search. A term whose page went private, or whose
+belief was removed, edited or moderated, is never served, whether or not the
+indexer has run. That is at most 8 small queries a request.
 
 **Admins** see and hide terms at `/api/v1/admin/search-fragments`: any
 fragment-shaped term, listed or not. Hiding a word also keeps out every term

@@ -199,7 +199,7 @@ describe('SearchFragmentsService lists', () => {
     expect(first).toHaveLength(MAX_FRAGMENTS);
     expect(search.publicPhraseCount).toHaveBeenCalledTimes(MAX_FRAGMENTS);
     // Within a minute and with nothing changed, the answer is reused.
-    expect(await service.fragments(new Date(NOW.getTime() + 1))).toBe(first);
+    expect(await service.fragments(new Date(NOW.getTime() + 1))).toEqual(first);
     // After it, each one is checked again: one that stopped matching goes.
     search.publicPhraseCount.mockImplementation((term: string) =>
       Promise.resolve(term === 'term a' ? 0 : 1),

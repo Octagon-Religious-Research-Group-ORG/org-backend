@@ -240,6 +240,15 @@ function seed() {
     ['Morning café gathering.'],
     { ownerUserId: 'user_cafe_owner' },
   );
+  // Round-3 review: a public belief whose only block is about to go.
+  addPage(
+    s,
+    'quiet-holder',
+    'Still Holder',
+    'Rest',
+    ['A quietphrase rests here.'],
+    { ownerUserId: 'user_quiet_owner' },
+  );
   const multi = addPage(
     s,
     'multi-holder',
@@ -906,6 +915,29 @@ describeWithMongo('search on a real MongoDB', () => {
     expect(
       (await fragments.adminView(at)).map((view) => view.term),
     ).not.toContain('plain holder');
+  });
+
+  it('drops a suggestion the moment its source goes, refresh or not (round-3 review)', async () => {
+    const fresh = jest.spyOn(indexer, 'ensureFresh').mockResolvedValue();
+    const suggested = async () =>
+      (await get('/search/fragments').expect(200)).body.fragments as string[];
+    try {
+      await fragments.record('quietphrase', 1, 'ip:quiet-1');
+      await fragments.record('quietphrase', 1, 'ip:quiet-2');
+      expect(await suggested()).toContain('quietphrase');
+      // The tab's only block is taken off the page; no refresh has run.
+      await m.ProfileBlock.updateOne(
+        { blockId: 'blk_quiet-holder' },
+        { $set: { removedAt: new Date() } },
+      );
+      expect((await find('quietphrase')).total).toBe(0);
+      expect(await suggested()).not.toContain('quietphrase');
+      // A refresh that only deletes entries changes nothing either.
+      await indexer.refresh({ full: false });
+      expect(await suggested()).not.toContain('quietphrase');
+    } finally {
+      fresh.mockRestore();
+    }
   });
 
   it("reads the first block of the belief's own page (review L5)", async () => {

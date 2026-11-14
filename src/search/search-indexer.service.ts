@@ -126,9 +126,9 @@ export class SearchIndexerService implements OnApplicationBootstrap {
   }
 
   /**
-   * How many times the index has been written to. A cache of answers drawn
-   * from it keys on this (round-2 review L2). Deletions only follow writes
-   * of the same refresh, so counting the writes is enough.
+   * How many times the index has changed: every write, and every delete
+   * that removed something (round-3 review: a refresh can remove entries
+   * and write none). A cache of answers drawn from it keys on this.
    */
   generation(): number {
     return this.writes;
@@ -182,6 +182,11 @@ export class SearchIndexerService implements OnApplicationBootstrap {
 
     this.since = startedAt;
     if (full) this.lastFullAt = startedAt.getTime();
+  }
+
+  private async remove(filter: object) {
+    const { deletedCount } = await this.entryModel.deleteMany(filter).exec();
+    if (deletedCount > 0) this.writes += 1;
   }
 
   private async write(
@@ -305,13 +310,11 @@ export class SearchIndexerService implements OnApplicationBootstrap {
         }),
       ),
     );
-    await this.entryModel
-      .deleteMany({
-        kind: 'belief-text',
-        tabId,
-        blockId: { $nin: shown.map(({ block }) => block.blockId) },
-      })
-      .exec();
+    await this.remove({
+      kind: 'belief-text',
+      tabId,
+      blockId: { $nin: shown.map(({ block }) => block.blockId) },
+    });
   }
 
   /** Each changed CMS page: its published texts, and nothing older. */
@@ -338,14 +341,12 @@ export class SearchIndexerService implements OnApplicationBootstrap {
           }),
         ),
       );
-      await this.entryModel
-        .deleteMany({
-          kind: 'page',
-          pageId: page.pageId,
-          variant: this.site,
-          part: { $nin: parts.map(({ part }) => part) },
-        })
-        .exec();
+      await this.remove({
+        kind: 'page',
+        pageId: page.pageId,
+        variant: this.site,
+        part: { $nin: parts.map(({ part }) => part) },
+      });
     }
   }
 
