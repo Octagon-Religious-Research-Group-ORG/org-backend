@@ -128,9 +128,12 @@ export class NotificationQueueRow {
   @Prop({ type: Number, min: 0 })
   keyGen?: number;
 
-  /** When a send under the current key first came back unknown. */
+  /**
+   * When the first send under the current key STARTED (recorded before the
+   * send, review N3): the 23-hour cutoff counts from it.
+   */
   @Prop({ type: Date })
-  unknownSince?: Date;
+  keyStartedAt?: Date;
 
   /** The email as first sent under the current key (review L3). */
   @Prop({ type: StoredEmailSchema })

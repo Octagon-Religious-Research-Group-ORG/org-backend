@@ -9,6 +9,7 @@ import {
   RETRY_MS,
 } from './notification-dispatcher.service';
 import { readNotificationConfig } from './notification-config';
+import { composeEmail } from './notification-mail';
 import {
   harness,
   harnessConfig,
@@ -154,13 +155,22 @@ describe('Chunk 14 review fixes', () => {
   });
 
   describe('L3: a takeover replays the body that was sent under the key', () => {
-    it('does not rebuild it', async () => {
+    it('replays it byte for byte (after the round-2 checks)', async () => {
       const h = harness();
       const item = h.queued({
         userId: 'user_a',
         kind: 'reply',
         category: 'replies',
         delivery: 'digest',
+      });
+      const settings = readNotificationConfig(harnessConfig());
+      const stored = composeEmail({
+        items: [{ kind: 'reply', path: '/page' }],
+        digest: true,
+        userId: 'user_a',
+        scope: 'digest',
+        signingKey: settings.signingKey,
+        publicAppUrl: settings.publicAppUrl,
       });
       h.digestRows.docs.push({
         _id: new Types.ObjectId(),
@@ -169,22 +179,19 @@ describe('Chunk 14 review fixes', () => {
         status: 'sending',
         itemIds: [item._id],
         shownIds: [item._id],
-        email: {
-          subject: 'Stored subject',
-          lines: ['Stored line'],
-          headers: { 'List-Unsubscribe': '<https://org.example.test/u>' },
-        },
+        email: stored,
+        keyStartedAt: new Date(NOW.getTime() - HOUR),
         attempts: 0,
         keyGen: 0,
         leaseUntil: new Date(NOW.getTime() - 1),
         leaseToken: 'dead',
       });
       expect(await h.digests.forMember('user_a', NOW)).toBe('sent');
-      expect(h.targets.describe).not.toHaveBeenCalled();
       expect(h.mail.sendNotice).toHaveBeenCalledWith(
         expect.objectContaining({
-          subject: 'Stored subject',
-          lines: ['Stored line'],
+          subject: stored.subject,
+          lines: stored.lines,
+          headers: stored.headers,
         }),
       );
       expect(item.status).toBe('sent');
@@ -413,7 +420,7 @@ describe('Chunk 14 review fixes', () => {
           ...(shown ? { shownIds: [item._id] } : {}),
           attempts: 1,
           keyGen: 0,
-          unknownSince: new Date(NOW.getTime() - 24 * HOUR),
+          keyStartedAt: new Date(NOW.getTime() - 24 * HOUR),
         });
         expect(await h.digests.forMember('user_a', NOW)).toBe('failed');
         expect(item).toMatchObject({

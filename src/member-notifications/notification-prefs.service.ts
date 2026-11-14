@@ -77,8 +77,8 @@ export class NotificationPrefsService {
   }
 
   /**
-   * Saves a change: ONLY the fields it names (review L6), each as one
-   * atomic update, so a page loaded before an unsubscribe link was used can
+   * Saves a change: ONLY the fields it names (review L6), in one atomic
+   * update (review N8), so a page loaded before an unsubscribe link was used can
    * never turn that back on by saving something else. Admin settings are
    * ignored for a non-admin (the page never offers them).
    */
@@ -95,7 +95,7 @@ export class NotificationPrefsService {
       }
       (on ? turnOn : turnOff).push(key as Category);
     }
-    const set: Partial<NotificationPrefs> = {
+    const flags: Partial<NotificationPrefs> = {
       ...(change.digest !== undefined ? { digest: change.digest } : {}),
       ...(change.immediate !== undefined
         ? { immediate: change.immediate }
@@ -104,12 +104,26 @@ export class NotificationPrefsService {
         ? { adminImmediate: change.adminImmediate }
         : {}),
     };
-    if (Object.keys(set).length > 0) await this.write(userId, { $set: set });
-    if (turnOff.length > 0) {
-      await this.write(userId, { $addToSet: { off: { $each: turnOff } } });
-    }
-    if (turnOn.length > 0) {
-      await this.write(userId, { $pull: { off: { $in: turnOn } } });
+    if (
+      Object.keys(flags).length > 0 ||
+      turnOn.length > 0 ||
+      turnOff.length > 0
+    ) {
+      // ONE atomic write (review N8): the flags it names, and the off-list
+      // as (off ∪ turned off) − turned on, computed by the server.
+      await this.write(userId, [
+        {
+          $set: {
+            ...flags,
+            off: {
+              $setDifference: [
+                { $setUnion: [{ $ifNull: ['$off', []] }, turnOff] },
+                turnOn,
+              ],
+            },
+          },
+        },
+      ]);
     }
     return toView(await this.get(userId), isAdmin);
   }
@@ -130,12 +144,19 @@ export class NotificationPrefsService {
   }
 
   /** One update on the member's row, made with the defaults if missing. */
-  private async write(userId: string, update: Record<string, unknown>) {
+  private async write(
+    userId: string,
+    update: Record<string, unknown> | Array<Record<string, unknown>>,
+  ) {
     const run = () =>
       this.prefsModel
         .updateOne({ userId }, update, {
           upsert: true,
-          setDefaultsOnInsert: true,
+          // A pipeline (one atomic settings save) must say so to Mongoose;
+          // it sets no defaults, which `get` reads as on anyway.
+          ...(Array.isArray(update)
+            ? { updatePipeline: true }
+            : { setDefaultsOnInsert: true }),
         })
         .exec();
     try {

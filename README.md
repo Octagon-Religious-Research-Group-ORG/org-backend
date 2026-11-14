@@ -118,8 +118,22 @@ same day twice. `emailbudget` counts sends per UTC day against
 does not fit waits for the next day. Admins see the day's count in the
 dashboard's Settings. Addresses are read from Clerk when an email is sent and
 never stored. Sending is off until `RESEND_API_KEY` and a sender are set; until
-then notifications are only queued. A notification still unsent a day before
-its 30-day expiry is marked failed and counted on the dashboard.
+then notifications are only queued. A notification still unsent three days
+before its 30-day expiry is marked failed and counted on the dashboard; this
+sweep runs first in every pass, at start-up too, even with sending off. A row
+being sent at that moment is left alone. ⚠️ A server that sleeps longer than
+those three days without waking can still have the database delete rows
+before the sweep sees them (MongoDB's TTL monitor runs without the app).
+
+A send that may have happened is retried byte for byte under the same key
+only while every check (settings, the reader's access, admin status) still
+allows exactly that email; otherwise nothing is sent and the row is marked
+"withdrawn after unknown send". The 23-hour limit counts from when the first
+send under a key started, recorded before the send.
+
+On Render, set `NODE_ENV=production`: the Resend SDK and Express print more
+detail when it is unset. This backend already routes the SDK's own error
+lines through its logger, redacted, so that setting is a second guard.
 
 Offering-order emails are counted in the same day (never refused), so
 notifications yield to them. A send whose outcome is unknown (timeout,

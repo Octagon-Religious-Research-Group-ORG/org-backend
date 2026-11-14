@@ -11,13 +11,16 @@ export const KEY_LIFETIME_MS = 23 * HOUR_MS;
 /** Why an email whose send may have happened is never tried again. */
 export const UNKNOWN_GIVE_UP = 'outcome unknown; not resent';
 
-/** What a row remembers about its sends (Chunk 14 review L2). */
+/** What a row remembers about its sends (Chunk 14 review L2, N3). */
 export interface SendState {
   attempts: number;
   /** Bumped only after a definite refusal: a new key is then safe. */
   keyGen?: number;
-  /** When a send under the current key first came back unknown. */
-  unknownSince?: Date;
+  /**
+   * When the first send under the current key STARTED: recorded before the
+   * send, so a crash before its result is known still counts (review N3).
+   */
+  keyStartedAt?: Date;
 }
 
 /** The idempotency key of the row's next send. */
@@ -32,37 +35,29 @@ export function sendKey(prefix: string, id: unknown, state: SendState) {
  */
 export function keyMayHaveExpired(state: SendState, now: Date): boolean {
   return (
-    state.unknownSince !== undefined &&
-    now.getTime() - new Date(state.unknownSince).getTime() >= KEY_LIFETIME_MS
+    state.keyStartedAt !== undefined &&
+    now.getTime() - new Date(state.keyStartedAt).getTime() >= KEY_LIFETIME_MS
   );
 }
 
 /**
  * The row's state after a send that did not succeed:
- * - refused: definitely not sent, so the next try gets a new key;
- * - unknown: may have been sent, so the next try keeps the same key.
+ * - refused (or not configured): definitely not sent, so the next try gets
+ *   a new key, with no start time and no stored body;
+ * - unknown: may have been sent, so the next try keeps the same key, body
+ *   and start time.
  *
- * @returns the fields to set and unset, and whether the attempts ran out
+ * @returns the fields to set, and whether the attempts ran out
  */
 export function afterFailedSend(
   outcome: Exclude<NoticeOutcome, 'sent'>,
   state: SendState,
-  now: Date,
   maxAttempts: number,
-): {
-  set: Record<string, unknown>;
-  unset: Record<string, 1>;
-  final: boolean;
-  refused: boolean;
-} {
+): { set: Record<string, unknown>; final: boolean; refused: boolean } {
   const attempts = state.attempts + 1;
-  // 'skipped' (not configured) sent nothing either.
   const refused = outcome !== 'unknown';
   return {
-    set: refused
-      ? { attempts, keyGen: (state.keyGen ?? 0) + 1 }
-      : { attempts, unknownSince: state.unknownSince ?? now },
-    unset: refused ? { unknownSince: 1 } : {},
+    set: refused ? { attempts, keyGen: (state.keyGen ?? 0) + 1 } : { attempts },
     final: attempts >= maxAttempts,
     refused,
   };

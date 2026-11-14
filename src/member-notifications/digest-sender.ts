@@ -159,6 +159,20 @@ export class DigestSender {
     }
   }
 
+  /**
+   * Item ids held by any unfinished digest row (sending, failed with tries
+   * left, or deferred), of one member or of everyone: never taken by a new
+   * row (review N2) nor swept as expired (review N4).
+   */
+  async itemsInFlight(userId?: string): Promise<Types.ObjectId[]> {
+    const rows = (await this.digestModel
+      .find({ ...(userId ? { userId } : {}), ...UNFINISHED })
+      .select({ itemIds: 1 })
+      .lean()
+      .exec()) as unknown as Array<{ itemIds: Types.ObjectId[] }>;
+    return rows.flatMap((row) => row.itemIds);
+  }
+
   /** Claims, builds (or replays) and sends one member's digest. */
   async forMember(
     userId: string,
@@ -179,7 +193,12 @@ export class DigestSender {
         .exec();
 
     if (keyMayHaveExpired(row, now)) {
-      await this.giveUp(row, finish);
+      await finish({
+        status: 'failed',
+        attempts: DIGEST_MAX_ATTEMPTS,
+        outcome: UNKNOWN_GIVE_UP,
+      });
+      await this.drop(row.shownIds ?? row.itemIds, UNKNOWN_GIVE_UP, 'failed');
       return 'failed';
     }
     let recipient: Recipient | undefined;
@@ -187,7 +206,7 @@ export class DigestSender {
       recipient = await this.targets.recipient(userId);
     } catch (error) {
       this.logger.warn(`Could not read a reader's account: ${describe(error)}`);
-      // Nothing was sent, so no key was used.
+      // Nothing more was sent, so the key stays as it is.
       const attempts = row.attempts + 1;
       await finish({ status: 'failed', attempts });
       if (attempts >= DIGEST_MAX_ATTEMPTS) {
@@ -195,53 +214,100 @@ export class DigestSender {
       }
       return 'failed';
     }
-    if (!recipient) {
-      await this.drop(row.itemIds, 'account gone');
-      await finish({ status: 'nothing' });
-      await this.moveOn(userId, now);
-      return 'skipped';
-    }
 
-    let email = row.email;
-    let shownIds = row.shownIds;
-    if (!email || !shownIds) {
-      const built = await this.build(row, recipient);
-      if (!built) {
+    // A send may already have happened under this key: replay the stored
+    // body byte for byte, but only while every check still allows exactly
+    // it (review N6). Otherwise send nothing, and say so.
+    const replay =
+      row.keyStartedAt && row.email && row.shownIds
+        ? { email: row.email, shownIds: row.shownIds }
+        : undefined;
+    let email: StoredEmail;
+    let shownIds: Types.ObjectId[];
+    let to: string;
+    if (replay) {
+      const plan = recipient ? await this.build(row, recipient) : undefined;
+      if (!recipient?.email || !plan || !samePlan(plan, replay)) {
+        await finish({
+          status: 'failed',
+          attempts: DIGEST_MAX_ATTEMPTS,
+          outcome: WITHDRAWN,
+        });
+        await this.drop(replay.shownIds, WITHDRAWN, 'failed');
+        await this.moveOn(userId, now);
+        return 'failed';
+      }
+      ({ email, shownIds } = replay);
+      to = recipient.email;
+    } else {
+      if (!recipient) {
+        await this.drop(row.itemIds, 'account gone');
         await finish({ status: 'nothing' });
         await this.moveOn(userId, now);
         return 'skipped';
       }
-      ({ email, shownIds } = built);
-    }
-    if (!recipient.email) {
-      await this.drop(shownIds, 'no verified address');
-      await finish({ status: 'nothing' });
-      await this.moveOn(userId, now);
-      return 'skipped';
+      // Fresh: apply what the reader's settings and access say now.
+      const plan = await this.build(row, recipient);
+      for (const { id, outcome } of plan.drops) {
+        await this.drop([id], outcome);
+      }
+      for (const id of plan.toImmediate) {
+        await this.queueModel
+          .updateOne(
+            { _id: id, status: 'queued' },
+            { $set: { delivery: 'immediate' }, $unset: { nextAttemptAt: 1 } },
+          )
+          .exec();
+      }
+      if (!plan.email) {
+        await finish({ status: 'nothing' }, { email: 1, shownIds: 1 });
+        await this.moveOn(userId, now);
+        return 'skipped';
+      }
+      if (!recipient.email) {
+        await this.drop(plan.shownIds, 'no verified address');
+        await finish({ status: 'nothing' }, { email: 1, shownIds: 1 });
+        await this.moveOn(userId, now);
+        return 'skipped';
+      }
+      ({ email, shownIds } = { email: plan.email, shownIds: plan.shownIds });
+      to = recipient.email;
     }
     if (!(await this.budget.take('digest', now))) {
-      await finish({ status: 'deferred', email, shownIds });
+      // Nothing was sent now: no body is kept for a fresh one, so the next
+      // try is built again from what is allowed then (review N1).
+      await finish(
+        { status: 'deferred' },
+        replay ? {} : { email: 1, shownIds: 1 },
+      );
       return 'budget';
     }
-    // Stored before the send, so a takeover replays this very body.
+    // Stored, with when this key's first send started, BEFORE the send: a
+    // crash before the result is known still counts from then (review N3).
     await this.digestModel
       .updateOne(
         { _id: row._id, leaseToken: token },
-        { $set: { email, shownIds } },
+        {
+          $set: {
+            email,
+            shownIds,
+            keyStartedAt: row.keyStartedAt ?? now,
+          },
+        },
       )
       .exec();
     const result = await this.mail.sendNotice({
-      to: recipient.email,
+      to,
       subject: email.subject,
       lines: email.lines,
       headers: email.headers,
       idempotencyKey: sendKey('org-digest', row._id, row),
     });
     if (result !== 'sent') {
-      const next = afterFailedSend(result, row, now, DIGEST_MAX_ATTEMPTS);
+      const next = afterFailedSend(result, row, DIGEST_MAX_ATTEMPTS);
       await finish(
         { ...next.set, status: 'failed' },
-        next.refused ? { ...next.unset, email: 1, shownIds: 1 } : next.unset,
+        next.refused ? { email: 1, shownIds: 1, keyStartedAt: 1 } : {},
       );
       if (next.final) {
         if (next.refused) await this.moveOn(userId, now, row.itemIds);
@@ -250,7 +316,6 @@ export class DigestSender {
       return 'failed';
     }
     const sentAt = new Date();
-    const ids = shownIds;
     await inTransaction(this.connection, async (session) => {
       await this.digestModel
         .updateOne(
@@ -264,7 +329,7 @@ export class DigestSender {
         .exec();
       await this.queueModel
         .updateMany(
-          { _id: { $in: ids }, status: 'queued' },
+          { _id: { $in: shownIds }, status: 'queued' },
           { $set: { status: 'sent', sentAt, digestId: row._id } },
           { session },
         )
@@ -275,43 +340,36 @@ export class DigestSender {
   }
 
   /**
-   * What the email says, from the row's items as the reader may see them
-   * now. Items whose category or both channels are off are dropped; claim
-   * and moderation news whose member now has immediate emails on goes that
-   * way instead (review L8).
-   *
-   * @returns undefined when nothing is left to say
+   * What the email would say now, from the row's items as the reader may
+   * see them now: READS ONLY. Items whose category or both channels are off
+   * are to be dropped; claim and moderation news whose member now has
+   * immediate emails on is to go that way instead (review L8). The caller
+   * applies those only for a fresh email, never for a replay check.
    */
-  private async build(
-    row: DigestRow,
-    recipient: Recipient,
-  ): Promise<{ email: StoredEmail; shownIds: Types.ObjectId[] } | undefined> {
+  private async build(row: DigestRow, recipient: Recipient): Promise<Plan> {
     const items = (await this.queueModel
       .find({ _id: { $in: row.itemIds }, status: 'queued', delivery: 'digest' })
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: 1, _id: 1 })
       .lean()
       .exec()) as unknown as ItemRow[];
     const prefs = await this.prefs.get(row.userId);
     const shown: Array<{ item: ItemRow; line: Described }> = [];
+    const plan: Plan = { shownIds: [], drops: [], toImmediate: [] };
     for (const item of items) {
       const delivery = deliveryFor(item.category, prefs);
       if (!delivery) {
-        await this.drop([item._id], 'turned off');
+        plan.drops.push({ id: item._id, outcome: 'turned off' });
       } else if (delivery === 'immediate') {
-        await this.queueModel
-          .updateOne(
-            { _id: item._id, status: 'queued' },
-            { $set: { delivery: 'immediate' }, $unset: { nextAttemptAt: 1 } },
-          )
-          .exec();
+        plan.toImmediate.push(item._id);
       } else {
         const line = await this.targets.describe(item, recipient);
         if (line) shown.push({ item, line });
-        else await this.drop([item._id], 'no longer visible');
+        else plan.drops.push({ id: item._id, outcome: 'no longer visible' });
       }
     }
-    if (shown.length === 0) return undefined;
+    if (shown.length === 0) return plan;
     return {
+      ...plan,
       email: composeEmail({
         items: shown.map(({ line }) => line),
         digest: true,
@@ -323,15 +381,6 @@ export class DigestSender {
       }),
       shownIds: shown.map(({ item }) => item._id),
     };
-  }
-
-  /** Gives up on a send whose key may have expired: never resent. */
-  private async giveUp(
-    row: DigestRow,
-    finish: (set: Record<string, unknown>) => Promise<unknown>,
-  ) {
-    await finish({ status: 'failed', attempts: DIGEST_MAX_ATTEMPTS });
-    await this.drop(row.shownIds ?? row.itemIds, UNKNOWN_GIVE_UP, 'failed');
   }
 
   private async drop(
@@ -366,10 +415,14 @@ export class DigestSender {
   }
 
   /**
-   * The member's digest to send: first an unfinished row of any day (moved
-   * to today, keeping its items, body and key), otherwise today's new row
-   * with their due items. A member whose today is already done gets nothing
-   * and has their news moved to tomorrow.
+   * The member's digest to send:
+   * - nothing while another tick holds any row of theirs (review N2);
+   * - else an unfinished row of any day, moved to today, with its items,
+   *   body and key;
+   * - else today's new row with their due items, never items another
+   *   unfinished row holds.
+   * A member whose today is already done gets nothing, and their news is
+   * moved to tomorrow.
    */
   private async claim(
     userId: string,
@@ -378,18 +431,20 @@ export class DigestSender {
     const day = utcDay(now);
     const token = randomUUID();
     const leaseUntil = new Date(now.getTime() + DIGEST_LEASE_MS);
+    if (
+      await this.digestModel.exists({
+        userId,
+        status: 'sending',
+        leaseUntil: { $gte: now },
+      })
+    ) {
+      return undefined;
+    }
     let resumed: DigestRow | null;
     try {
       resumed = await this.digestModel
         .findOneAndUpdate(
-          {
-            userId,
-            $or: [
-              { status: 'sending', leaseUntil: { $lt: now } },
-              { status: 'failed', attempts: { $lt: DIGEST_MAX_ATTEMPTS } },
-              { status: 'deferred' },
-            ],
-          },
+          { userId, ...UNFINISHED },
           { $set: { day, status: 'sending', leaseUntil, leaseToken: token } },
           { sort: { createdAt: 1 }, returnDocument: 'after' },
         )
@@ -405,12 +460,14 @@ export class DigestSender {
       await this.moveOn(userId, now);
       return undefined;
     }
+    const held = await this.itemsInFlight(userId);
     const items = await this.queueModel
       .find({
         userId,
         status: 'queued',
         delivery: 'digest',
         createdAt: { $lte: now },
+        ...(held.length > 0 ? { _id: { $nin: held } } : {}),
         ...dueBy(now),
       })
       .sort({ createdAt: 1 })
@@ -439,4 +496,39 @@ export class DigestSender {
       throw error;
     }
   }
+}
+
+/** Rows not finished: being sent, failed with tries left, or deferred. */
+const UNFINISHED = {
+  $or: [
+    { status: 'sending' as const },
+    { status: 'failed' as const, attempts: { $lt: DIGEST_MAX_ATTEMPTS } },
+    { status: 'deferred' as const },
+  ],
+};
+
+/** Why a replay was not sent: what it said is no longer all allowed. */
+export const WITHDRAWN = 'withdrawn after unknown send';
+
+/** What a digest would say now, and what to do with the rest. */
+interface Plan {
+  email?: StoredEmail;
+  shownIds: Types.ObjectId[];
+  drops: Array<{ id: Types.ObjectId; outcome: string }>;
+  toImmediate: Types.ObjectId[];
+}
+
+/** The same email about the same items, exactly. */
+function samePlan(
+  plan: Plan,
+  stored: { email: StoredEmail; shownIds: Types.ObjectId[] },
+): boolean {
+  const ids = (list: Types.ObjectId[]) => list.map(String).sort().join(',');
+  const body = (email: StoredEmail) =>
+    JSON.stringify([email.subject, email.lines, email.headers]);
+  return (
+    plan.email !== undefined &&
+    ids(plan.shownIds) === ids(stored.shownIds) &&
+    body(plan.email) === body(stored.email)
+  );
 }

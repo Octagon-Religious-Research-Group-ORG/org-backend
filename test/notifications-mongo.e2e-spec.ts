@@ -348,6 +348,68 @@ describeWithMongo('member notifications on a real MongoDB', () => {
     expect(sentRow.refs.commentId).toBe('c_old');
   });
 
+  it('saves settings in one write on a real server: flags it names, off-list as a set (review N8)', async () => {
+    await prefs.unsubscribe('user_set', 'votes');
+    await prefs.update('user_set', true, {
+      categories: { replies: false, votes: true, adminEam: false },
+      digest: false,
+    });
+    expect(await prefs.get('user_set')).toMatchObject({
+      off: expect.arrayContaining(['replies', 'adminEam']),
+      digest: false,
+      immediate: true,
+      adminImmediate: true,
+    });
+    expect((await prefs.get('user_set')).off).not.toContain('votes');
+    // A first save makes the row in the same single write.
+    await prefs.update('user_first', false, {
+      categories: { comments: false },
+    });
+    expect(await prefs.get('user_first')).toMatchObject({
+      off: ['comments'],
+      digest: true,
+    });
+    expect(
+      await m.NotificationPrefsRow.countDocuments({ userId: 'user_first' }),
+    ).toBe(1);
+  });
+
+  it('never starts a second digest while another instance holds the member’s row, across midnight (review N2)', async () => {
+    await comment('c_n2');
+    const notifier = new MemberNotifier(m.NotificationQueueRow, prefs, {
+      kick: () => Promise.resolve(),
+    } as never);
+    await notifier.commentPosted({
+      commentId: 'c_n2',
+      actorUserId: 'user_writer',
+      profileId: PAGE,
+      tabId: 'tab_a',
+      pageOwnerUserId: 'user_owner',
+    });
+    const item = await m.NotificationQueueRow.findOne().lean();
+    await m.NotificationQueueRow.collection.updateMany(
+      {},
+      { $set: { createdAt: new Date(NOW.getTime() - 60_000) } },
+    );
+    const tomorrow = new Date('2026-11-14T15:00:00Z');
+    await m.NotificationDigestRow.collection.insertOne({
+      userId: 'user_owner',
+      day: '2026-11-13',
+      status: 'sending',
+      itemIds: [item._id],
+      attempts: 0,
+      keyGen: 0,
+      leaseUntil: new Date(tomorrow.getTime() + 5 * 60_000),
+      leaseToken: 'alive',
+      expiresAt: new Date(tomorrow.getTime() + 86_400_000),
+    });
+    expect(await digestSender().forMember('user_owner', tomorrow)).toBe(
+      'skipped',
+    );
+    expect(await m.NotificationDigestRow.countDocuments()).toBe(1);
+    expect(sent).toHaveLength(0);
+  });
+
   it('never goes over the day’s budget, however many sends race', async () => {
     const taken = await Promise.all(
       Array.from({ length: 30 }, (_, n) =>

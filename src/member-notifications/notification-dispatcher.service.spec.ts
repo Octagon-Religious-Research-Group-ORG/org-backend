@@ -24,11 +24,14 @@ describe('NotificationDispatcher (Chunk 14)', () => {
   });
 
   describe('start and stop', () => {
-    it('does not run at all when sending is not configured', () => {
+    it('still runs (for the expiry sweep) when sending is not configured, and says so', () => {
       const h = harness({ enabled: false });
-      const every = jest.spyOn(global, 'setInterval');
+      const every = jest
+        .spyOn(global, 'setInterval')
+        .mockReturnValue({ unref: () => undefined } as never);
+      jest.spyOn(h.dispatcher, 'tick').mockResolvedValue();
       h.dispatcher.onApplicationBootstrap();
-      expect(every).not.toHaveBeenCalled();
+      expect(every).toHaveBeenCalled();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('not sent'));
       h.dispatcher.onModuleDestroy();
     });

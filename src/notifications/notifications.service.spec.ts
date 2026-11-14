@@ -416,4 +416,22 @@ describe('NotificationsService', () => {
       expect(mockSend).toHaveBeenCalled();
     });
   });
+  it('prints the SDK’s own error lines through the logger, redacted, whatever their shape (review N7)', () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    configuredService();
+    const client = jest.mocked(Resend).mock.results[0].value as unknown as {
+      logError: (error: unknown, path?: unknown, status?: unknown) => void;
+    };
+    client.logError({ message: 'to x@example.test' }, '/emails', 422);
+    client.logError({}, undefined);
+    client.logError('bare a@example.test');
+    client.logError(undefined);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Resend answered 422 on /emails: "to [address]"',
+      'Resend answered with no status on ?: ""',
+      'Resend answered with no status on ?: "bare [address]"',
+      'Resend answered with no status on ?: ""',
+    ]);
+    warn.mockRestore();
+  });
 });

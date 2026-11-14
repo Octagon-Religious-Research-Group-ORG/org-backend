@@ -65,13 +65,38 @@ export class NotificationsService {
     this.publicAppUrl = config.getOrThrow<string>('PUBLIC_APP_URL');
     this.testSite = readSiteEnv(config) === 'test';
     if (apiKey && this.from && this.hostEmail) {
-      this.resend = new Resend(apiKey);
+      this.resend = this.quiet(new Resend(apiKey));
     }
     this.noticeFrom =
       config.get<string>('NOTIFICATION_FROM_EMAIL') || this.from;
     if (apiKey && this.noticeFrom) {
-      this.noticeClient = this.resend ?? new Resend(apiKey);
+      this.noticeClient = this.resend ?? this.quiet(new Resend(apiKey));
     }
+  }
+
+  /**
+   * The Resend SDK prints every API error with `console.error` unless
+   * NODE_ENV is "production" (review N7), and those errors can quote an
+   * address. Its client is given its own error printer instead: through
+   * our logger, redacted. Only this client is changed, never `console`.
+   * `notifications.sdk.spec.ts` runs the real SDK and fails if the SDK
+   * stops calling it, so an upgrade cannot quietly undo this.
+   */
+  private quiet(client: Resend): Resend {
+    Object.defineProperty(client, 'logError', {
+      configurable: true,
+      value: (error: unknown, path: unknown, status?: unknown) => {
+        const message = JSON.stringify(
+          typeof error === 'object' && error !== null
+            ? ((error as { message?: unknown }).message ?? '')
+            : (error ?? ''),
+        );
+        this.logger.warn(
+          `Resend answered ${typeof status === 'number' ? status : 'with no status'} on ${typeof path === 'string' ? path : '?'}: ${redactAddresses(message)}`,
+        );
+      },
+    });
+    return client;
   }
 
   /** Whether member notifications can be sent at all (Chunk 14). */

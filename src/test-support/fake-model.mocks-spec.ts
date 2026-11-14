@@ -111,7 +111,46 @@ function isOperatorObject(value: unknown): boolean {
   );
 }
 
-function applyUpdate(doc: Doc, update: Doc, inserting = false) {
+/**
+ * The few aggregation expressions an update pipeline here uses: field
+ * paths, literals, $ifNull, $setUnion, $setDifference.
+ */
+function evaluate(expr: unknown, doc: Doc): unknown {
+  if (typeof expr === 'string' && expr.startsWith('$')) {
+    return getPath(doc, expr.slice(1));
+  }
+  if (Array.isArray(expr)) return expr.map((item) => evaluate(item, doc));
+  if (isOperatorObject(expr)) {
+    const [[op, args]] = Object.entries(expr as Doc);
+    const values = (args as unknown[]).map((arg) => evaluate(arg, doc));
+    const unique = (list: unknown[]) =>
+      list.filter(
+        (item, at) => list.findIndex((x) => compare(x, item) === 0) === at,
+      );
+    if (op === '$ifNull') return values[0] ?? values[1];
+    if (op === '$setUnion') return unique((values as unknown[][]).flat());
+    if (op === '$setDifference') {
+      const [from, minus] = values as unknown[][];
+      return unique(from).filter(
+        (item) => !minus.some((x) => compare(x, item) === 0),
+      );
+    }
+    throw new Error(`fake model: unsupported expression ${op}`);
+  }
+  return expr;
+}
+
+function applyUpdate(doc: Doc, update: Doc | Doc[], inserting = false) {
+  // An update pipeline: only `$set` stages, evaluated against the document.
+  if (Array.isArray(update)) {
+    for (const stage of update) {
+      const fields = Object.entries(stage.$set as Doc).map(
+        ([path, expr]) => [path, evaluate(expr, doc)] as const,
+      );
+      for (const [path, value] of fields) setPath(doc, path, copy(value));
+    }
+    return;
+  }
   for (const [op, fields] of Object.entries(update)) {
     for (const [path, value] of Object.entries(fields as Doc)) {
       if (op === '$setOnInsert') {

@@ -31,6 +31,7 @@ import {
   type NotificationQueueDocument,
   QUEUE_KEEP_DAYS,
 } from './schemas/notification-queue.schema';
+import type { StoredEmail } from './schemas/stored-email.schema';
 import {
   afterFailedSend,
   keyMayHaveExpired,
@@ -56,7 +57,7 @@ export const PASS_LIMIT = 50;
  * A row this close to its TTL while still queued is marked failed instead
  * (review M1), so it is counted rather than vanishing.
  */
-export const EXPIRY_MARGIN_MS = DAY_MS;
+export const EXPIRY_MARGIN_MS = 3 * DAY_MS;
 /** How long such a failed row stays to be counted. */
 export const EXPIRED_KEEP_MS = 7 * DAY_MS;
 export const EXPIRED_UNSENT = 'expired unsent';
@@ -137,11 +138,13 @@ export class NotificationDispatcher
       this.logger.warn(
         'Member notifications are queued but not sent: RESEND_API_KEY or a sender address is missing.',
       );
-      return;
     }
+    // Runs even when sending is off: the expiry sweep must still run
+    // (review N5).
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     this.timer.unref();
-    // The catch-up after a wake; never holds up the start.
+    // The catch-up after a wake, its expiry sweep first of all; never holds
+    // up the start.
     void this.tick();
   }
 
@@ -200,8 +203,9 @@ export class NotificationDispatcher
   }
 
   private async pass(full: boolean, now: Date) {
-    if (!this.mail.noticesEnabled()) return;
+    // First, whether or not sending is on (review N5).
     if (full) await this.step('expiries', () => this.expire(now));
+    if (!this.mail.noticesEnabled()) return;
     await this.step('admin fan-out', () => this.fanOut(now));
     await this.step('immediate emails', () => this.immediates(now));
     if (full) {
@@ -219,14 +223,22 @@ export class NotificationDispatcher
 
   /**
    * Marks rows about to expire while still queued as failed, and keeps them
-   * a week (review M1): counted on the dashboard instead of vanishing.
+   * a week (review M1): counted on the dashboard instead of vanishing. Never
+   * a row a tick holds, nor an item an unfinished digest holds: those may
+   * be mid-send (review N4).
    */
   private async expire(now: Date) {
+    const held = await this.digests.itemsInFlight();
     const result = await this.queueModel
       .updateMany(
         {
           status: 'queued',
           expiresAt: { $lte: new Date(now.getTime() + EXPIRY_MARGIN_MS) },
+          $or: [
+            { leaseUntil: { $exists: false } },
+            { leaseUntil: { $lt: now } },
+          ],
+          ...(held.length > 0 ? { _id: { $nin: held } } : {}),
         },
         {
           $set: {
@@ -288,7 +300,11 @@ export class NotificationDispatcher
     return row ? { row, token } : undefined;
   }
 
-  /** Ends the hold on a row with these changes, if it is still ours. */
+  /**
+   * Ends the hold on a row with these changes, if it is still ours. The
+   * status is always written: `queued` unless the change names another
+   * (review N4).
+   */
   private async settle(
     row: QueueRow,
     token: string,
@@ -298,7 +314,10 @@ export class NotificationDispatcher
     await this.queueModel
       .updateOne(
         { _id: row._id, leaseToken: token },
-        { $set: set, $unset: { ...unset, leaseUntil: 1, leaseToken: 1 } },
+        {
+          $set: { status: 'queued', ...set },
+          $unset: { ...unset, leaseUntil: 1, leaseToken: 1 },
+        },
       )
       .exec();
   }
@@ -466,51 +485,75 @@ export class NotificationDispatcher
       await retry('account unavailable');
       return 'done';
     }
-    if (!recipient) {
-      await skip('account gone');
-      return 'done';
-    }
-    const delivery = deliveryFor(
-      row.category,
-      await this.prefs.get(row.userId),
-    );
-    if (!delivery) {
-      await skip('turned off');
-      return 'done';
-    }
-    if (delivery === 'digest' && !row.email) {
-      // Immediate emails were turned off since: it waits for the digest.
-      await this.settle(row, token, { delivery: 'digest' });
-      return 'done';
-    }
-    let email = row.email;
-    if (!email) {
-      const described = await this.targets.describe(row, recipient);
-      if (!described) {
+    const delivery = recipient
+      ? deliveryFor(row.category, await this.prefs.get(row.userId))
+      : undefined;
+    const build = async () => {
+      const described = await this.targets.describe(row, recipient!);
+      return described
+        ? composeEmail({
+            items: [described],
+            digest: false,
+            userId: row.userId,
+            scope: row.category,
+            signingKey: this.settings.signingKey,
+            publicAppUrl: this.settings.publicAppUrl,
+            publicApiUrl: this.settings.publicApiUrl,
+          })
+        : undefined;
+    };
+
+    let email: StoredEmail;
+    if (row.keyStartedAt && row.email) {
+      // A send may already have happened under this key: replay its body
+      // byte for byte, but only while every check still allows exactly it
+      // (review N6). Otherwise send nothing, and say so.
+      const now_ = delivery ? await build() : undefined;
+      if (!recipient?.email || !now_ || !sameEmail(now_, row.email)) {
+        await this.settle(row, token, {
+          status: 'failed',
+          outcome: WITHDRAWN,
+        });
+        return 'done';
+      }
+      email = row.email;
+    } else {
+      if (!recipient) {
+        await skip('account gone');
+        return 'done';
+      }
+      if (!delivery) {
+        await skip('turned off');
+        return 'done';
+      }
+      if (delivery === 'digest') {
+        // Immediate emails were turned off since: it waits for the digest.
+        await this.settle(row, token, { delivery: 'digest' }, { email: 1 });
+        return 'done';
+      }
+      const built = await build();
+      if (!built) {
         await skip('no longer visible');
         return 'done';
       }
-      email = composeEmail({
-        items: [described],
-        digest: false,
-        userId: row.userId,
-        scope: row.category,
-        signingKey: this.settings.signingKey,
-        publicAppUrl: this.settings.publicAppUrl,
-        publicApiUrl: this.settings.publicApiUrl,
-      });
-    }
-    if (!recipient.email) {
-      await skip('no verified address');
-      return 'done';
+      if (!recipient.email) {
+        await skip('no verified address');
+        return 'done';
+      }
+      email = built;
     }
     if (!(await this.budget.take('immediate', now))) {
       await this.settle(row, token, { nextAttemptAt: nextUtcDay(now) });
       return 'budget';
     }
-    // Stored before the send, so a takeover replays this very body.
+    // Stored, with when this key's first send started, BEFORE the send, so
+    // a takeover replays this very body and a crash still counts from then
+    // (review L3, N3).
     await this.queueModel
-      .updateOne({ _id: row._id, leaseToken: token }, { $set: { email } })
+      .updateOne(
+        { _id: row._id, leaseToken: token },
+        { $set: { email, keyStartedAt: row.keyStartedAt ?? now } },
+      )
       .exec();
     const result = await this.mail.sendNotice({
       to: recipient.email,
@@ -523,7 +566,7 @@ export class NotificationDispatcher
       await this.settle(row, token, { status: 'sent', sentAt: new Date() });
       return 'done';
     }
-    const next = afterFailedSend(result, row, now, MAX_ATTEMPTS);
+    const next = afterFailedSend(result, row, MAX_ATTEMPTS);
     await this.settle(
       row,
       token,
@@ -538,8 +581,18 @@ export class NotificationDispatcher
             outcome: next.refused ? 'send refused' : 'send outcome unknown',
             nextAttemptAt: new Date(now.getTime() + RETRY_MS),
           },
-      next.refused ? { ...next.unset, email: 1 } : next.unset,
+      next.refused ? { email: 1, keyStartedAt: 1 } : {},
     );
     return 'done';
   }
+}
+
+/** Why a replay was not sent: what it said is no longer all allowed. */
+export const WITHDRAWN = 'withdrawn after unknown send';
+
+/** The same email, exactly. */
+function sameEmail(a: StoredEmail, b: StoredEmail): boolean {
+  const body = (email: StoredEmail) =>
+    JSON.stringify([email.subject, email.lines, email.headers]);
+  return body(a) === body(b);
 }
