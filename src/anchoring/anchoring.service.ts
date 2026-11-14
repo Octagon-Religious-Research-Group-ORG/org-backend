@@ -79,8 +79,10 @@ export const MAX_LEAVES = 50_000;
 export const BUILD_LEASE_MS = 10 * MINUTE_MS;
 
 /**
- * The run lock's lease (review round 7). Renewed before every step, so it
- * runs out only when a run stops making progress for this long.
+ * The run lock's lease (review round 7). Renewed before every step, and
+ * before each anchor resumed or swept (round 8), so it runs out only when
+ * one unit of work (one anchor, or one provider call) takes this long, or
+ * the run has died.
  */
 export const RUN_LEASE_MS = 10 * MINUTE_MS;
 /** How long one provider step holds its anchor. */
@@ -257,27 +259,31 @@ export class AnchoringService {
       ots: [],
     };
     // One run at a time, across every caller and instance (round 7).
-    const holder = await this.acquireLock();
-    if (!holder) return { busy: true, ...report };
+    const lock = await this.acquireLock();
+    if (!lock) return { busy: true, ...report };
     try {
-      // Each step runs only while the lock is still ours, renewing it; a
-      // run that lost it does nothing more.
-      const step = async (work: () => Promise<void>) => {
-        if (report.interrupted) return;
-        if (!(await this.renewLock(holder))) {
-          this.logger.error(
-            'Anchoring run lost the anchoring lock to another run; it stopped before its next step.',
-          );
-          report.interrupted = true;
-          return;
+      // Still ours? Renews the lease; a run that lost it does nothing more.
+      const ours = async (): Promise<boolean> => {
+        if (report.interrupted) return false;
+        const until = await this.renewLock(lock.holder);
+        if (until) {
+          lock.until = until;
+          return true;
         }
-        await work();
+        this.logger.error(
+          'Anchoring run lost the anchoring lock to another run; it stopped before its next step.',
+        );
+        report.interrupted = true;
+        return false;
+      };
+      const step = async (work: () => Promise<void>) => {
+        if (await ours()) await work();
       };
       await step(async () => {
-        report.resumed = await this.resumeStale(now);
+        report.resumed = await this.resumeStale(now, ours);
       });
       await step(async () => {
-        report.released = await this.sweepStray(now);
+        report.released = await this.sweepStray(now, ours);
       });
       await step(async () => {
         report.build = await this.build(now, force);
@@ -297,14 +303,20 @@ export class AnchoringService {
       }
       return report;
     } finally {
-      await this.releaseLock(holder);
+      await this.releaseLock(lock.holder, lock.until);
     }
   }
 
-  /** Takes the run lock, or returns undefined while a live run holds it. */
-  private async acquireLock(): Promise<string | undefined> {
+  /**
+   * Takes the run lock, or returns undefined while a live run holds it.
+   * A failure after the lock may have been written releases it (round 8).
+   */
+  private async acquireLock(): Promise<
+    { holder: string; until: Date } | undefined
+  > {
     const holder = randomUUID();
     const at = this.lockClock();
+    const until = new Date(at.getTime() + RUN_LEASE_MS);
     try {
       await this.lockModel
         .updateOne(
@@ -312,12 +324,7 @@ export class AnchoringService {
             _id: RUN_LOCK_ID,
             $or: [{ until: { $exists: false } }, { until: { $lt: at } }],
           } as QueryFilter<AnchorRunLock>,
-          {
-            $set: {
-              holder,
-              until: new Date(at.getTime() + RUN_LEASE_MS),
-            },
-          },
+          { $set: { holder, until } },
           { upsert: true },
         )
         .exec();
@@ -326,37 +333,46 @@ export class AnchoringService {
       if (isDuplicateKey(error)) return undefined;
       throw error;
     }
-    const mine = await this.lockModel
-      .findOne({ _id: RUN_LOCK_ID, holder })
-      .select({ _id: 1 })
-      .lean()
-      .exec();
-    return mine ? holder : undefined;
+    try {
+      const mine = await this.lockModel
+        .findOne({ _id: RUN_LOCK_ID, holder })
+        .select({ _id: 1 })
+        .lean()
+        .exec();
+      return mine ? { holder, until } : undefined;
+    } catch (error) {
+      await this.releaseLock(holder, until);
+      throw error;
+    }
   }
 
-  /** Extends the lease; false when another run holds the lock now. */
-  private async renewLock(holder: string): Promise<boolean> {
+  /** Extends the lease: its new end, or undefined when another run holds it. */
+  private async renewLock(holder: string): Promise<Date | undefined> {
+    const until = new Date(this.lockClock().getTime() + RUN_LEASE_MS);
     const done = await this.lockModel
-      .updateOne(
-        { _id: RUN_LOCK_ID, holder },
-        {
-          $set: {
-            until: new Date(this.lockClock().getTime() + RUN_LEASE_MS),
-          },
-        },
-      )
+      .updateOne({ _id: RUN_LOCK_ID, holder }, { $set: { until } })
       .exec();
-    return done.matchedCount === 1;
+    return done.matchedCount === 1 ? until : undefined;
   }
 
-  /** Frees the lock if it is still ours. */
-  private async releaseLock(holder: string): Promise<void> {
-    await this.lockModel
-      .updateOne(
-        { _id: RUN_LOCK_ID, holder },
-        { $unset: { holder: 1, until: 1 } },
-      )
-      .exec();
+  /**
+   * Frees the lock if it is still ours. Never throws: a failure here must
+   * not replace the run's own result or error; the lock then frees itself
+   * when its lease ends (review round 8, LOW-3).
+   */
+  private async releaseLock(holder: string, until: Date): Promise<void> {
+    try {
+      await this.lockModel
+        .updateOne(
+          { _id: RUN_LOCK_ID, holder },
+          { $unset: { holder: 1, until: 1 } },
+        )
+        .exec();
+    } catch (error) {
+      this.logger.error(
+        `Anchoring run lock: releasing it failed (${describe(error)}); it frees itself at ${until.toISOString()}.`,
+      );
+    }
   }
 
   /** Today's batch, if due and not made yet. */
@@ -423,7 +439,10 @@ export class AnchoringService {
    * its versions (review H1): its lease ran out, so it is taken over and
    * built from its own claims. Today's is left to `build`.
    */
-  private async resumeStale(now: Date): Promise<BuildOutcome[]> {
+  private async resumeStale(
+    now: Date,
+    ours: () => Promise<boolean>,
+  ): Promise<BuildOutcome[]> {
     const stale = await this.anchorModel
       .find({
         status: 'building',
@@ -436,6 +455,8 @@ export class AnchoringService {
       .exec();
     const outcomes: BuildOutcome[] = [];
     for (const { _id } of stale) {
+      // The run lock, renewed for each anchor (review round 8, LOW-4).
+      if (!(await ours())) break;
       const lease = {
         id: randomUUID(),
         until: new Date(now.getTime() + BUILD_LEASE_MS),
@@ -593,7 +614,10 @@ export class AnchoringService {
    *
    * @returns the anchors whose claims were released
    */
-  private async sweepStray(now: Date): Promise<string[]> {
+  private async sweepStray(
+    now: Date,
+    ours: () => Promise<boolean>,
+  ): Promise<string[]> {
     const since = anchorDay(new Date(now.getTime() - SWEEP_DAYS * DAY_MS));
     const rows = (await this.anchorModel
       .find({
@@ -626,6 +650,8 @@ export class AnchoringService {
     >;
     const released: string[] = [];
     for (const row of rows) {
+      // The run lock, renewed for each anchor (review round 8, LOW-4).
+      if (!(await ours())) break;
       // Failed for something other than its claim count: possibly
       // tampered, so its claims are evidence and stay (review round 5).
       if (

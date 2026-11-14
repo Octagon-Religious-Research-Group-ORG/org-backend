@@ -75,8 +75,12 @@ export const HASHES_PENDING_RECEIPT_NOTICE = [
   ...LIMITS,
 ];
 
-/** Which time-stamps every anchored version of a receipt holds. */
-export type Stamps = 'both' | 'freetsa' | 'opentimestamps';
+/**
+ * Which time-stamps a receipt's versions hold (review rounds 7 and 8):
+ * the same kinds on every version, or `mixed` when they differ. An
+ * OpenTimestamps proof counts only once confirmed in a Bitcoin block.
+ */
+export type Stamps = 'both' | 'freetsa' | 'opentimestamps' | 'mixed';
 
 const BOTH = 'the two independent time-stamps give';
 
@@ -84,31 +88,63 @@ const BOTH = 'the two independent time-stamps give';
 const STAMP_PHRASE: Record<Stamps, string> = {
   both: BOTH,
   freetsa:
-    'the FreeTSA time-stamp gives (the OpenTimestamps proof is not in yet)',
+    'the FreeTSA time-stamp gives (the OpenTimestamps proof is not confirmed in Bitcoin yet)',
   opentimestamps:
-    'the OpenTimestamps proof gives (the FreeTSA time-stamp is not in yet)',
+    'the OpenTimestamps proof, confirmed in Bitcoin, gives (the FreeTSA time-stamp is not in yet)',
+  mixed:
+    'the time-stamps each version holds give (some versions hold only one of the two time-stamps; each version below says which)',
 };
+
+/** Said when the only proof held cannot give a time yet (round 8). */
+const UNCONFIRMED_OTS =
+  'An OpenTimestamps proof is in but not yet confirmed in a Bitcoin block, so it gives no time yet.';
 
 /** One of the three stamped notices, naming exactly the stamps held. */
 function stamped(notice: readonly string[], stamps: Stamps): string[] {
   return notice.map((line) => line.replace(BOTH, STAMP_PHRASE[stamps]));
 }
 
-/**
- * The stamps EVERY version holds: a version not anchored, or anchored with
- * neither proof received yet, has none (review round 7, LOW-3).
- */
-function stampsOf(versions: readonly ReceiptVersion[]): Stamps | undefined {
-  let tsa = true;
-  let ots = true;
-  for (const version of versions) {
-    if (version.anchor.state !== 'anchored') return undefined;
-    tsa &&= version.anchor.freetsa.responseBase64 !== undefined;
-    ots &&= version.anchor.opentimestamps.proofBase64 !== undefined;
-  }
+/** The stamps one version holds that give a time (review round 8). */
+function versionStamps(
+  version: ReceiptVersion,
+): Exclude<Stamps, 'mixed'> | undefined {
+  if (version.anchor.state !== 'anchored') return undefined;
+  const tsa = version.anchor.freetsa.responseBase64 !== undefined;
+  const ots =
+    version.anchor.opentimestamps.proofBase64 !== undefined &&
+    version.anchor.opentimestamps.bitcoinHeights.length > 0;
   if (tsa && ots) return 'both';
   if (tsa) return 'freetsa';
   return ots ? 'opentimestamps' : undefined;
+}
+
+/**
+ * Stamped only when EVERY version holds at least one stamp that gives a
+ * time; their kinds may differ (review round 8, LOW-2).
+ */
+function stampsOf(versions: readonly ReceiptVersion[]): Stamps | undefined {
+  const each = versions.map(versionStamps);
+  if (each.some((stamps) => stamps === undefined)) return undefined;
+  return new Set(each).size === 1 ? each[0] : 'mixed';
+}
+
+/** A version whose only proof is an OpenTimestamps one not yet in Bitcoin. */
+function onlyUnconfirmedOts(version: ReceiptVersion): boolean {
+  return (
+    version.anchor.state === 'anchored' &&
+    versionStamps(version) === undefined &&
+    version.anchor.opentimestamps.proofBase64 !== undefined
+  );
+}
+
+/** Adds the unconfirmed-proof line after the first line, when it applies. */
+function withUnconfirmed(
+  versions: readonly ReceiptVersion[],
+  notice: readonly string[],
+): string[] {
+  return versions.some(onlyUnconfirmedOts)
+    ? [notice[0], UNCONFIRMED_OTS, ...notice.slice(1)]
+    : [...notice];
 }
 
 /** How much of the hash material a reader gets (Chunk 16 rounds 2 and 3). */
@@ -376,17 +412,20 @@ export function buildReceipt(
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
-    notice: versions.some((version) => version.disclosure === 'none')
-      ? stamps
-        ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
-        : PARTIAL_PENDING_RECEIPT_NOTICE
-      : versions.some((version) => version.disclosure === 'hashes')
+    notice: withUnconfirmed(
+      versions,
+      versions.some((version) => version.disclosure === 'none')
         ? stamps
-          ? stamped(HASHES_RECEIPT_NOTICE, stamps)
-          : HASHES_PENDING_RECEIPT_NOTICE
-        : stamps
-          ? stamped(RECEIPT_NOTICE, stamps)
-          : RECEIPT_PENDING_NOTICE,
+          ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
+          : PARTIAL_PENDING_RECEIPT_NOTICE
+        : versions.some((version) => version.disclosure === 'hashes')
+          ? stamps
+            ? stamped(HASHES_RECEIPT_NOTICE, stamps)
+            : HASHES_PENDING_RECEIPT_NOTICE
+          : stamps
+            ? stamped(RECEIPT_NOTICE, stamps)
+            : RECEIPT_PENDING_NOTICE,
+    ),
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

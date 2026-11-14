@@ -59,14 +59,23 @@ describe('LOW-3: the notice names the stamps the receipt holds', () => {
     [
       'FreeTSA only',
       (row: Record<string, any>) => delete row.ots.proof,
-      'the FreeTSA time-stamp gives (the OpenTimestamps proof is not in yet)',
+      'the FreeTSA time-stamp gives (the OpenTimestamps proof is not confirmed in Bitcoin yet)',
     ],
     [
-      'OpenTimestamps only',
-      (row: Record<string, any>) => delete row.tsa.response,
-      'the OpenTimestamps proof gives (the FreeTSA time-stamp is not in yet)',
+      'OpenTimestamps only (confirmed in Bitcoin, round 8)',
+      (row: Record<string, any>) => {
+        delete row.tsa.response;
+        row.ots.bitcoinHeights = [975755];
+      },
+      'the OpenTimestamps proof, confirmed in Bitcoin, gives (the FreeTSA time-stamp is not in yet)',
     ],
-    ['both', () => undefined, 'the two independent time-stamps give'],
+    [
+      'both (OpenTimestamps confirmed in Bitcoin, round 8)',
+      (row: Record<string, any>) => {
+        row.ots.bitcoinHeights = [975755];
+      },
+      'the two independent time-stamps give',
+    ],
   ])('%s: the notice says exactly which', async (_which, drop, phrase) => {
     for (const disclose of DISCLOSURES) {
       const m = anchorModels();

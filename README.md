@@ -298,11 +298,22 @@ then the calendars' own commitments when a pending proof is upgraded.
 **One run at a time.** Every run (the hourly scheduler, an admin's
 `POST /api/v1/admin/anchors/run`, any server instance) first takes a single
 lock document (`anchorrunlocks`, `_id: anchoring-run`) under a 10-minute
-lease it renews before each step. A run that finds it held does nothing and
-reports `busy: true` (the admin view says so); a run that loses it part-way
-stops before its next step and reports `interrupted: true`; a holder that
-died is taken over once its lease runs out. The per-anchor leases stay as a
-second line of defence.
+lease. It renews the lease before each step (resume, sweep, build, each
+FreeTSA or OpenTimestamps call) and before each anchor it resumes or sweeps,
+so the lease runs out only when one such unit of work takes 10 minutes or
+the run has died. A run that finds the lock held does nothing and reports
+`busy: true` (the admin view says so); a run that loses it part-way stops
+before its next unit of work and reports `interrupted: true`; a holder that
+died is taken over once its lease runs out. If releasing the lock fails, the
+failure is logged with the time the lock frees itself, and the run's own
+result or error is returned unchanged. The per-anchor leases stay as a second
+line of defence.
+
+**What a receipt calls a time-stamp.** A FreeTSA token, or an OpenTimestamps
+proof once it is confirmed in a Bitcoin block; an unconfirmed proof gives no
+time yet, and the receipt says so. A receipt reads as time-stamped only when
+every version in it holds at least one of these; versions holding different
+ones are named as such.
 
 **Version hash** (unchanged since Chunks 3 and 9). SHA-256 of the UTF-8 bytes
 of `JSON.stringify([scheme, id, seq, text, authorUserId, createdAt, prevHash])`,

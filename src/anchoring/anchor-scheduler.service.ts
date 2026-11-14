@@ -13,8 +13,12 @@ export const ANCHOR_TICK_MS = 60 * 60_000;
  * Runs the daily anchor without an external scheduler (Chunk 16), like the
  * email digest (Chunk 14): once when the server starts, because Render's
  * free instance sleeps and every wake must catch up, then hourly. The timer
- * is `unref`'d so it never keeps a process alive. Runs never overlap in one
- * process; across processes the anchor's own leases keep them apart.
+ * is `unref`'d so it never keeps a process alive.
+ *
+ * Runs never overlap: the run lock in `anchorrunlocks` (review round 7)
+ * lets one run at a time execute, across every caller and instance; a
+ * second one reports `busy`. Within one process runs are also queued here.
+ * The per-anchor leases remain as a second line.
  */
 @Injectable()
 export class AnchorScheduler

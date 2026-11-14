@@ -76,7 +76,13 @@ describe('receipts', () => {
       format: RECEIPT_FORMAT,
       generatedAt: NOW.toISOString(),
       subject,
-      notice: RECEIPT_NOTICE,
+      // Its OpenTimestamps proof is not in Bitcoin yet: FreeTSA only (round 8).
+      notice: RECEIPT_NOTICE.map((line) =>
+        line.replace(
+          'the two independent time-stamps give',
+          'the FreeTSA time-stamp gives (the OpenTimestamps proof is not confirmed in Bitcoin yet)',
+        ),
+      ),
     });
     const [version] = receipt.versions;
     expect(version).toMatchObject({
