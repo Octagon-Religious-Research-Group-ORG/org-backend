@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import { NotFoundException } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { AdminRoleGuard } from '../../auth/admin-role.guard';
@@ -66,7 +67,11 @@ describe('admin dashboard controllers', () => {
     ).toEqual([ClerkAuthGuard]);
     expect(
       Reflect.getMetadata(GUARDS_METADATA, MyEamRequestWritesController),
-    ).toEqual([ClerkAuthGuard, MemberWriteThrottleGuard]);
+    ).toEqual([
+      ClerkAuthGuard,
+      AccountNotDeletedGuard,
+      MemberWriteThrottleGuard,
+    ]);
   });
 
   it('read with the defaults the screens rely on', async () => {

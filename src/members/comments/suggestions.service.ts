@@ -393,6 +393,12 @@ export class SuggestionsService {
     resultSeq: number,
   ) {
     try {
+      // The block the version belongs to (round 5, MEDIUM-1).
+      const written = await this.versionModel
+        .findOne({ suggestionId: commentId, seq: resultSeq })
+        .select({ blockId: 1 })
+        .lean()
+        .exec();
       await this.commentModel
         .updateOne(
           { commentId, 'suggestion.status': { $ne: 'accepted' } },
@@ -402,6 +408,9 @@ export class SuggestionsService {
               'suggestion.decidedBy': userId,
               'suggestion.decidedAt': new Date(),
               'suggestion.resultSeq': resultSeq,
+              ...(written
+                ? { 'suggestion.resultBlockId': written.blockId }
+                : {}),
             },
             $unset: { 'suggestion.lockId': 1, 'suggestion.lockedAt': 1 },
           },

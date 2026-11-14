@@ -159,6 +159,19 @@ describe('Comments API (e2e)', () => {
       });
     });
 
+    it('refuses a write from an account whose deletion is recorded (Chunk 17 round 5, LOW-1)', async () => {
+      ctx.models.accounts.docs.push({ userId: U.anon });
+      try {
+        await post(U.anon, {
+          slug: 'open-page',
+          tabId: 'tab_a',
+          body: 'After the deletion.',
+        }).expect(403);
+      } finally {
+        ctx.models.accounts.docs.splice(0);
+      }
+    });
+
     it('answers 503, and the read says it cannot check, when Clerk is down (item 6)', async () => {
       const clerk = app.get(ClerkUserInfoService);
       clerk.getIdentity = () => Promise.reject(new Error('Clerk down'));

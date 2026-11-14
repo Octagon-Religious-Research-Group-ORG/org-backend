@@ -106,6 +106,14 @@ import {
 import { VotersService } from './votes/voters.service';
 import { VoteTalliesService } from './votes/vote-tallies.service';
 import { VotesService } from './votes/votes.service';
+import {
+  AccountDeletion,
+  AccountDeletionSchema,
+} from '../member-data/schemas/account-deletion.schema';
+import {
+  UserWriteGate,
+  UserWriteGateSchema,
+} from '../member-data/schemas/user-write-gate.schema';
 
 /**
  * The directory, member pages, owner tools and the ORG chats panel (Chunk 7),
@@ -140,6 +148,10 @@ import { VotesService } from './votes/votes.service';
       { name: Report.name, schema: ReportSchema },
       // Read only, for votes and comments on ORG's own pages (Chunk 10b).
       { name: WebsitePage.name, schema: WebsitePageSchema },
+      // Write guards refuse a deleted account (Chunk 17 round 5, LOW-1).
+      { name: AccountDeletion.name, schema: AccountDeletionSchema },
+      // The write gate new comments share with the webhook (round 9, F2).
+      { name: UserWriteGate.name, schema: UserWriteGateSchema },
     ]),
   ],
   controllers: [
@@ -196,6 +208,12 @@ import { VotesService } from './votes/votes.service';
     ReceiptsService,
   ],
   // Search (Chunk 15) asks the same service who is reading and what they may see.
-  exports: [MembersService],
+  // Data export (Chunk 17) reuses the receipts, author naming and pictures.
+  exports: [
+    MembersService,
+    ReceiptsService,
+    CommentAuthorsService,
+    PictureStore,
+  ],
 })
 export class MembersModule {}

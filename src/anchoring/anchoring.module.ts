@@ -1,3 +1,21 @@
+import {
+  AccountDeletion,
+  AccountDeletionSchema,
+} from '../member-data/schemas/account-deletion.schema';
+import {
+  BeliefTab,
+  BeliefTabSchema,
+} from '../social/schemas/belief-tab.schema';
+import { Comment, CommentSchema } from '../social/schemas/comment.schema';
+import {
+  ProfileBlock,
+  ProfileBlockSchema,
+} from '../social/schemas/profile-block.schema';
+import {
+  SocialProfile,
+  SocialProfileSchema,
+} from '../social/schemas/social-profile.schema';
+import { PurgeMarksService } from './purge-marks.service';
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import {
@@ -37,6 +55,13 @@ import {
       { name: AnchorRunLock.name, schema: AnchorRunLockSchema },
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: CommentVersion.name, schema: CommentVersionSchema },
+      // Read only: whether a purged version's owner is marked (Chunk 17).
+      { name: SocialProfile.name, schema: SocialProfileSchema },
+      { name: ProfileBlock.name, schema: ProfileBlockSchema },
+      { name: BeliefTab.name, schema: BeliefTabSchema },
+      { name: Comment.name, schema: CommentSchema },
+      // Read only: the purge run a redaction record belongs to (round 3).
+      { name: AccountDeletion.name, schema: AccountDeletionSchema },
     ]),
   ],
   controllers: [AdminAnchorsController],
@@ -45,6 +70,7 @@ import {
     OtsProvider,
     AnchoringService,
     AnchorVerifierService,
+    PurgeMarksService,
     AnchorScheduler,
   ],
   exports: [AnchorVerifierService],

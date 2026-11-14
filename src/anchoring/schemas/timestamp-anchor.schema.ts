@@ -148,6 +148,14 @@ export class TimestampAnchor {
   @Prop({ type: String })
   rescanToken?: string;
 
+  /**
+   * Server time of the latest release into the rescan point (Chunk 17
+   * round 6, 2): the purge verifier counts a point on an older anchor only
+   * when it was released after the newest build.
+   */
+  @Prop({ type: Date })
+  rescanAt?: Date;
+
   @Prop({ type: String, match: /^[0-9a-f]{64}$/ })
   merkleRoot?: string;
 
@@ -218,4 +226,6 @@ export const TimestampAnchorSchema =
 
 // The steps still to do: few rows (one a day), but read on every tick.
 TimestampAnchorSchema.index({ 'tsa.status': 1 });
+// Every anchor that ever held a redaction's leaf (Chunk 17 round 6, 1a).
+TimestampAnchorSchema.index({ 'leaves.versionId': 1 });
 TimestampAnchorSchema.index({ 'ots.status': 1 });

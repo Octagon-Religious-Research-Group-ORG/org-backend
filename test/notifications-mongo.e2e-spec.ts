@@ -7,6 +7,9 @@
 // throwaway replica-set database; it is dropped). Without it the suite is
 // reported as SKIPPED, never as passed. No email is sent: the sender is a
 // stub. Synthetic data only.
+import { getModelToken } from '@nestjs/mongoose';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
 import { Logger } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -204,6 +207,9 @@ describeWithMongo('member notifications on a real MongoDB', () => {
       { key: { status: 1, delivery: 1, nextAttemptAt: 1 } },
       { key: { userId: 1, status: 1, delivery: 1, createdAt: 1 } },
       { key: { expiresAt: 1 }, ttl: 0 },
+      // Chunk 17 round 3, L-4: the account purge removes rows by actor;
+      // plain, so its plain-equality query can use it (round 4, #6).
+      { key: { actorUserId: 1 } },
     ]);
     expect(await keys('NotificationDigestRow')).toEqual([
       { key: { _id: 1 } },
@@ -425,6 +431,11 @@ describeWithMongo('member notifications on a real MongoDB', () => {
       imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
       controllers: [MyNotificationSettingsController],
       providers: [
+        // No deleted accounts here (Chunk 17 round 5-6, the write guard).
+        {
+          provide: getModelToken(AccountDeletion.name),
+          useValue: fakeModel([]),
+        },
         { provide: NotificationPrefsService, useValue: prefs },
         {
           provide: AdminAccessService,

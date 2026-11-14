@@ -1,6 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 import { makeAppendOnly } from '../../social/append-only';
+import { CONSENT_PURGE } from '../../social/purge-rules';
 
 /**
  * One member's agreement to the membership terms. **Append-only**: a later
@@ -29,10 +30,17 @@ export class ConsentRecord {
   /** Disclosed in the terms themselves ("records"). */
   @Prop({ type: String, maxlength: 64 })
   ip?: string;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type ConsentRecordDocument = HydratedDocument<ConsentRecord>;
 export const ConsentRecordSchema = SchemaFactory.createForClass(ConsentRecord);
-makeAppendOnly(ConsentRecordSchema, 'consentrecords');
+makeAppendOnly(ConsentRecordSchema, 'consentrecords', undefined, CONSENT_PURGE);
 
 ConsentRecordSchema.index({ userId: 1, acceptedAt: -1 });

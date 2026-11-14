@@ -121,7 +121,11 @@ describe('review item 1: an author is named only as far as their page is', () =>
         { $set: { reviewStatus: 'approved', deletedAt: new Date() } },
       )
       .exec();
-    expect(await authorOf(h, U.admin)).toEqual({ kind: 'member' });
+    // A deleted page (Chunk 17) names no one, and says it plainly.
+    expect(await authorOf(h, U.admin)).toEqual({
+      kind: 'member',
+      former: true,
+    });
   });
 
   it('applies the same rule to the history of an accepted suggestion', async () => {

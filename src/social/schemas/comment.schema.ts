@@ -72,6 +72,14 @@ export class Suggestion {
   /** The belief text's version that accepting it wrote. */
   @Prop({ type: Number, min: 1 })
   resultSeq?: number;
+
+  /**
+   * The belief block that version belongs to (Chunk 17 review round 5,
+   * MEDIUM-1), so the purge verifier binds a redaction to exactly one
+   * version. Absent on suggestions accepted before it was recorded.
+   */
+  @Prop({ type: String })
+  resultBlockId?: string;
 }
 export const SuggestionSchema = SchemaFactory.createForClass(Suggestion);
 
@@ -233,6 +241,13 @@ export class Comment {
   @Prop({ type: Date })
   lastReportedAt?: Date;
 
+  /**
+   * Set by the account purge (Chunk 17) when this comment's author account
+   * was purged; its versions' purge is checked against it.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
+
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -276,3 +291,10 @@ CommentSchema.index(
 );
 // A page's imported comments, read whole to place them in threads.
 CommentSchema.index({ profileId: 1, source: 1 });
+// The account purge's person-wide queries (Chunk 17 round 3, L-4). Plain,
+// not partial (round 4, #6): the purge matches by plain equality, which a
+// `$type` partial index cannot serve (measured with explain() in
+// test/member-data-mongo.e2e-spec.ts).
+CommentSchema.index({ authorUserId: 1 });
+CommentSchema.index({ linkedUserId: 1 });
+CommentSchema.index({ 'suggestion.decidedBy': 1 });

@@ -308,7 +308,7 @@ describe('CommentsService', () => {
       const page = await h.thread('open-page', await h.viewer(), undefined);
       expect(page.comments.map((c) => c.author)).toEqual([
         { kind: 'admin' },
-        { kind: 'member' },
+        { kind: 'member', former: true },
       ]);
       expect(
         h.comments.docs.find((d) => d.authorUserId === U.admin),

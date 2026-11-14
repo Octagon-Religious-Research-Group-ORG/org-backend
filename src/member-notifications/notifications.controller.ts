@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../members/account-not-deleted.guard';
 import {
   BadRequestException,
   Body,
@@ -49,6 +50,8 @@ export class MyNotificationSettingsController {
   }
 
   @Put()
+  // Settings would outlive the purge of a deleted account (round 6, 5).
+  @UseGuards(AccountNotDeletedGuard)
   @WriteThrottle()
   async change(
     @Req() request: AuthenticatedRequest,

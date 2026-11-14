@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from './account-not-deleted.guard';
 import {
   Body,
   Controller,
@@ -162,7 +163,7 @@ export class MembersController {
 
 /** The signed-in owner's tools for their own page. */
 @Controller('me/member-page')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AccountNotDeletedGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyMemberPageController {
   constructor(

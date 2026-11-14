@@ -1,3 +1,7 @@
+import {
+  AccountDeletion,
+  AccountDeletionSchema,
+} from '../member-data/schemas/account-deletion.schema';
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import {
@@ -53,6 +57,8 @@ import {
     NotificationsModule,
     MongooseModule.forFeature([
       { name: NotificationPrefsRow.name, schema: NotificationPrefsRowSchema },
+      // The settings write refuses a deleted account (Chunk 17 round 6, 5).
+      { name: AccountDeletion.name, schema: AccountDeletionSchema },
       { name: NotificationQueueRow.name, schema: NotificationQueueRowSchema },
       { name: NotificationDigestRow.name, schema: NotificationDigestRowSchema },
       // Read only: what an email may say and link to.

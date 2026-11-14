@@ -3,6 +3,9 @@
 // reach which route, what a request may carry, and that nothing is cached.
 // What the services do against a real database is in
 // admin-dashboard-mongo.e2e-spec.ts. Synthetic data only.
+import { getModelToken } from '@nestjs/mongoose';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
 import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -110,6 +113,11 @@ describe('admin dashboard API (e2e)', () => {
         MyEamRequestWritesController,
       ],
       providers: [
+        // No deleted accounts here (Chunk 17 round 5-6, the write guard).
+        {
+          provide: getModelToken(AccountDeletion.name),
+          useValue: fakeModel([]),
+        },
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         Reflector,
         AdminRoleGuard,

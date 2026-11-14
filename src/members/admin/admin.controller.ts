@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import {
   Body,
   Controller,
@@ -230,7 +231,7 @@ export class MyEamRequestController {
 
 /** Pressing "Request EaM": once per member, on the member-write ration. */
 @Controller('me/eam-request')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AccountNotDeletedGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyEamRequestWritesController {
   constructor(

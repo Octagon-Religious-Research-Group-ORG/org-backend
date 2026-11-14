@@ -2,6 +2,8 @@
 // The members API under test, shared by the members e2e specs: a real pipe,
 // real guards where it matters, real access code, fake storage. Each spec file
 // gets its own module instance, so its fakes and rate limits are its own.
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
 import type {
   CanActivate,
   ExecutionContext,
@@ -201,6 +203,8 @@ export async function createMembersApp(): Promise<INestApplication<App>> {
       AdminSettingsController,
     ],
     providers: [
+      // No deleted accounts here (Chunk 17 round 5-6, the write guard).
+      { provide: getModelToken(AccountDeletion.name), useValue: fakeModel([]) },
       { provide: APP_GUARD, useClass: ThrottlerGuard },
       MembersService,
       MyMemberPageService,

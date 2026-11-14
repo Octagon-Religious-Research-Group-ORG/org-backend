@@ -17,6 +17,10 @@ import {
   MyMembershipController,
 } from '../src/membership/membership.controller';
 import { MembershipService } from '../src/membership/membership.service';
+import { getModelToken } from '@nestjs/mongoose';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
+import { ACCOUNT_DELETED_WRITE } from '../src/members/account-not-deleted.guard';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
 
 /** The request shape is checked by the real ValidationPipe, before any service code. */
 describe('Membership API (e2e)', () => {
@@ -28,6 +32,7 @@ describe('Membership API (e2e)', () => {
     summary: jest.fn(() => Promise.resolve({ status: 'none' })),
     join: jest.fn(() => Promise.resolve({ status: 'pending' })),
   };
+  const deletions = fakeModel([]);
   const signedIn: CanActivate = {
     canActivate(context: ExecutionContext) {
       context.switchToHttp().getRequest().auth = {
@@ -53,7 +58,10 @@ describe('Membership API (e2e)', () => {
     const moduleRef = await Test.createTestingModule({
       imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
       controllers: [MembershipController, MyMembershipController],
-      providers: [{ provide: MembershipService, useValue: service }],
+      providers: [
+        { provide: MembershipService, useValue: service },
+        { provide: getModelToken(AccountDeletion.name), useValue: deletions },
+      ],
     })
       .overrideGuard(ClerkAuthGuard)
       .useValue(signedIn)
@@ -108,6 +116,20 @@ describe('Membership API (e2e)', () => {
       expect.objectContaining({ slug: 'quiet-fern', anonymous: true }),
       expect.any(Object),
     );
+  });
+
+  it('refuses a deleted account before the service runs (Chunk 17 round 7, 5)', async () => {
+    deletions.docs.push({ userId: 'user_e2e' });
+    try {
+      const refused = await request(app.getHttpServer())
+        .post('/api/v1/me/membership')
+        .send(valid)
+        .expect(403);
+      expect(refused.text).toContain(ACCOUNT_DELETED_WRITE);
+      expect(service.join).not.toHaveBeenCalled();
+    } finally {
+      deletions.docs.length = 0;
+    }
   });
 
   it.each([

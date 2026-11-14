@@ -90,6 +90,8 @@ export const AdminInboxEntrySchema =
 
 // The inbox, newest first, by status.
 AdminInboxEntrySchema.index({ status: 1, createdAt: -1 });
+// The account purge (Chunk 17 round 3, L-4).
+AdminInboxEntrySchema.index({ subjectUserId: 1 });
 // One open notice per subject (see `dedupeKey`).
 AdminInboxEntrySchema.index(
   { dedupeKey: 1 },

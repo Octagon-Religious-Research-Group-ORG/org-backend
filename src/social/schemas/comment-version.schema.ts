@@ -3,6 +3,7 @@ import { HydratedDocument } from 'mongoose';
 import { makeAppendOnly } from '../append-only';
 import { MAX_BLOCK_TEXT_LENGTH } from './block-version.schema';
 import { MAX_COMMENT_LENGTH } from './comment.schema';
+import { VERSION_PURGE } from '../purge-rules';
 
 /**
  * Longest text one comment version may hold. A suggestion's version records
@@ -77,6 +78,13 @@ export class CommentVersion {
     immutable: true,
   })
   hash: string;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type CommentVersionDocument = HydratedDocument<CommentVersion>;
@@ -85,5 +93,12 @@ export const CommentVersionSchema =
 
 CommentVersionSchema.index({ commentId: 1, seq: 1 }, { unique: true });
 CommentVersionSchema.index({ createdAt: 1 });
+// The account purge (Chunk 17 round 2, #10).
+CommentVersionSchema.index({ authorUserId: 1 });
 
-makeAppendOnly(CommentVersionSchema, 'commentversions');
+makeAppendOnly(
+  CommentVersionSchema,
+  'commentversions',
+  undefined,
+  VERSION_PURGE,
+);

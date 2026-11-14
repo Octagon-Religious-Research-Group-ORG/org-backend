@@ -222,6 +222,8 @@ describe('SuggestionsService', () => {
         decidedBy: U.owner,
         decidedAt: expect.any(Date),
         resultSeq: 2,
+        // Chunk 17 round 5, MEDIUM-1: the block it wrote.
+        resultBlockId: 'blk_a1',
       });
       expect(row(h, commentId).suggestion).not.toHaveProperty('lockId');
 
@@ -537,5 +539,21 @@ describe('SuggestionsService', () => {
         h.commentsService.edit(await h.writer(U.named), commentId, 'x', 1),
       ).rejects.toThrow(BadRequestException);
     });
+  });
+});
+
+describe('SuggestionsService: the accepted block (Chunk 17 round 5, MEDIUM-1)', () => {
+  it('marks it accepted without a block when no version names it', async () => {
+    const { h, commentId } = await suggested();
+    await (
+      h.suggestions as unknown as {
+        finishAccept: (c: string, u: string, s: number) => Promise<void>;
+      }
+    ).finishAccept(commentId, U.owner, 99);
+    expect(row(h, commentId).suggestion).toMatchObject({
+      status: 'accepted',
+      resultSeq: 99,
+    });
+    expect(row(h, commentId).suggestion).not.toHaveProperty('resultBlockId');
   });
 });

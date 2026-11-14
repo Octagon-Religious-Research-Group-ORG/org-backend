@@ -1,7 +1,10 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Types } from 'mongoose';
+import { writeGateId } from '../../member-data/schemas/user-write-gate.schema';
 import { fakeModel } from '../../test-support/fake-model.mocks-spec';
 import { endTextTurn } from '../tab-text-turns';
 import { commentCounts, CommentStore } from './comment-store';
+import { MembersModule } from '../members.module';
 
 const page = new Types.ObjectId();
 const other = new Types.ObjectId();
@@ -131,5 +134,115 @@ describe('round 3', () => {
       $type: 'string',
       $in: ['root'],
     });
+  });
+});
+
+describe('CommentStore: the write gate (Chunk 17 round 9, F2)', () => {
+  const gated = (deleted: boolean) => {
+    const model = fakeModel([]);
+    const gates = fakeModel([]);
+    const accounts = fakeModel(deleted ? [{ userId: 'user_w' }] : []);
+    return {
+      model,
+      gates,
+      store: new CommentStore(
+        model as never,
+        gates as never,
+        accounts as never,
+      ),
+    };
+  };
+  const fields = { commentId: 'c-new', authorUserId: 'user_w', body: 'x' };
+
+  it('writes the gate after the row and before the version, then confirms', async () => {
+    const { model, gates, store: s } = gated(false);
+    const version = jest.fn(() => {
+      expect(gates.docs).toHaveLength(1);
+      return Promise.resolve({ seq: 1 });
+    });
+    await expect(s.createConfirmed({ ...fields }, version)).resolves.toBe(1);
+    expect(gates.docs[0]).toMatchObject({ _id: writeGateId('user_w') });
+    expect(model.docs[0]).toMatchObject({ commentId: 'c-new', bodySeq: 1 });
+  });
+
+  it('refuses a deleted account after its row is in, and takes the row back', async () => {
+    const { model, store: s } = gated(true);
+    const version = jest.fn(() => Promise.resolve({ seq: 1 }));
+    await expect(s.createConfirmed({ ...fields }, version)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(version).not.toHaveBeenCalled();
+    expect(model.docs).toEqual([]);
+  });
+
+  it('writes no gate for a row with no author', async () => {
+    const { gates, store: s } = gated(true);
+    await s.createConfirmed({ commentId: 'c-anon' }, () =>
+      Promise.resolve({ seq: 1 }),
+    );
+    expect(gates.docs).toEqual([]);
+  });
+});
+
+describe('MembersModule: the write gate is wired (round 9, F2)', () => {
+  it('registers the gate and the deletion models where CommentStore runs', () => {
+    const imports = (Reflect.getMetadata('imports', MembersModule) ??
+      []) as Array<{ providers?: Array<{ provide?: unknown }> }>;
+    const tokens = imports.flatMap((entry) =>
+      (entry.providers ?? []).map((provider) => provider.provide),
+    );
+    expect(tokens).toEqual(
+      expect.arrayContaining(['UserWriteGateModel', 'AccountDeletionModel']),
+    );
+    expect(
+      (Reflect.getMetadata('providers', MembersModule) as unknown[]) ?? [],
+    ).toContain(CommentStore);
+  });
+});
+
+describe('CommentStore: the put-back passes the gate too (round 10, 1)', () => {
+  it('r10a: a row repaired away during a stall is not put back for a deleted account', async () => {
+    const model = fakeModel([]);
+    const gates = fakeModel([]);
+    const accounts = fakeModel([]);
+    const s = new CommentStore(
+      model as never,
+      gates as never,
+      accounts as never,
+    );
+    const write = s.createConfirmed(
+      { commentId: 'c-r', authorUserId: 'user_r', body: 'x' },
+      async () => {
+        // A repair deletes the unconfirmed row; the webhook then records
+        // the deletion.
+        await model.deleteOne({ commentId: 'c-r' }).exec();
+        accounts.docs.push({ userId: 'user_r' });
+        return { seq: 1 };
+      },
+    );
+    await expect(write).rejects.toThrow(ForbiddenException);
+    expect(model.docs).toEqual([]);
+    expect(gates.docs[0]).toMatchObject({ n: 2 });
+  });
+
+  it('puts a repaired row back, confirmed, for a live account', async () => {
+    const model = fakeModel([]);
+    const s = new CommentStore(
+      model as never,
+      fakeModel([]) as never,
+      fakeModel([]) as never,
+    );
+    await expect(
+      s.createConfirmed(
+        { commentId: 'c-l', authorUserId: 'user_l' },
+        async () => {
+          await model.deleteOne({ commentId: 'c-l' }).exec();
+          return { seq: 1 };
+        },
+      ),
+    ).resolves.toBe(1);
+    expect(model.docs).toEqual([
+      expect.objectContaining({ commentId: 'c-l', bodySeq: 1 }),
+    ]);
   });
 });

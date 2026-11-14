@@ -1,6 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { makeAppendOnly } from '../append-only';
+import { IMPORT_PURGE } from '../purge-rules';
 
 export const IMPORT_SOURCE_KINDS = ['docx', 'pages'] as const;
 export type ImportSourceKind = (typeof IMPORT_SOURCE_KINDS)[number];
@@ -62,6 +63,13 @@ export class ImportRecord {
 
   @Prop({ type: Date, required: true, immutable: true })
   importedAt: Date;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type ImportRecordDocument = HydratedDocument<ImportRecord>;
@@ -69,4 +77,4 @@ export const ImportRecordSchema = SchemaFactory.createForClass(ImportRecord);
 
 ImportRecordSchema.index({ profileId: 1, importedAt: -1 });
 
-makeAppendOnly(ImportRecordSchema, 'importrecords');
+makeAppendOnly(ImportRecordSchema, 'importrecords', undefined, IMPORT_PURGE);

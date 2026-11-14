@@ -1,6 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 import { makeAppendOnly } from '../append-only';
+import { VERSION_PURGE } from '../purge-rules';
 
 /** Longest text one version may hold. */
 export const MAX_BLOCK_TEXT_LENGTH = 20_000;
@@ -82,6 +83,13 @@ export class BlockVersion {
   /** The suggestion's author (Clerk user id); set with `suggestionId`. */
   @Prop({ type: String, immutable: true })
   suggestedBy?: string;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type BlockVersionDocument = HydratedDocument<BlockVersion>;
@@ -90,5 +98,11 @@ export const BlockVersionSchema = SchemaFactory.createForClass(BlockVersion);
 BlockVersionSchema.index({ blockId: 1, seq: 1 }, { unique: true });
 // The daily anchor (plan §6) selects one day's new versions by time.
 BlockVersionSchema.index({ createdAt: 1 });
+// The account purge's person-wide queries (Chunk 17 round 2, #10). Plain,
+// not partial: the purge matches by plain equality (round 4, #6).
+BlockVersionSchema.index({ suggestedBy: 1 });
+// The version a suggestion wrote, found by the suggestion (round 5, MEDIUM-1).
+BlockVersionSchema.index({ suggestionId: 1 });
+BlockVersionSchema.index({ authorUserId: 1 });
 
-makeAppendOnly(BlockVersionSchema, 'blockversions');
+makeAppendOnly(BlockVersionSchema, 'blockversions', undefined, VERSION_PURGE);

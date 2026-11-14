@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import {
   Body,
   Controller,
@@ -106,7 +107,12 @@ export class OrgPageReactionsController {
  * sign-in and the ration (`OrgPageIdGuard`).
  */
 @Controller('me/org-pages/:pageId')
-@UseGuards(OrgPageIdGuard, ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(
+  OrgPageIdGuard,
+  ClerkAuthGuard,
+  AccountNotDeletedGuard,
+  MemberWriteThrottleGuard,
+)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class OrgPageReactionWritesController {
   constructor(

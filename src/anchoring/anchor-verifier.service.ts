@@ -1,5 +1,5 @@
 import { createHash, X509Certificate } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model, QueryFilter, Types } from 'mongoose';
 import {
@@ -10,6 +10,7 @@ import {
   CommentVersion,
   type CommentVersionDocument,
 } from '../social/schemas/comment-version.schema';
+import { type PurgeShape, PurgeMarksService } from './purge-marks.service';
 import { withBytes } from './bytes';
 import { FREETSA_ROOT_PEM } from './freetsa-certs';
 import { buildTree, leafHash, type PathStep, rootFromPath } from './merkle';
@@ -36,6 +37,18 @@ import {
 
 /** Three outcomes, never two (Rule: "cannot verify" is not a pass). */
 export type Outcome = 'pass' | 'fail' | 'cannot-measure';
+
+/** A version whose personal content the five-year purge removed. */
+export const PURGED_CONTENT_CHECK =
+  'the personal content of this version was removed after the retention period; its stored hash still equals the anchored one, but there are no fields left to recompute it from';
+
+/** The same, while its redaction record is not in a built anchor yet. */
+export const PURGED_SUGGESTER_PENDING_CHECK =
+  'the account that suggested this wording was purged after the retention period and its id removed from this version; the record of that removal is not anchored yet, so this cannot be measured until the next daily anchor';
+
+/** A version on a live page whose suggester's account was purged (review #4). */
+export const PURGED_SUGGESTER_CHECK =
+  "the account that suggested this wording was purged after the retention period, so its id was removed from this version; its remaining fields match the anchored record of that removal and its stored hash still equals the anchored one; only the removed suggester's id cannot be measured";
 
 export interface Check {
   outcome: Outcome;
@@ -90,6 +103,12 @@ export type VersionProof =
       anchored: true;
       anchorId: string;
       leaf: string;
+      /**
+       * The row was purged after the retention period (Chunk 17), checked
+       * by shape and its owner's mark: `content` (text and author gone) or
+       * `suggester` (only the suggester's id gone).
+       */
+      purged?: Exclude<PurgeShape, 'invalid'>;
       /** The version's secret salt: for readers who may know the author only. */
       salt?: string;
       path: PathStep[];
@@ -266,7 +285,21 @@ export class AnchorVerifierService {
     private readonly blockVersionModel: Model<BlockVersionDocument>,
     @InjectModel(CommentVersion.name)
     private readonly commentVersionModel: Model<CommentVersionDocument>,
+    @Optional() private readonly marks?: PurgeMarksService,
   ) {}
+
+  /**
+   * A row carrying `purgedAt`, checked by shape and its owner's mark
+   * (review #2). Without the marks, or without `purgedAt`, it is `invalid`:
+   * checked like any other row.
+   */
+  private async purgeShape(
+    kind: AnchoredKind,
+    record: VersionRecord,
+  ): Promise<PurgeShape> {
+    if (!record.purgedAt || !this.marks) return 'invalid';
+    return this.marks.classify(kind, record);
+  }
 
   private modelOf(kind: AnchoredKind): Model<unknown> {
     return (
@@ -302,6 +335,7 @@ export class AnchorVerifierService {
     );
     const saltOf = new Map(claims.map((claim) => [claim._id, claim.salt]));
     const problems: string[] = [];
+    let purged = 0;
     if (claimed.size !== leaves.length) {
       problems.push(`${claimed.size} claims for ${leaves.length} leaves`);
     }
@@ -326,9 +360,19 @@ export class AnchorVerifierService {
         problems.push(`${id}: version missing`);
       } else if (record.hash !== leaf.versionHash) {
         problems.push(`${id}: stored hash differs from the anchored one`);
+      } else if ((await this.purgeShape(leaf.kind, record)) !== 'invalid') {
+        // Its fields were removed after five years (Chunk 17), checked by
+        // shape AND its owner's purge mark: nothing left to re-hash.
+        // Measured: claim, salted leaf, stored hash. Not: fields.
+        purged += 1;
       } else if (recomputeHash(leaf.kind, record) !== record.hash) {
         problems.push(`${id}: its fields no longer give its hash`);
       }
+    }
+    if (problems.length === 0 && purged > 0) {
+      return unknown(
+        `${leaves.length - purged} version(s) rehash to their anchored leaves; ${purged} had their personal content removed after five years, so only their stored hashes could be checked against the anchor`,
+      );
     }
     if (problems.length === 0) {
       return pass(
@@ -353,8 +397,22 @@ export class AnchorVerifierService {
     );
   }
 
-  /** Every check on one anchor row. */
+  /**
+   * Starts one request's purge-mark checks (Chunk 17 round 7, 7): a receipt
+   * calls it once, then proves each of its versions.
+   */
+  beginCheck(): void {
+    this.marks?.beginCheck();
+  }
+
+  /** Every check on one anchor row, as its own request. */
   async verifyAnchor(stored: TimestampAnchor): Promise<AnchorReport> {
+    this.beginCheck();
+    return this.checkAnchor(stored);
+  }
+
+  /** Every check on one anchor row, inside a request already begun. */
+  private async checkAnchor(stored: TimestampAnchor): Promise<AnchorReport> {
     const anchor = withBytes(stored);
     const leaves = anchor.leaves ?? [];
     const base = {
@@ -362,6 +420,27 @@ export class AnchorVerifierService {
       status: anchor.status,
       leaves: leaves.length,
     };
+    if (
+      anchor.status === 'empty' &&
+      (anchor.leaves !== undefined ||
+        anchor.merkleRoot !== undefined ||
+        anchor.tsa?.response !== undefined ||
+        anchor.ots?.proof !== undefined)
+    ) {
+      // An empty anchor never had a tree: one that holds leaves, a root or
+      // a token was a built anchor relabelled (Chunk 17 review round 7, 2).
+      const relabelled = fail(
+        'marked empty, but it holds leaves, a root or a time-stamp',
+      );
+      return {
+        ...base,
+        root: relabelled,
+        versions: relabelled,
+        tsa: relabelled,
+        ots: relabelled,
+        bitcoin: relabelled,
+      };
+    }
     if (anchor.status === 'empty' && (await this.nothingOn(anchor))) {
       // Nothing to anchor that day: a pass, not noise (review round 7).
       const nothing = pass('nothing to anchor');
@@ -523,8 +602,10 @@ export class AnchorVerifierService {
       .exec()) as TimestampAnchor[];
     const anchors = found.slice(0, ANCHORS_PAGE_SIZE);
     const reports: AnchorReport[] = [];
+    // One purge-mark check for the whole page (round 7, 7).
+    this.beginCheck();
     for (const anchor of anchors) {
-      const report = await this.verifyAnchor(anchor);
+      const report = await this.checkAnchor(anchor);
       reports.push(report);
       // Remembered, so the global count covers pages nobody opened since.
       await this.anchorModel
@@ -653,14 +734,25 @@ export class AnchorVerifierService {
               : 'the anchor this version was claimed by is missing',
           );
     const rehashed = recomputeHash(kind, record);
+    const shape =
+      record.hash === claim.versionHash
+        ? await this.purgeShape(kind, record)
+        : 'invalid';
     const hash =
-      rehashed === record.hash && record.hash === claim.versionHash
-        ? pass('the recorded fields give the anchored hash')
-        : fail('the recorded fields no longer give the anchored hash');
+      shape === 'content'
+        ? unknown(PURGED_CONTENT_CHECK)
+        : shape === 'suggester'
+          ? unknown(PURGED_SUGGESTER_CHECK)
+          : shape === 'suggester-pending'
+            ? unknown(PURGED_SUGGESTER_PENDING_CHECK)
+            : rehashed === record.hash && record.hash === claim.versionHash
+              ? pass('the recorded fields give the anchored hash')
+              : fail('the recorded fields no longer give the anchored hash');
     return {
       anchored: true,
       anchorId: claim.anchorId,
       leaf,
+      ...(shape !== 'invalid' ? { purged: shape } : {}),
       // A claim without a salt gives none (review round 3, L-2).
       ...(typeof claim.salt === 'string' ? { salt: claim.salt } : {}),
       path,

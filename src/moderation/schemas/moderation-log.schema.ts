@@ -1,6 +1,8 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema } from 'mongoose';
 import { makeAppendOnly } from '../../social/append-only';
+import { LOG_PURGE } from '../../social/purge-rules';
+import { PERSON_DETAIL_KEYS } from '../log-details';
 
 /**
  * Who did what to whom, and why: role changes now, moderation decisions
@@ -36,6 +38,13 @@ export class ModerationLogEntry {
   /** Server time. */
   @Prop({ type: Date, required: true, immutable: true })
   at: Date;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type ModerationLogEntryDocument = HydratedDocument<ModerationLogEntry>;
@@ -44,5 +53,13 @@ export const ModerationLogEntrySchema =
 
 ModerationLogEntrySchema.index({ at: -1 });
 ModerationLogEntrySchema.index({ targetType: 1, targetId: 1, at: -1 });
+// The account purge finds entries by actor and by target alone (round 2, #10).
+ModerationLogEntrySchema.index({ actorUserId: 1 });
+ModerationLogEntrySchema.index({ targetId: 1 });
+// Every details key that can hold a person (round 3, L-4, M-1). Plain, not
+// partial: the purge matches by plain equality (round 4, #6).
+for (const key of PERSON_DETAIL_KEYS) {
+  ModerationLogEntrySchema.index({ [`details.${key}`]: 1 });
+}
 
-makeAppendOnly(ModerationLogEntrySchema, 'moderationlog');
+makeAppendOnly(ModerationLogEntrySchema, 'moderationlog', undefined, LOG_PURGE);

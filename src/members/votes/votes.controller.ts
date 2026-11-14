@@ -13,6 +13,7 @@ import { ClerkAuthGuard, OptionalClerkAuthGuard } from '../../auth/auth.guard';
 import { getUserSub } from '../../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../../auth/auth.types';
 import { WriteThrottle } from '../../config/throttle';
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import { MemberWriteThrottleGuard } from '../member-write-throttle.guard';
 import { MembersService } from '../members.service';
 import {
@@ -53,7 +54,7 @@ export class AgreedBeliefsController {
  * token, the database and Clerk only.
  */
 @Controller('me/votes')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AccountNotDeletedGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class VoteWritesController {
   constructor(

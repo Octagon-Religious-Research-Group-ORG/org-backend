@@ -58,14 +58,18 @@ export class ReceiptsService {
     );
     const known = await this.authors.identifiable(people, viewer);
     const chainKnown = people.every(known);
+    const proof = await this.verifier.proveVersion(kind, record);
+    // A purged version's fields no longer give its hash (Chunk 17 review
+    // #3): its hash input is never offered, the hashes tier at most.
+    const purged = proof.anchored && proof.purged !== undefined;
     return {
       kind,
       record,
       ...(label ? { label } : {}),
-      proof: await this.verifier.proveVersion(kind, record),
+      proof,
       disclose: !chainKnown
         ? 'none'
-        : full(record.authorUserId) && full(record.suggestedBy)
+        : !purged && full(record.authorUserId) && full(record.suggestedBy)
           ? 'full'
           : 'hashes',
     };
@@ -87,6 +91,8 @@ export class ReceiptsService {
       seq,
     );
     const inputs: ReceiptVersionInput[] = [];
+    // One purge-mark check for this receipt (Chunk 17 round 7, 7).
+    this.verifier.beginCheck();
     for (const part of parts) {
       inputs.push(await this.input('block', part.row, viewer, part.label));
     }
@@ -111,9 +117,33 @@ export class ReceiptsService {
       viewer,
       seq,
     );
+    this.verifier.beginCheck();
     return buildReceipt(
       { type: 'comment', page: slug, commentId },
       [await this.input('comment', row, viewer)],
+      viewer,
+    );
+  }
+
+  /**
+   * One version's receipt for its author's data export (Chunk 17), with the
+   * SAME disclosure rule as every other receipt (`input`), the reader being
+   * the member. The export reads the member's own rows itself, because a
+   * deleted page answers 404 to its owner while the export must still work
+   * (plan §2b item 3); who may have them is decided there: the account's
+   * own versions only.
+   */
+  async exportVersion(
+    kind: AnchoredKind,
+    row: AnyVersionRow,
+    subject: ReceiptSubject,
+    viewer: Viewer,
+    label?: string,
+  ): Promise<Receipt> {
+    this.verifier.beginCheck();
+    return buildReceipt(
+      subject,
+      [await this.input(kind, row, viewer, label)],
       viewer,
     );
   }
@@ -131,6 +161,7 @@ export class ReceiptsService {
       viewer,
       seq,
     );
+    this.verifier.beginCheck();
     return buildReceipt(
       { type: 'org-page-comment', orgPage: pageId, commentId },
       [await this.input('comment', row, viewer)],

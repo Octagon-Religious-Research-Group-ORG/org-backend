@@ -570,7 +570,14 @@ export class AnchoringService {
               _id: point._id,
               rescanToken: point.rescanToken,
             } as AnchorFilter,
-            { $unset: { rescanFrom: 1, rescanTo: 1, rescanToken: 1 } },
+            {
+              $unset: {
+                rescanFrom: 1,
+                rescanTo: 1,
+                rescanToken: 1,
+                rescanAt: 1,
+              },
+            },
           )
           .exec();
       }
@@ -925,6 +932,8 @@ export class AnchoringService {
             { _id: day, rescanToken: { $exists: false } } as AnchorFilter,
             {
               $set: { rescanToken: randomUUID() },
+              // When the release finished (Chunk 17 review round 7, 4).
+              $max: { rescanAt: new Date() },
             },
           )
           .exec();
@@ -945,7 +954,7 @@ export class AnchoringService {
     await this.anchorModel
       .updateOne({ _id: day } as AnchorFilter, {
         $min: { rescanFrom: oldest.versionCreatedAt },
-        $max: { rescanTo: newest.versionCreatedAt },
+        $max: { rescanTo: newest.versionCreatedAt, rescanAt: new Date() },
       })
       .exec();
     const { deletedCount } = await this.leafModel
@@ -958,7 +967,7 @@ export class AnchoringService {
     await this.anchorModel
       .updateOne({ _id: day } as AnchorFilter, {
         $min: { rescanFrom: oldest.versionCreatedAt },
-        $max: { rescanTo: newest.versionCreatedAt },
+        $max: { rescanTo: newest.versionCreatedAt, rescanAt: new Date() },
         $set: { rescanToken: randomUUID() },
       })
       .exec();

@@ -13,6 +13,10 @@ import {
   SocialProfileSchema,
 } from '../social/schemas/social-profile.schema';
 import { AdminInboxModule } from '../admin-inbox/admin-inbox.module';
+import {
+  AccountDeletion,
+  AccountDeletionSchema,
+} from '../member-data/schemas/account-deletion.schema';
 import { SocialModule } from '../social/social.module';
 import {
   MembershipController,
@@ -41,6 +45,8 @@ import { VisitRecord, VisitRecordSchema } from './schemas/visit-record.schema';
       { name: ConsentRecord.name, schema: ConsentRecordSchema },
       { name: MemberContacts.name, schema: MemberContactsSchema },
       { name: VisitRecord.name, schema: VisitRecordSchema },
+      // For the AccountNotDeletedGuard on joining (round 7, 5).
+      { name: AccountDeletion.name, schema: AccountDeletionSchema },
     ]),
   ],
   controllers: [MembershipController, MyMembershipController],

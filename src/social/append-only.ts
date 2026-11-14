@@ -1,4 +1,10 @@
 import type { Schema } from 'mongoose';
+import {
+  isPurgeFilter,
+  isPurgeUpdate,
+  PURGE_OPTION,
+  type PurgeRule,
+} from './purge-rules';
 
 /**
  * Error thrown when code tries to change or remove a record in an
@@ -52,21 +58,40 @@ export const BLOCKED_QUERY_OPERATIONS = [
  *   option set to `true` is let through: one named, deliberate exception
  *   for a collection whose rows may be released (anchor claims that are in
  *   no tree, Chunk 16 round 4). Every other operation stays blocked.
+ * @param purgeRule - when set, a query-level `updateMany` carrying
+ *   `PURGE_OPTION` set to `true` whose update is exactly a purge under this
+ *   rule (`isPurgeUpdate`) is let through: the five-year purge of personal
+ *   content (Chunk 17). Any other shape, or that option on any other
+ *   operation, is refused like every other write.
  */
 export function makeAppendOnly(
   schema: Schema,
   collection: string,
   releaseOption?: string,
+  purgeRule?: PurgeRule,
 ): void {
   for (const operation of BLOCKED_QUERY_OPERATIONS) {
     schema.pre(operation, { document: true, query: true }, function () {
       const query = this as unknown as {
         getOptions?: () => Record<string, unknown>;
+        getUpdate?: () => unknown;
+        getFilter?: () => unknown;
       };
       if (
         operation === 'deleteMany' &&
         releaseOption !== undefined &&
         query.getOptions?.()[releaseOption] === true
+      ) {
+        return;
+      }
+      if (
+        operation === 'updateMany' &&
+        purgeRule !== undefined &&
+        query.getOptions?.()[PURGE_OPTION] === true &&
+        // Never an upsert: a purge only ever rewrites rows that exist.
+        query.getOptions?.().upsert !== true &&
+        isPurgeUpdate(query.getUpdate?.(), purgeRule) &&
+        isPurgeFilter(query.getFilter?.(), query.getUpdate?.(), purgeRule)
       ) {
         return;
       }

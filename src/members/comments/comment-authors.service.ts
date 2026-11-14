@@ -5,6 +5,7 @@ import {
   SocialProfile,
   type SocialProfileDocument,
 } from '../../social/schemas/social-profile.schema';
+import { PURGED_PERSON } from '../../social/purge-rules';
 import { decideProfileAccess, type Viewer } from '../profile-access';
 import type { ProfileRow } from '../profile-serializers';
 import type { CommentAuthorView } from './comment-serializers';
@@ -121,6 +122,12 @@ export class CommentAuthorsService {
         ? { kind: 'admin' }
         : { kind: 'member' };
       const page = pageOf.get(userId);
+      // Deleted by its member or with their account (Chunk 17): never named,
+      // and said plainly, so the thread still reads. After the five-year
+      // purge the comment carries no person at all, and reads the same.
+      if ((page?.deletedAt || userId === PURGED_PERSON) && !writtenAsAdmin) {
+        return { kind: 'member', former: true };
+      }
       // Not approved: unnamed even for the readers (owner, admins) who may
       // open a pending page. A deleted page gives level 'none' below.
       if (!page || (page.reviewStatus ?? 'approved') !== 'approved') {

@@ -155,4 +155,18 @@ describe('PictureStore', () => {
     await store.remove(ID);
     expect(bucket.delete).toHaveBeenCalledWith(oid(ID));
   });
+
+  // Chunk 17 round 2, #3: the GridFS driver throws for a file it does not
+  // hold; a purge that already removed it must still finish.
+  it('counts a file already gone as removed, and passes on any other error', async () => {
+    const { store, bucket } = setup();
+    bucket.delete.mockRejectedValueOnce(
+      new Error(`File not found for id ${ID}`),
+    );
+    await expect(store.remove(ID)).resolves.toBeUndefined();
+    bucket.delete.mockRejectedValueOnce(new Error('network down'));
+    await expect(store.remove(ID)).rejects.toThrow('network down');
+    bucket.delete.mockRejectedValueOnce('not an error');
+    await expect(store.remove(ID)).rejects.toBe('not an error');
+  });
 });

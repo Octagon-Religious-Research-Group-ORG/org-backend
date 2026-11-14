@@ -29,6 +29,10 @@ import { SearchEntrySchema } from '../search/schemas/search-entry.schema';
 import { SearchFragmentHideSchema } from '../search/schemas/search-fragment-hide.schema';
 import { SearchFragmentPairSchema } from '../search/schemas/search-fragment-pair.schema';
 import { SearchTermWindowSchema } from '../search/schemas/search-term-window.schema';
+import { AccountDeletionSchema } from '../member-data/schemas/account-deletion.schema';
+import { PurgeRunLockSchema } from '../member-data/schemas/purge-run-lock.schema';
+import { WebhookEventSchema } from '../member-data/schemas/webhook-event.schema';
+import { UserWriteGateSchema } from '../member-data/schemas/user-write-gate.schema';
 
 /**
  * Every collection whose indexes are created deliberately (`autoIndex: false`).
@@ -70,4 +74,8 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'TimestampAnchor', schema: TimestampAnchorSchema },
     { name: 'AnchorLeaf', schema: AnchorLeafSchema },
     { name: 'AnchorRunLock', schema: AnchorRunLockSchema },
+    { name: 'WebhookEvent', schema: WebhookEventSchema },
+    { name: 'PurgeRunLock', schema: PurgeRunLockSchema },
+    { name: 'AccountDeletion', schema: AccountDeletionSchema },
+    { name: 'UserWriteGate', schema: UserWriteGateSchema },
   ];

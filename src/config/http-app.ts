@@ -1,7 +1,17 @@
 import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { json, type NextFunction, type Request, type Response } from 'express';
+import {
+  json,
+  raw,
+  type NextFunction,
+  type Request,
+  type Response,
+} from 'express';
 import helmet from 'helmet';
+import {
+  MAX_WEBHOOK_BODY_BYTES,
+  WEBHOOK_PATH,
+} from '../member-data/clerk-webhook.controller';
 import { MAX_SUGGESTION_BODY_BYTES } from '../members/comments/comments.dto';
 import { MAX_EDIT_BODY_BYTES } from '../members/members.dto';
 import { MAX_JOIN_BODY_BYTES } from '../membership/membership.dto';
@@ -38,6 +48,15 @@ export function configureHttpApp(
   // default 100 kB limit still applies to every other route. Wrapped because
   // Nest skips its own parser when it finds a middleware named "jsonParser",
   // which would leave every other route with no JSON parsing at all.
+  // Clerk's webhook is verified over its exact bytes (Chunk 17): this one
+  // route keeps the raw body, whatever its content type, and parses first,
+  // so the JSON parser below skips it.
+  const parseWebhook = raw({ type: () => true, limit: MAX_WEBHOOK_BODY_BYTES });
+  app.use(
+    WEBHOOK_PATH,
+    (request: Request, response: Response, next: NextFunction) =>
+      parseWebhook(request, response, next),
+  );
   const parseLongJoin = json({ limit: MAX_JOIN_BODY_BYTES });
   app.use(
     '/api/v1/me/membership',

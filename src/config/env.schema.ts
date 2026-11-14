@@ -149,6 +149,9 @@ export const envValidationSchema = Joi.object({
     .default(30),
   // Timestamp anchoring (Chunk 16): on unless switched off; the UTC hour from
   // which the day's anchor is made; the two providers; one request's timeout.
+  // Chunk 17: Clerk's user.deleted webhook. Optional: without it the route
+  // answers 503 and the rest of the site runs as before.
+  CLERK_WEBHOOK_SIGNING_SECRET: Joi.string().allow('').optional(),
   ANCHORING_ENABLED: Joi.boolean().default(true),
   ANCHOR_HOUR_UTC: Joi.number()
     .integer()

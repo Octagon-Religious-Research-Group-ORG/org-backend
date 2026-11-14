@@ -326,7 +326,12 @@ export function fakeModel(
           applyUpdate(doc, change, true);
           checkUnique(doc);
           docs.push(doc);
-          return Promise.resolve({ matchedCount: 0, modifiedCount: 0 });
+          return Promise.resolve({
+            matchedCount: 0,
+            modifiedCount: 0,
+            upsertedCount: 1,
+            upsertedId: doc._id,
+          });
         }
         for (const doc of targets) {
           const next = copy(doc);
@@ -427,6 +432,13 @@ export function fakeModel(
             rows = rows.slice(stage.$skip as number);
           } else if ('$limit' in stage) {
             rows = rows.slice(0, stage.$limit as number);
+          } else if ('$unwind' in stage) {
+            const path = (stage.$unwind as string).slice(1);
+            rows = rows.flatMap((row) =>
+              ((getPath(row, path) as unknown[] | undefined) ?? []).map(
+                (item) => ({ ...row, [path]: item }),
+              ),
+            );
           } else if ('$project' in stage) {
             rows = rows.map((row) => project(row, stage.$project as Doc));
           } else {
@@ -446,6 +458,16 @@ function project(row: Doc, spec: Doc): Doc {
   for (const [name, rule] of Object.entries(spec)) {
     if (rule === 1) {
       if (name in row) out[name] = row[name];
+    } else if (
+      typeof rule === 'object' &&
+      rule !== null &&
+      '$objectToArray' in rule
+    ) {
+      const path = (rule as { $objectToArray: string }).$objectToArray;
+      const value = getPath(row, path.slice(1));
+      out[name] = Object.entries((value as Doc | undefined) ?? {}).map(
+        ([k, v]) => ({ k, v }),
+      );
     } else if (typeof rule === 'object' && rule !== null && '$slice' in rule) {
       const [path, n] = (rule as { $slice: [string, number] }).$slice;
       out[name] = ((getPath(row, path.slice(1)) as unknown[]) ?? []).slice(

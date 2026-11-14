@@ -6,6 +6,7 @@ import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { getModelToken } from '@nestjs/mongoose';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
 import { Test } from '@nestjs/testing';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { App } from 'supertest/types';
@@ -89,7 +90,8 @@ export interface CommentsApp {
     | 'tallies'
     | 'voteHistory'
     | 'settings'
-    | 'pages',
+    | 'pages'
+    | 'accounts',
     FakeModel
   >;
 }
@@ -99,6 +101,7 @@ export async function createCommentsApp(): Promise<CommentsApp> {
   const seeded = seedBlocks();
   const models = {
     profiles: fakeModel(seedProfiles()),
+    accounts: fakeModel([]),
     tabs: fakeModel(seedTabs(), { timestamps: true }),
     blocks: fakeModel(
       seeded.map((s) => s.block),
@@ -189,6 +192,11 @@ export async function createCommentsApp(): Promise<CommentsApp> {
         useValue: models.voteHistory,
       },
       { provide: getModelToken(OrgSetting.name), useValue: models.settings },
+      // Accounts whose deletion is recorded (Chunk 17 round 5, LOW-1).
+      {
+        provide: getModelToken(AccountDeletion.name),
+        useValue: models.accounts,
+      },
       { provide: getModelToken(SocialProfile.name), useValue: models.profiles },
       { provide: getModelToken(BeliefTab.name), useValue: models.tabs },
       { provide: getModelToken(ProfileBlock.name), useValue: models.blocks },

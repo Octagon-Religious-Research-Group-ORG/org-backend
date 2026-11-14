@@ -180,6 +180,11 @@ export type Disclosure = 'full' | 'hashes' | 'none';
 export type ReceiptSubject =
   | { type: 'belief-text' | 'belief-title'; page: string; tabId: string }
   | { type: 'comment'; page: string; commentId: string }
+  /**
+   * A version of a page's bio or another non-belief section, in a member's
+   * own data export (Chunk 17).
+   */
+  | { type: 'page-block'; page: string; section: string; blockId: string }
   | { type: 'org-page-comment'; orgPage: string; commentId: string };
 
 /** Who asked: decides whether person ids inside the hash input are shown. */
@@ -224,6 +229,8 @@ export interface ReceiptVersion {
   prevHash?: string;
   salt?: string;
   imported?: string;
+  /** Present when the five-year purge removed part of it (Chunk 17). */
+  purged?: string;
   /**
    * The exact string the version hash is the SHA-256 of, when every person
    * id in it may be shown to this reader; otherwise which fields were held
@@ -276,6 +283,30 @@ const WITHHELD_REASON =
 const HASH_INPUT_REASON =
   "The exact hash input holds the author's account id, which this site gives only to the author and to ORG admins. The version hash, previous hash and salt are here, so every step from the hash to the time-stamps can be checked; the step from the text to the hash needs the author's complete receipt.";
 
+/** Why a purged version's receipt holds no hash input (Chunk 17 review #3). */
+export const PURGED_HASH_REASON =
+  'The personal content of this version was removed after the retention period, so the fields its hash was made from no longer exist and no hash input can reproduce it. The hash, previous hash and salt stay, so every step from the hash to the time-stamps can still be checked; a receipt downloaded before the removal still proves the text.';
+
+/** The notice of a receipt holding a purged version: cannot measure. */
+export const PURGED_RECEIPT_NOTICE = [
+  'This server cannot measure whether this text is the text behind this fingerprint: part of it was removed after the retention period, so the fields its fingerprint was made from are gone. The fingerprint, its place in the anchor and the time-stamps can still be checked with free public tools.',
+  ...LIMITS,
+];
+
+/** What a purged version says about itself. */
+const PURGED_NOTE = {
+  content:
+    'The personal content of this version was removed after the retention period.',
+  suggester:
+    'The account that suggested this wording was removed after the retention period, so its id is no longer in this version.',
+  'suggester-pending':
+    'The account that suggested this wording was removed after the retention period, so its id is no longer in this version; the record of that removal is not anchored yet.',
+} as const;
+
+/** Said with the purged notice when other versions are withheld too (round 2, #9d). */
+export const PURGED_AND_WITHHELD_LINE =
+  'Some versions in this receipt also hold no hash, previous hash or salt: they start at the salted leaf, because their hashes could be used to test a guess about who wrote them.';
+
 function mayShow(id: string | undefined, reader: ReceiptReader) {
   return (
     id === undefined ||
@@ -296,11 +327,14 @@ function versionOf(
   reader: ReceiptReader,
 ): ReceiptVersion {
   const { kind, record, proof } = input;
-  const disclose: Disclosure =
+  const purged = proof.anchored ? proof.purged : undefined;
+  const asked: Disclosure =
     input.disclose ??
     (mayShow(record.authorUserId, reader) && mayShow(record.suggestedBy, reader)
       ? 'full'
       : 'none');
+  // A purged version never offers its hash input: it cannot reproduce it.
+  const disclose: Disclosure = purged && asked === 'full' ? 'hashes' : asked;
   const imported = importNote(record);
   return {
     kind,
@@ -317,20 +351,27 @@ function versionOf(
         }
       : {}),
     ...(imported ? { imported } : {}),
+    ...(purged ? { purged: PURGED_NOTE[purged] } : {}),
     hashInput:
       disclose === 'full'
         ? { included: true, canonical: canonicalOf(kind, record) }
-        : disclose === 'hashes'
+        : purged && disclose === 'hashes'
           ? {
               included: false,
               withheld: ['hash input'],
-              reason: HASH_INPUT_REASON,
+              reason: PURGED_HASH_REASON,
             }
-          : {
-              included: false,
-              withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
-              reason: WITHHELD_REASON,
-            },
+          : disclose === 'hashes'
+            ? {
+                included: false,
+                withheld: ['hash input'],
+                reason: HASH_INPUT_REASON,
+              }
+            : {
+                included: false,
+                withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
+                reason: WITHHELD_REASON,
+              },
     anchor: proof.anchored
       ? {
           state: 'anchored',
@@ -448,20 +489,24 @@ export function buildReceipt(
     subject,
     notice: versions.some(failedCheck)
       ? [...UNCONFIRMED_RECEIPT_NOTICE]
-      : withUnconfirmed(
-          versions,
-          versions.some((version) => version.disclosure === 'none')
-            ? stamps
-              ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
-              : PARTIAL_PENDING_RECEIPT_NOTICE
-            : versions.some((version) => version.disclosure === 'hashes')
+      : versions.some((version) => version.purged !== undefined)
+        ? versions.some((version) => version.disclosure === 'none')
+          ? [PURGED_RECEIPT_NOTICE[0], PURGED_AND_WITHHELD_LINE, ...LIMITS]
+          : [...PURGED_RECEIPT_NOTICE]
+        : withUnconfirmed(
+            versions,
+            versions.some((version) => version.disclosure === 'none')
               ? stamps
-                ? stamped(HASHES_RECEIPT_NOTICE, stamps)
-                : HASHES_PENDING_RECEIPT_NOTICE
-              : stamps
-                ? stamped(RECEIPT_NOTICE, stamps)
-                : RECEIPT_PENDING_NOTICE,
-        ),
+                ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
+                : PARTIAL_PENDING_RECEIPT_NOTICE
+              : versions.some((version) => version.disclosure === 'hashes')
+                ? stamps
+                  ? stamped(HASHES_RECEIPT_NOTICE, stamps)
+                  : HASHES_PENDING_RECEIPT_NOTICE
+                : stamps
+                  ? stamped(RECEIPT_NOTICE, stamps)
+                  : RECEIPT_PENDING_NOTICE,
+          ),
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

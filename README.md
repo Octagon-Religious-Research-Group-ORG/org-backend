@@ -390,7 +390,8 @@ and that hash is the anchored one; the FreeTSA token verifies for the root;
 the `.ots` proof commits to the root and holds at least one attestation
 (one that commits but attests nothing is "cannot measure"). An empty anchor
 (nothing to anchor that day) passes as "nothing to anchor" unless it holds
-a claim or a reach-back point. Whether the
+a claim or a reach-back point (then "cannot measure"); one that holds leaves,
+a root, a TSA token or an OTS proof FAILS every check. Whether the
 Bitcoin block itself contains the proof is always "cannot measure" here (no
 Bitcoin node). The view is paged, 30 anchors a page (`?page=`); its totals
 are labelled as being for that page only. Coverage is over every version.
@@ -490,6 +491,240 @@ exist (Chunks 3 and 9).
 Upgrades are fetched only from calendars on the reference client's whitelist
 (`*.calendar.opentimestamps.org`, `*.calendar.eternitywall.com`,
 `*.calendar.catallaxy.com`, https, no port), whatever a calendar answered.
+
+## Data export and page deletion (Chunk 17)
+
+ORG keeps a backend copy of everything for at least five years after a member
+deletes their page (plan §2b, D22). This chunk adds the member's own controls
+and the automatic purge after those five years.
+
+### Routes
+
+| Route | Who | What |
+|---|---|---|
+| `GET /me/data` | signed in | the member's page status, undo window, and the delete dialog's wording |
+| `GET /me/data/export` | signed in | "Download my data": a zip (`READ-ME-FIRST.txt`, `my-data.txt`, `my-data.json`, `receipts/*.zip`, `picture.webp`). 3 a minute per address, 5 a day per account, `no-store` |
+| `POST /me/data/delete-page` `{confirm}` | signed in | "Delete my page"; `confirm` must be the page's address |
+| `POST /me/data/undo-delete` | signed in | brings the page back within 30 days |
+| `GET /admin/deleted-pages?page=` | admin | deleted pages, next due for purge first |
+| `GET /admin/deleted-pages/purge-due` | admin | dry run: the pages and deleted accounts the purge would remove now |
+| `POST /admin/deleted-pages/:slug/restore` `{reason}` | admin | restore any deleted page until its five years are up (not one's own) |
+| `POST /webhooks/clerk` | Clerk (Svix-signed) | `user.deleted` hides the page like "Delete my page" |
+
+No route takes an account id: the export and deletion act on the signed-in
+account only, and an admin's own export is a member's export.
+
+### What deletion does
+
+It sets `deletedAt` and `deletion {at, source, undoUntil?, purgeAfter}` on the
+page. Every surface already treats `deletedAt` as gone (page, directory,
+search scope, comment author names, notification targets and links). The
+search indexer also drops the page's copies on each refresh. Emails waiting
+about the page are withdrawn. The admin-removal state is left alone, so an
+undo restores the page exactly as it was. Comments the member wrote on other
+pages keep their place and text, shown as "A former member". Each change is
+one transaction with its moderation-log entry (`page.deleted`,
+`page.deletion-undone`, `page.account-deleted`, `page.deletion-restored`).
+
+### The five-year purge
+
+A daily job (an hourly tick that runs once per UTC day, under a run lock in
+`purgerunlocks`, logged as `purge.ran`) works on two clocks:
+
+- **A page**, five years after it was deleted (`deletion.purgeAfter`), by its
+  member or with their account. The job removes the page's own content:
+  - the page row, which stays as "Former member" at `former-<id>`, with no
+    owner, contacts, pictures or Apple Pages link;
+  - the text of its tabs, blocks and versions, plus tab groups and block
+    labels;
+  - the search copies and the import record;
+  - in other people's comments on the page, what they quote or propose of
+    its text (their own words stay).
+
+  The person's comments, votes, claims, consents, settings and moderator
+  actions elsewhere are NOT touched: their account may still be live.
+- **An account**, five years after Clerk deleted it (`accountdeletions`,
+  written by the verified webhook, page or no page). The job removes the
+  person everywhere:
+  - their comments and comment versions lose text and id but keep their
+    place;
+  - their id leaves versions they suggested on other pages;
+  - their votes stay counted under ids that name no one (each slot stays
+    taken, and the account can never vote again);
+  - claims, reports filed, consents, inbox notices, contacts, settings and
+    queued emails are purged;
+  - log entries about them lose the id, the details and the free-text
+    reason; other people's entries that merely name them (found by value,
+    also inside longer text and up to two levels deep) lose only those
+    keys;
+  - their own moderator actions keep their place, reason and details under
+    one stable label, `system:former-<id of the account row>`.
+
+  From the moment the deletion is recorded the account can no longer write
+  (403): comments, suggestions, votes, claims, org-page votes and
+  comments, reports, its member page, the EaM request, the
+  notification-settings change and joining the membership again (its
+  member page cannot be read either). The data export and the 30-day undo
+  stay open. So the record's comment list stays complete, also against a
+  comment written while the webhook runs: a new comment or suggestion
+  writes its account's gate (`userwritegates`, keyed by a hash of the
+  Clerk id, expiring a day after its last write) after inserting its row,
+  then re-reads `accountdeletions`; the webhook writes the same gate inside
+  the transaction that reads the list. MongoDB orders the two writes, so
+  either the list holds the comment or the comment is refused (403) and its
+  row taken back. A row a repair deleted while its write stalled is put
+  back through the same gate. Measured on a real replica set (`member-data-mongo`
+  e2e). Like every write here it needs a replica set; on a standalone
+  MongoDB the webhook refuses plainly (503).
+
+The integrity structure stays. Version rows keep `seq`, `createdAt`,
+`prevHash` and `hash`, and anchor claims (leaf hash and salt) are not
+touched, so the chain links and every receipt already handed out still
+proves its text.
+
+A purged row can no longer be re-hashed. The anchor checks report it as
+**cannot measure**, never pass or fail, but only when BOTH of these hold
+(`anchoring/purge-marks.service.ts`):
+
+1. It has the exact purged shape: empty text, `system:purged`, no
+   suggester. For a version on a live page whose suggester's account was
+   purged, the shape is: text and author intact, suggester removed.
+2. Its owner is marked: the page's `deletion.purgeStartedAt`/`purgedAt`, or
+   the comment's `purgedAt`.
+
+Anything else, `purgedAt` included, is checked as usual and a mismatch
+FAILS. A removed suggester also needs its redaction record, written before the
+id is removed. It is accepted only when all of these hold:
+
+- it names its account's `accountdeletions` row, the account's five years
+  were up, and its time is one of that row's `purgeRuns` (each purge run adds
+  its clock as its very first write, so a retry days later still counts);
+- that account has an anchored deletion record (`account-deleted:<row id>`,
+  written by the webhook in the same transaction as the row: the row id, the
+  time and the sorted ids of the comments the account had authored, never
+  the Clerk id), every part intact and anchored, and the suggestion is in
+  that list;
+- ages are measured by SIGNED time only, never by a date the database
+  holds: each anchor's leaves must rebuild its stamped root and its FreeTSA
+  token must verify (the Chunk 16 code); the redaction's anchor time (or
+  now, while it is unanchored) must be at least five years less one year
+  (`DELETION_ANCHOR_MARGIN_MS`, an owner decision) after the latest anchor
+  time of the deletion record, and, once it is anchored, no more than five
+  years plus one year after it. Put precisely: an honest redaction FAILS
+  when the purge's lateness (from five years after the deletion record's
+  signed anchor time to the purge run) plus the redaction's own anchoring
+  delay (from the purge run to its anchor's signed time) exceeds
+  `DELETION_ANCHOR_MARGIN_MS`. An anchor with no verified token leaves the
+  row pending while its `builtAt` is within `SWEEP_DAYS` (30 days, Chunk
+  16's stray-claim sweep window, NOT a retry cap) and not ahead of the
+  clock (five minutes of skew). Chunk 16 never stops retrying the TSA, so
+  an honest anchor still unsigned after 30 days reads FAIL from then until
+  FreeTSA signs it, and is accepted again afterwards (its signed time is
+  then checked like any other). A newer anchor being signed is not used as
+  evidence: each anchor has its own TSA backoff and the server may sleep
+  through a retry. A record dated more than five minutes in the future
+  FAILS, and so does one dated more than five minutes after its anchor's
+  signed time (the server's clock and FreeTSA's may differ by that much);
+- the anchors are the memory: the redaction's id is derived from its
+  version, and honestly that id is in exactly one anchor's tree. So EVERY
+  anchor whose stored leaves hold it is checked, whatever its status: it
+  must be built and rebuild its root; its entry must be exactly the row's
+  hash, and its stored leaf the salted leaf of that hash under the claim's
+  salt (the stored hash is outside the signed tree, the leaf is inside it);
+  the claim must be in its own anchor's tree, and that anchor must be the
+  earliest signed holder. Any other holder FAILS the row, so a redaction
+  re-issued after its first anchoring, or a claim deleted while an anchor
+  still holds the id, FAILS;
+- exactly one block version names the suggestion, and it is this one; an
+  accepted suggestion also records the block it wrote
+  (`suggestion.resultBlockId`), checked when present;
+- its own claim AND the anchor's own leaf for it carry exactly its hash and
+  salted leaf. A mismatch FAILS. A claim outside its anchor's tree is stray
+  and stays pending until the sweep releases it.
+
+An unclaimed record stays pending, however long the server sleeps or
+anchoring is off, until a finished anchor that should have claimed it did not
+(built a day or more later, cutoff at or after it, not stopped at the cap
+before it, not rescanning it) while no reach point the next build will
+honour still reaches it: then it FAILS. Only the newest finished anchor's
+rescan or resume point counts, or a rescan point released after that build
+(`rescanAt`); a point left on any older anchor is ignored.
+
+**Remaining limits:**
+
+- honest FAIL cases: an honest anchor unsigned past `SWEEP_DAYS` (until
+  FreeTSA signs it); a server clock more than five minutes off FreeTSA's;
+- a database writer can keep such a row PENDING (never "suggester", never
+  a pass) by pointing its claim at a planted anchor with no verified token
+  and refreshing that anchor's `builtAt` within the 30-day window;
+- someone with write access to the database who tampers with such a version
+  of a genuinely deleted account, in the window between its five years
+  ending and the honest purge removing the id (normally under a day), can
+  turn that tampering into "cannot measure", never into "pass";
+- the anchors live in the same database. A writer who DELETES the honest
+  anchor document outright (or rewrites its leaves without the redaction and
+  recomputes its root), then re-anchors a forged redaction under a fresh
+  FreeTSA token (FreeTSA stamps any hash for anyone) whose signed time still
+  falls within the upper bound above, is not caught by the per-version
+  check: the row reads "cannot measure". The anchor health view FAILS a
+  rewritten anchor (its root no longer matches its token); a deleted one
+  shows only if other versions it held are left unanchored, which a writer
+  can also hide. Closing it needs each daily root to commit to
+  the previous one, a change to Chunk 16's anchor format that is an owner
+  decision.
+
+In the anchor health view, an anchor marked `empty` that still holds
+leaves, a root, a TSA token or an OTS proof FAILS every check: an honest
+empty anchor never had a tree.
+
+Redaction and account-deletion records are ordinary comment-version rows, so
+they count against the 50,000-version daily anchor cap and the leaf count like
+any version. Receipts of purged versions never include the hash input (the hashes
+tier at most), say the content was removed after the retention period, and
+carry a "cannot measure" notice.
+
+Each item is marked before the purge starts and marked done by its last
+write. Every step is idempotent, and every id a later step needs is read
+before the rows it comes from are rewritten, so a run that dies part-way is
+finished by the next. Visitor addresses (`visitrecords.ip`) are removed
+five years after the visit.
+
+The append-only guard has ONE purge exception (`src/social/purge-rules.ts`).
+An `updateMany` gets through only when all of these hold:
+
+- it carries the `purgeExpiredPersonalData` option and is not an upsert;
+- its filter is non-empty and limits it to rows not yet done
+  (`purgedAt: { $exists: false }`, or a field the update itself rewrites);
+- its `$set`/`$unset` holds only that collection's named fields with only
+  the allowed values, plus `purgedAt`.
+
+Anything else stays refused. Anchor claims have no purge rule at all.
+Mongoose silently strips immutable fields from updates, so the purge passes
+`overwriteImmutable` (measured on a real database in
+`test/member-data-mongo.e2e-spec.ts`).
+
+### Clerk webhook
+
+In the Clerk dashboard, add an endpoint `https://<api host>/api/v1/webhooks/clerk`
+subscribed to `user.deleted`, and set its signing secret as
+`CLERK_WEBHOOK_SIGNING_SECRET`. Without it the route answers 503 and the rest
+of the site runs as before. Verification uses `verifyWebhook` from
+`@clerk/backend/webhooks` (MIT, already a dependency): the signature over the
+exact raw bytes, and a timestamp within five minutes. Delivered ids are
+remembered for 30 days (`webhookevents`, TTL), so a redelivery is answered
+without repeating the work, which is idempotent anyway.
+
+### Before production
+
+`npm run db:indexes` creates `socialprofiles {deletion.purgeAfter}` (partial),
+`webhookevents {expiresAt}` (TTL), `accountdeletions {userId}` (unique) and
+`{purgeAfter}` (partial), `userwritegates {at}` (TTL, one day), and the
+`purgerunlocks` collection. A gate row whose TTL index is missing is still
+removed by its account's purge. The account
+purge's person indexes (`comments` author, linked user and decider,
+`blockversions.suggestedBy`, `notificationqueue.actorUserId`, the log's
+person details keys) are plain, not partial: the purge matches by plain
+equality, which a `$type` partial index cannot serve.
 
 ## Heroku deployment
 

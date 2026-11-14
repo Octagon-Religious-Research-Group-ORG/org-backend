@@ -18,6 +18,18 @@ import {
 import { VERSION_NOT_FOUND } from '../member-history.service';
 import { PROFILE_NOT_FOUND } from '../members.service';
 import { CommentAuthorsService } from '../comments/comment-authors.service';
+import {
+  PURGED_SUGGESTER_CHECK,
+  PURGED_SUGGESTER_PENDING_CHECK,
+} from '../../anchoring/anchor-verifier.service';
+import { PurgeMarksService } from '../../anchoring/purge-marks.service';
+import { toRecord } from '../../anchoring/version-records';
+import {
+  buildReceipt,
+  PURGED_AND_WITHHELD_LINE,
+  PURGED_HASH_REASON,
+  PURGED_RECEIPT_NOTICE,
+} from '../../anchoring/receipt';
 import { ReceiptsService } from './receipts.service';
 
 const tsa = makeTestTsa();
@@ -32,16 +44,25 @@ function setUp() {
     blocks: withAnchorQueries(h.versions, () => leaves),
     comments: withAnchorQueries(h.commentVersions, () => leaves),
   };
+  const marks = new PurgeMarksService(
+    h.profiles as never,
+    h.blocks as never,
+    h.tabs as never,
+    h.comments as never,
+    h.commentVersions as never,
+    m.leaves as never,
+    m.anchors as never,
+  );
   const receipts = new ReceiptsService(
     h.history,
     h.commentsService,
-    verifierFor(m, tsa),
+    verifierFor(m, tsa, marks),
     new CommentAuthorsService(h.profiles as never),
   );
   // Comments are saved at the real time: anchor a little after it.
   const anchor = () =>
     offlineAnchoring(m, tsa).run(new Date(Date.now() + 10 * 60_000));
-  return { h, m, receipts, anchor };
+  return { h, m, receipts, anchor, marks };
 }
 
 const notFound = (message: string) => new NotFoundException(message);
@@ -249,6 +270,235 @@ describe('comment receipts follow the comment history rules', () => {
     ).rejects.toThrow(notFound(COMMENT_VERSION_NOT_FOUND));
   });
 
+  it('gives the export the same disclosure rule, also after the page is deleted (Chunk 17)', async () => {
+    const { h, receipts, anchor } = setUp();
+    const { commentId } = await h.commentsService.create(
+      await h.writer(U.anon),
+      { slug: 'open-page', tabId: 'tab_a', body: 'A synthetic comment.' },
+    );
+    await anchor();
+    await h.profiles
+      .updateOne({ ownerUserId: U.anon }, { $set: { deletedAt: new Date() } })
+      .exec();
+    const row = h.commentVersions.docs.find(
+      (doc) => doc.commentId === commentId,
+    ) as never;
+    const subject = { type: 'comment', page: 'open-page', commentId } as const;
+    const own = await receipts.exportVersion('comment', row, subject, {
+      kind: 'signed-in',
+      userId: U.anon,
+      isAdmin: false,
+    });
+    expect(own.subject).toEqual(subject);
+    expect(own.versions[0]).toMatchObject({
+      disclosure: 'full',
+      hashInput: { included: true },
+      anchor: { state: 'anchored' },
+    });
+    // The same row read by anyone else: the leaf and proofs only.
+    const other = await receipts.exportVersion(
+      'comment',
+      row,
+      subject,
+      await h.viewer(U.named),
+    );
+    expect(other.versions[0].disclosure).toBe('none');
+    expect(JSON.stringify(other)).not.toContain(U.anon);
+  });
+
+  // A purged member's comment in another member's thread (open-page).
+  async function purgedComment(
+    markComment: boolean,
+    shape: Record<string, unknown> = {},
+  ) {
+    const setup = setUp();
+    const { h, anchor } = setup;
+    const { commentId } = await h.commentsService.create(
+      await h.writer(U.named),
+      { slug: 'open-page', tabId: 'tab_a', body: 'A synthetic comment.' },
+    );
+    await anchor();
+    const row = h.commentVersions.docs.find(
+      (doc) => doc.commentId === commentId,
+    )!;
+    Object.assign(row, {
+      text: '',
+      authorUserId: 'system:purged',
+      purgedAt: new Date(),
+      ...shape,
+    });
+    if (markComment) {
+      const comment = h.comments.docs.find((d) => d.commentId === commentId)!;
+      comment.purgedAt = new Date();
+    }
+    return { ...setup, commentId, row };
+  }
+  const hashOutcome = (receipt: { versions: Array<{ anchor: unknown }> }) =>
+    (
+      receipt.versions[0].anchor as {
+        serverChecks: Record<string, { outcome: string }>;
+      }
+    ).serverChecks.hash.outcome;
+
+  it('reads purgedAt as nothing unless the shape and the owner mark agree (review #2)', async () => {
+    // Carries purgedAt, but its comment was never marked: a tampered row.
+    const unmarked = await purgedComment(false);
+    expect(
+      hashOutcome(
+        await unmarked.receipts.comment(
+          'open-page',
+          unmarked.commentId,
+          await unmarked.h.viewer(),
+        ),
+      ),
+    ).toBe('fail');
+    // Marked, but its text was rewritten rather than removed.
+    const rewritten = await purgedComment(true, { text: 'Other words.' });
+    expect(
+      hashOutcome(
+        await rewritten.receipts.comment(
+          'open-page',
+          rewritten.commentId,
+          await rewritten.h.viewer(),
+        ),
+      ),
+    ).toBe('fail');
+    // Marked, but a real person in place of the purged one.
+    const person = await purgedComment(true, { authorUserId: U.owner });
+    expect(
+      hashOutcome(
+        await person.receipts.comment(
+          'open-page',
+          person.commentId,
+          await person.h.viewer(),
+        ),
+      ),
+    ).toBe('fail');
+  });
+
+  it('reports a version whose only change is a purged suggester as cannot-measure (review #4)', async () => {
+    const { h, m, commentId, row } = await purgedComment(true);
+    // The row as a live version keeps it: text and author intact.
+    Object.assign(row, { text: 'A synthetic comment.', authorUserId: U.named });
+    const verifier = verifierFor(m, tsa, {
+      classify: () => Promise.resolve('suggester'),
+    } as never);
+    const record = toRecord('comment', row as never);
+    const proof = await verifier.proveVersion('comment', record);
+    expect(proof).toMatchObject({
+      anchored: true,
+      purged: 'suggester',
+      checks: {
+        hash: { outcome: 'cannot-measure', detail: PURGED_SUGGESTER_CHECK },
+      },
+    });
+    const receipt = buildReceipt(
+      { type: 'comment', page: 'open-page', commentId },
+      [{ kind: 'comment', record, proof }],
+      { userId: U.named, isAdmin: false },
+    );
+    expect(receipt.versions[0].disclosure).toBe('hashes');
+    expect(receipt.versions[0].purged).toContain('suggested this wording');
+    expect(receipt.notice).toEqual(PURGED_RECEIPT_NOTICE);
+    expect(h.comments.docs.length).toBeGreaterThan(0);
+    // Round 2, #9d: purged AND withheld versions in one receipt: both said.
+    const mixed = buildReceipt(
+      { type: 'comment', page: 'open-page', commentId },
+      [
+        { kind: 'comment', record, proof },
+        {
+          kind: 'comment',
+          record,
+          proof: { anchored: false },
+          disclose: 'none',
+        },
+      ],
+      { userId: U.named, isAdmin: false },
+    );
+    expect(mixed.notice[0]).toBe(PURGED_RECEIPT_NOTICE[0]);
+    expect(mixed.notice[1]).toBe(PURGED_AND_WITHHELD_LINE);
+    // Before its redaction record is anchored: cannot measure, pending.
+    const pending = await verifierFor(m, tsa, {
+      classify: () => Promise.resolve('suggester-pending'),
+    } as never).proveVersion('comment', record);
+    expect(pending).toMatchObject({
+      purged: 'suggester-pending',
+      checks: {
+        hash: {
+          outcome: 'cannot-measure',
+          detail: PURGED_SUGGESTER_PENDING_CHECK,
+        },
+      },
+    });
+  });
+
+  it('gives a purged version a cannot-measure receipt, never its hash input (review #3)', async () => {
+    const { h, receipts, commentId } = await purgedComment(true);
+    // The author's own reading would be "full"; a purged row caps it.
+    for (const viewer of [await h.viewer(U.named), await h.viewer(U.admin)]) {
+      const receipt = await receipts.comment('open-page', commentId, viewer);
+      expect(receipt.notice).toEqual(PURGED_RECEIPT_NOTICE);
+      expect(receipt.versions[0]).toMatchObject({
+        disclosure: 'hashes',
+        hashInput: { included: false, reason: PURGED_HASH_REASON },
+      });
+      expect(receipt.versions[0].purged).toContain(
+        'removed after the retention period',
+      );
+    }
+    // A guest reading the other member's thread: no hashes at all.
+    const guest = await receipts.comment(
+      'open-page',
+      commentId,
+      await h.viewer(),
+    );
+    // The chain holds no person any more, so there is no one to unmask:
+    // the hashes tier, never the hash input, and no id anywhere.
+    expect(guest.versions[0]).toMatchObject({
+      disclosure: 'hashes',
+      hashInput: { included: false, reason: PURGED_HASH_REASON },
+    });
+    expect(JSON.stringify(guest)).not.toContain(U.named);
+    expect(guest.notice).toEqual(PURGED_RECEIPT_NOTICE);
+  });
+
+  it('says a purged version cannot be re-hashed, never pass and never fail (Chunk 17)', async () => {
+    const { h, m, receipts, commentId, row, marks } = await purgedComment(true);
+    const receipt = await receipts.comment(
+      'open-page',
+      commentId,
+      await h.viewer(),
+    );
+    const checks = (
+      receipt.versions[0].anchor as {
+        serverChecks: Record<string, { outcome: string }>;
+      }
+    ).serverChecks;
+    expect(checks.hash.outcome).toBe('cannot-measure');
+    expect(checks.path.outcome).toBe('pass');
+    const health = await verifierFor(m, tsa, marks).verifyAll(
+      new Date(Date.now() + 20 * 60_000),
+    );
+    expect(health.anchors[0].versions.outcome).toBe('cannot-measure');
+    expect(health.anchors[0].versions.detail).toContain(
+      '1 had their personal content removed',
+    );
+    // A purged row whose stored hash was ALSO changed still fails.
+    row.hash = 'e'.repeat(64);
+    const changed = await receipts.comment(
+      'open-page',
+      commentId,
+      await h.viewer(),
+    );
+    expect(
+      (
+        changed.versions[0].anchor as {
+          serverChecks: Record<string, { outcome: string }>;
+        }
+      ).serverChecks.hash.outcome,
+    ).toBe('fail');
+  });
+
   it('on a members-only page: members only', async () => {
     const { h, receipts } = setUp();
     const { commentId } = await posted(h, 'members-page', 'tab_m');
@@ -325,5 +575,38 @@ describe('comment receipts follow the comment history rules', () => {
     await expect(
       receipts.orgComment('research', commentId, await h.viewer()),
     ).rejects.toThrow(notFound(COMMENT_NOT_FOUND));
+  });
+});
+
+describe('receipts: one purge-mark check per request (Chunk 17 round 7, 7)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('begins one check for each receipt, however many versions it proves', async () => {
+    const { h, receipts, marks } = setUp();
+    const begin = jest.spyOn(marks, 'beginCheck');
+    await receipts.belief('imported-page', 'tab_i', await h.viewer());
+    expect(begin).toHaveBeenCalledTimes(1);
+    const { commentId } = await h.commentsService.create(
+      await h.writer(U.anon),
+      { slug: 'open-page', tabId: 'tab_a', body: 'A synthetic comment.' },
+    );
+    await receipts.comment('open-page', commentId, await h.viewer());
+    expect(begin).toHaveBeenCalledTimes(2);
+    const row = h.commentVersions.docs.find(
+      (doc) => doc.commentId === commentId,
+    ) as never;
+    await receipts.exportVersion(
+      'comment',
+      row,
+      { type: 'comment', page: 'open-page', commentId },
+      { kind: 'signed-in', userId: U.anon, isAdmin: false },
+    );
+    expect(begin).toHaveBeenCalledTimes(3);
+    const org = await h.commentsService.createOnOrgPage(
+      await h.writer(U.named),
+      { pageId: 'about', body: 'A synthetic comment on an ORG page.' },
+    );
+    await receipts.orgComment('about', org.commentId, await h.viewer());
+    expect(begin).toHaveBeenCalledTimes(4);
   });
 });

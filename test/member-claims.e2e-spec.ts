@@ -3,6 +3,9 @@
 // guards and throttles, with the services stubbed: who may reach which route
 // and what a request may carry. What the services do is tested against a
 // real MongoDB in member-claims-mongo.e2e-spec.ts. Synthetic data only.
+import { getModelToken } from '@nestjs/mongoose';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
 import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -82,6 +85,11 @@ describe('claims API (e2e)', () => {
         AdminRoleGuard,
         MemberWriteThrottleGuard,
         ClaimRequestThrottleGuard,
+        // No deleted accounts here (Chunk 17 round 5, LOW-1).
+        {
+          provide: getModelToken(AccountDeletion.name),
+          useValue: fakeModel([]),
+        },
         { provide: ClaimsService, useValue: claims },
         { provide: LegacyLinksService, useValue: links },
         {

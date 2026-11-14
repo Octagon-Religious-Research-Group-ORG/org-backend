@@ -20,6 +20,11 @@ export interface VersionRecord {
   hash: string;
   suggestionId?: string;
   suggestedBy?: string;
+  /**
+   * Set when the five-year purge removed the row's personal fields (Chunk
+   * 17): its hash is kept but can no longer be recomputed from them.
+   */
+  purgedAt?: Date;
 }
 
 /** The fields each collection's rows are read with. */
@@ -35,6 +40,7 @@ export const VERSION_PROJECTION = {
   hash: 1,
   suggestionId: 1,
   suggestedBy: 1,
+  purgedAt: 1,
 } as const;
 
 /** A raw row of either collection, as read with `VERSION_PROJECTION`. */

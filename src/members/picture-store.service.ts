@@ -29,6 +29,11 @@ function asObjectId(id: string) {
 }
 
 /** A live profile picture: the right role, the stored form, and not retired. */
+/** The GridFS driver's error for a file id it does not hold. */
+export function isFileNotFound(error: unknown): boolean {
+  return error instanceof Error && /File not found for id/i.test(error.message);
+}
+
 function isServable(metadata: FileMetadata | undefined) {
   return (
     metadata?.role === PROFILE_PICTURE_ROLE &&
@@ -118,9 +123,19 @@ export class PictureStore {
       );
   }
 
-  /** Only for a file that was never live: see the note on retention above. */
+  /**
+   * Only for a file that was never live (see the note on retention above),
+   * and for the five-year purge. A file already gone counts as removed
+   * (Chunk 17 round 2, #3): the driver throws "File not found" for it,
+   * and a purge that died after removing it must still finish.
+   */
   async remove(id: string): Promise<void> {
     const _id = asObjectId(id);
-    if (_id) await this.bucket().delete(_id);
+    if (!_id) return;
+    try {
+      await this.bucket().delete(_id);
+    } catch (error) {
+      if (!isFileNotFound(error)) throw error;
+    }
   }
 }

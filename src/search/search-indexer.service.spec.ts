@@ -30,6 +30,7 @@ function build(
     heads?: unknown[];
     pages?: unknown[];
     site?: string;
+    deleted?: unknown[];
   } = {},
 ) {
   const entries = {
@@ -37,7 +38,13 @@ function build(
     deleteMany: jest.fn(() => exec()),
   };
   const profiles = {
-    find: jest.fn(() => chain([{ _id: P, displayName: 'Synthetic Name' }])),
+    find: jest.fn((filter?: { deletedAt?: unknown }) =>
+      chain(
+        filter?.deletedAt
+          ? (overrides.deleted ?? [])
+          : [{ _id: P, displayName: 'Synthetic Name' }],
+      ),
+    ),
   };
   const tabs = {
     find: jest.fn(() =>
@@ -228,7 +235,7 @@ describe('SearchIndexerService', () => {
     });
     await indexer.refresh({ full: true });
     await indexer.refresh({ full: false });
-    const filter = (profiles.find.mock.calls as unknown[][])[1][0] as {
+    const filter = (profiles.find.mock.calls as unknown[][])[2][0] as {
       updatedAt: { $gte: Date };
     };
     expect(filter.updatedAt.$gte).toBeInstanceOf(Date);
@@ -258,7 +265,8 @@ describe('SearchIndexerService', () => {
       indexer.refresh({ full: true }),
       indexer.refresh({ full: true }),
     ]);
-    expect(profiles.find).toHaveBeenCalledTimes(1);
+    // Names, then the deleted-pages sweep: one run.
+    expect(profiles.find).toHaveBeenCalledTimes(2);
   });
 
   it('refreshes at most every few seconds and fully every few hours', async () => {
@@ -267,11 +275,12 @@ describe('SearchIndexerService', () => {
     // The full rebuild runs in the background: let it finish.
     await new Promise((resolve) => setImmediate(resolve));
     await indexer.ensureFresh(FULL_REBUILD_EVERY_MS + 1);
-    expect(profiles.find).toHaveBeenCalledTimes(1);
-    expect(profiles.find).toHaveBeenLastCalledWith({});
-    await indexer.ensureFresh(FULL_REBUILD_EVERY_MS + REFRESH_EVERY_MS);
     expect(profiles.find).toHaveBeenCalledTimes(2);
-    expect(profiles.find).toHaveBeenLastCalledWith(
+    expect(profiles.find).toHaveBeenNthCalledWith(1, {});
+    await indexer.ensureFresh(FULL_REBUILD_EVERY_MS + REFRESH_EVERY_MS);
+    expect(profiles.find).toHaveBeenCalledTimes(4);
+    expect(profiles.find).toHaveBeenNthCalledWith(
+      3,
       expect.objectContaining({ updatedAt: expect.any(Object) }),
     );
   });
@@ -290,6 +299,18 @@ describe('SearchIndexerService', () => {
     });
     await indexer.ensureFresh(3 * REFRESH_EVERY_MS);
     expect(warn).toHaveBeenCalledWith('Search refresh failed: plain');
+  });
+
+  it('drops every copy of a deleted page on each refresh (Chunk 17)', async () => {
+    const gone = new Types.ObjectId();
+    const { indexer, profiles, entries } = build({ deleted: [{ _id: gone }] });
+    await indexer.refresh({ full: false });
+    expect(profiles.find).toHaveBeenCalledWith({
+      deletedAt: { $exists: true },
+    });
+    expect(entries.deleteMany).toHaveBeenCalledWith({
+      profileId: { $in: [gone] },
+    });
   });
 
   it('starts a refresh with the server', () => {

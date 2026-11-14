@@ -137,6 +137,7 @@
       "social/block-versions.service.ts",
       "social/version-chain.ts",
       "moderation/moderation-log.service.ts",
+      "moderation/log-details.ts",
       "notifications/notifications.service.ts",
       "orders/orders.controller.ts",
       "orders/orders.service.ts",
@@ -240,8 +241,19 @@
       "anchoring/anchor-scheduler.service.ts",
       "anchoring/anchoring.controller.ts",
       "anchoring/receipt.ts",
+      "anchoring/purge-marks.service.ts",
+      "anchoring/redaction.ts",
       "members/receipts/receipts.service.ts",
-      "members/receipts/receipts.controller.ts"
+      "members/receipts/receipts.controller.ts",
+      "social/purge-rules.ts",
+      "member-data/member-data.constants.ts",
+      "member-data/export-text.ts",
+      "member-data/page-deletion.service.ts",
+      "member-data/member-export.service.ts",
+      "member-data/member-purge.service.ts",
+      "member-data/member-purge.scheduler.ts",
+      "member-data/clerk-webhook.controller.ts",
+      "member-data/member-data.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

@@ -437,6 +437,8 @@ describe('admininbox schema', () => {
   it('declares the inbox order and the one-per-subject key', () => {
     expect(AdminInboxEntrySchema.indexes()).toEqual([
       [{ status: 1, createdAt: -1 }, expect.any(Object)],
+      // The account purge (Chunk 17 round 3, L-4).
+      [{ subjectUserId: 1 }, expect.any(Object)],
       [
         { dedupeKey: 1 },
         expect.objectContaining({

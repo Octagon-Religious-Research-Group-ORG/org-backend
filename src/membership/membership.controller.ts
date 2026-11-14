@@ -15,6 +15,7 @@ import { ClerkAuthGuard } from '../auth/auth.guard';
 import { getUserSub } from '../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { SLUG_CHECK_THROTTLE, WriteThrottle } from '../config/throttle';
+import { AccountNotDeletedGuard } from '../members/account-not-deleted.guard';
 import { NoStoreWhenSignedInInterceptor } from '../members/no-store.interceptor';
 import { AccountThrottleGuard } from './account-throttle.guard';
 import { JoinMembershipDto } from './membership.dto';
@@ -77,7 +78,9 @@ export class MyMembershipController {
     return this.membership.summary(getUserSub(request));
   }
 
+  /** A deleted account cannot join again (Chunk 17 review round 7, 5). */
   @Post()
+  @UseGuards(AccountNotDeletedGuard)
   @WriteThrottle()
   join(@Req() request: AuthenticatedRequest, @Body() body: JoinMembershipDto) {
     return this.membership.join(getUserSub(request), body, originOf(request));

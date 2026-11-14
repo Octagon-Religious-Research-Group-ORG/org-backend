@@ -7,6 +7,7 @@ import {
   type VoteValue,
   type VoterTier,
 } from './belief-vote.schema';
+import { VOTE_HISTORY_PURGE } from '../purge-rules';
 
 /**
  * - `cast`: a first vote, or one after a withdrawal;
@@ -76,6 +77,13 @@ export class VoteHistoryEntry {
     immutable: true,
   })
   hash: string;
+
+  /**
+   * Set by the five-year purge (Chunk 17, `purge-rules.ts`) when this row's
+   * personal fields were removed; the row itself stays.
+   */
+  @Prop({ type: Date })
+  purgedAt?: Date;
 }
 
 export type VoteHistoryEntryDocument = HydratedDocument<VoteHistoryEntry>;
@@ -84,5 +92,12 @@ export const VoteHistoryEntrySchema =
 
 VoteHistoryEntrySchema.index({ voteKey: 1, seq: 1 }, { unique: true });
 VoteHistoryEntrySchema.index({ createdAt: 1 });
+// The account purge (Chunk 17 round 3, L-4).
+VoteHistoryEntrySchema.index({ voterUserId: 1 });
 
-makeAppendOnly(VoteHistoryEntrySchema, 'votehistory');
+makeAppendOnly(
+  VoteHistoryEntrySchema,
+  'votehistory',
+  undefined,
+  VOTE_HISTORY_PURGE,
+);

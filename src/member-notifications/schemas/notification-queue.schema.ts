@@ -170,3 +170,6 @@ NotificationQueueRowSchema.index({
 });
 // Old rows delete themselves.
 NotificationQueueRowSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+// The account purge removes rows by actor too (Chunk 17 round 3, L-4).
+// Plain, not partial: matched by plain equality (round 4, #6).
+NotificationQueueRowSchema.index({ actorUserId: 1 });

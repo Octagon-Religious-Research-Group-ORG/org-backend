@@ -179,9 +179,25 @@ export class SearchIndexerService implements OnApplicationBootstrap {
     await this.indexTitles(changed('updatedAt'));
     await this.indexBeliefTexts(full, changed);
     await this.indexPages(changed('updatedAt'));
+    await this.dropDeletedPages();
 
     this.since = startedAt;
     if (full) this.lastFullAt = startedAt.getTime();
+  }
+
+  /**
+   * A deleted page leaves search (Chunk 17): its copies go on every refresh,
+   * after the indexing above, so a run never ends holding one. The query
+   * filters deleted pages out anyway; this keeps the copies from lingering.
+   */
+  private async dropDeletedPages() {
+    const deleted = await this.profileModel
+      .find({ deletedAt: { $exists: true } })
+      .select({ _id: 1 })
+      .lean()
+      .exec();
+    if (deleted.length === 0) return;
+    await this.remove({ profileId: { $in: deleted.map((row) => row._id) } });
   }
 
   private async remove(filter: object) {

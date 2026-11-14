@@ -1,7 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
+import {
+  AccountDeletion,
+  type AccountDeletionDocument,
+} from '../../member-data/schemas/account-deletion.schema';
+import {
+  gateWrite,
+  UserWriteGate,
+  type UserWriteGateDocument,
+  writeGateId,
+} from '../../member-data/schemas/user-write-gate.schema';
+import { ACCOUNT_DELETED_WRITE } from '../account-not-deleted.guard';
 import {
   Comment,
   type CommentDocument,
@@ -159,7 +175,41 @@ export class CommentStore {
   constructor(
     @InjectModel(Comment.name)
     private readonly commentModel: Model<CommentDocument>,
+    // Both registered by MembersModule; absent only in stores built by hand.
+    @Optional()
+    @InjectModel(UserWriteGate.name)
+    private readonly gateModel?: Model<UserWriteGateDocument>,
+    @Optional()
+    @InjectModel(AccountDeletion.name)
+    private readonly accountModel?: Model<AccountDeletionDocument>,
   ) {}
+
+  /**
+   * After a new row is in, before its version: the account's write gate,
+   * then a fresh read of `accountdeletions` (round 9, F2). With the
+   * webhook writing the same gate inside its transaction, either that
+   * transaction's frozen comment list holds this row, or this read sees the
+   * deletion and the row is taken back with a 403.
+   */
+  private async passGate(
+    fields: Record<string, unknown> & { commentId: string },
+  ): Promise<void> {
+    const userId = fields.authorUserId;
+    if (!this.gateModel || !this.accountModel || typeof userId !== 'string') {
+      return;
+    }
+    await this.gateModel
+      .updateOne({ _id: writeGateId(userId) }, gateWrite(new Date()), {
+        upsert: true,
+      })
+      .exec();
+    if (await this.accountModel.exists({ userId }).exec()) {
+      await this.commentModel
+        .deleteOne({ commentId: fields.commentId, bodySeq: { $exists: false } })
+        .exec();
+      throw new ForbiddenException(ACCOUNT_DELETED_WRITE);
+    }
+  }
 
   /** One listed row, by id. */
   async one(commentId: string): Promise<StoredComment | undefined> {
@@ -332,6 +382,7 @@ export class CommentStore {
     writeVersion: () => Promise<{ seq: number }>,
   ): Promise<number> {
     await this.commentModel.create(fields);
+    await this.passGate(fields);
     let seq: number;
     try {
       ({ seq } = await writeVersion());
@@ -354,8 +405,17 @@ export class CommentStore {
       .lean()
       .exec()) as { bodySeq?: number } | null;
     if (!now) {
-      // A repair took the row while this write stalled: put it back, done.
-      await this.commentModel.create({ ...fields, bodySeq: seq });
+      // A repair took the row while this write stalled: put it back, through
+      // the gate again (round 10, 1): the webhook may have frozen the list
+      // since. Refused, the version stays an orphan (`orphanVersions`).
+      await this.commentModel.create(fields);
+      await this.passGate(fields);
+      await this.commentModel
+        .updateOne(
+          { commentId: fields.commentId, bodySeq: { $exists: false } },
+          { $set: { bodySeq: seq } },
+        )
+        .exec();
       return seq;
     }
     if (now.bodySeq === undefined) {

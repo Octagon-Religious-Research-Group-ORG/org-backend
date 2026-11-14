@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import { NotFoundException } from '@nestjs/common';
 import {
   GUARDS_METADATA,
@@ -52,7 +53,11 @@ describe('moderation controllers (Chunk 13)', () => {
     ).toEqual([ClerkAuthGuard, AdminRoleGuard, ModerationThrottleGuard]);
     expect(
       Reflect.getMetadata(GUARDS_METADATA, MyReportWritesController),
-    ).toEqual([ClerkAuthGuard, MemberWriteThrottleGuard]);
+    ).toEqual([
+      ClerkAuthGuard,
+      AccountNotDeletedGuard,
+      MemberWriteThrottleGuard,
+    ]);
     for (const controller of [
       AdminModerationController,
       AdminModerationWritesController,

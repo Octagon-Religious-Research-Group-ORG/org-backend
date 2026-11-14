@@ -17,8 +17,10 @@ export type CommentAuthorView =
    * A site member: their page's display name only when that page is approved
    * and the reader may at least see its name, and `slug` only when the reader
    * may open the whole page. Otherwise neither: shown as "A member".
+   * `former`: the author deleted their page (Chunk 17); the comment keeps
+   * its place and text in someone else's thread, shown as "A former member".
    */
-  | { kind: 'member'; displayName?: string; slug?: string }
+  | { kind: 'member'; displayName?: string; slug?: string; former?: true }
   /**
    * A name typed into Apple Pages; proves no identity (plan Q5). `member` is
    * the member an admin linked it to after their claim (Chunk 11), named by

@@ -31,6 +31,9 @@ import {
   MAX_JOIN_TEXT_CHARS,
 } from '../src/membership/membership.dto';
 import { MembershipService } from '../src/membership/membership.service';
+import { getModelToken } from '@nestjs/mongoose';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
 
 const service = {
   terms: () => ({ version: 'v1', items: [] }),
@@ -75,6 +78,7 @@ async function build(auth: 'real' | 'fake'): Promise<INestApplication<App>> {
     ],
     providers: [
       { provide: MembershipService, useValue: service },
+      { provide: getModelToken(AccountDeletion.name), useValue: fakeModel([]) },
       { provide: APP_GUARD, useClass: ThrottlerGuard },
       {
         provide: ConfigService,

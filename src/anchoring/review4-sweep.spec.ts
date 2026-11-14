@@ -81,13 +81,31 @@ describe('each run sweeps finished anchors for claims outside their tree', () =>
     });
     crashedClaim(m, id(0), v);
     addBlockVersion(m, { createdAt: new Date(day(5).getTime() - HOUR) });
+    // Chunk 17 round 6, 2: each release records when it happened.
+    const updates: unknown[] = [];
+    const original = m.anchors.updateOne;
+    m.anchors.updateOne = (...args: Parameters<typeof original>) => {
+      updates.push(args[1]);
+      return original(...args);
+    };
     const report = await offlineAnchoring(m, tsa).run(day(5));
+    m.anchors.updateOne = original;
+    expect(
+      updates.some(
+        (u) =>
+          (u as { $max?: { rescanAt?: unknown } }).$max?.rescanAt instanceof
+          Date,
+      ),
+    ).toBe(true);
     expect(report.released).toEqual([id(0)]);
     expect(report.build).toMatchObject({ state: 'built', leaves: 2 });
     expect(treesWith(m, v._id)).toEqual([id(5)]);
     // Once covered, the rescan point is cleared: the next batch is normal.
     expect(
       m.anchors.docs.find((a) => a._id === id(0))?.rescanFrom,
+    ).toBeUndefined();
+    expect(
+      m.anchors.docs.find((a) => a._id === id(0))?.rescanAt,
     ).toBeUndefined();
   });
 

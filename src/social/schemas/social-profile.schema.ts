@@ -95,6 +95,52 @@ export class ProfileRemoval {
 export const ProfileRemovalSchema =
   SchemaFactory.createForClass(ProfileRemoval);
 
+/**
+ * Who took a page off the site for good (Chunk 17):
+ * - `member`: "Delete my page", by its owner, who can undo it for a while;
+ * - `account-deleted`: the member's Clerk account was deleted (webhook);
+ *   only an admin can bring the page back.
+ */
+export const DELETION_SOURCES = ['member', 'account-deleted'] as const;
+export type DeletionSource = (typeof DELETION_SOURCES)[number];
+
+/**
+ * A deleted page (Chunk 17, plan §2b D22). The page is gone from the site
+ * the moment `deletedAt` is set; ORG keeps everything for five years from
+ * `at`, then the purge removes the personal content (`purgedAt`).
+ */
+@Schema({ _id: false })
+export class ProfileDeletion {
+  /** Server time of the deletion: the five-year clock starts here. */
+  @Prop({ type: Date, required: true })
+  at: Date;
+
+  @Prop({ type: String, enum: DELETION_SOURCES, required: true })
+  source: DeletionSource;
+
+  /** Until when the member may undo it themselves (`member` only). */
+  @Prop({ type: Date })
+  undoUntil?: Date;
+
+  /** When the personal content becomes due for the purge. */
+  @Prop({ type: Date, required: true })
+  purgeAfter: Date;
+
+  /**
+   * Written by the purge before it touches anything: from then on its
+   * versions' purged shape is expected (review #2).
+   */
+  @Prop({ type: Date })
+  purgeStartedAt?: Date;
+
+  /** When the purge removed it; the page cannot be restored after that. */
+  @Prop({ type: Date })
+  purgedAt?: Date;
+}
+
+export const ProfileDeletionSchema =
+  SchemaFactory.createForClass(ProfileDeletion);
+
 /** One tab removal in progress on a page (Chunk 8). */
 @Schema({ _id: false })
 export class RemovalTurn {
@@ -238,6 +284,10 @@ export class SocialProfile {
   @Prop({ type: Date })
   deletedAt?: Date;
 
+  /** Present on a page deleted by its member or with their account (Chunk 17). */
+  @Prop({ type: ProfileDeletionSchema })
+  deletion?: ProfileDeletion;
+
   /** Present while an admin has removed the page (`reviewStatus: removed`). */
   @Prop({ type: ProfileRemovalSchema })
   removal?: ProfileRemoval;
@@ -262,3 +312,8 @@ SocialProfileSchema.index(
 SocialProfileSchema.index({ visibility: 1, deletedAt: 1, displayName: 1 });
 // The admins' queue of pages waiting for approval, oldest first (Chunk 12).
 SocialProfileSchema.index({ reviewStatus: 1, createdAt: 1 });
+// Deleted pages, oldest first: the admin list and the purge's due list (Chunk 17).
+SocialProfileSchema.index(
+  { 'deletion.purgeAfter': 1 },
+  { partialFilterExpression: { 'deletion.purgeAfter': { $type: 'date' } } },
+);

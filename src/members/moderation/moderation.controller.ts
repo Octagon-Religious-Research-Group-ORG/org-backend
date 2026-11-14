@@ -1,3 +1,4 @@
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import {
   Body,
   Controller,
@@ -55,7 +56,7 @@ function targetParams(type: string, id: string) {
  * by a cache and says nothing about other reports.
  */
 @Controller('me/reports')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AccountNotDeletedGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyReportWritesController {
   constructor(

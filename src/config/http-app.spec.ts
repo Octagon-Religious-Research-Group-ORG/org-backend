@@ -68,6 +68,33 @@ describe('configureHttpApp', () => {
     }
   });
 
+  it('keeps the Clerk webhook body raw, whatever its type (Chunk 17)', async () => {
+    const app = {
+      set: jest.fn(),
+      setGlobalPrefix: jest.fn(),
+      use: jest.fn(),
+      enableCors: jest.fn(),
+      useGlobalPipes: jest.fn(),
+    };
+    configureHttpApp(app as unknown as NestExpressApplication, {
+      origins: [],
+      trustProxyHops: 1,
+    });
+    const [, parser] = app.use.mock.calls.find(
+      ([path]) => path === '/api/v1/webhooks/clerk',
+    ) as [string, (req: unknown, res: unknown, next: () => void) => void];
+    const request = Object.assign(
+      Readable.from([Buffer.from('{"type":"x"}')]),
+      {
+        headers: { 'content-type': 'application/json', 'content-length': '12' },
+        body: undefined,
+      },
+    );
+    await new Promise<void>((resolve) => parser(request, {}, resolve));
+    expect(Buffer.isBuffer(request.body)).toBe(true);
+    expect(String(request.body)).toBe('{"type":"x"}');
+  });
+
   it('trusts the configured proxy hops and applies the shared HTTP setup', () => {
     const app = {
       set: jest.fn(),
@@ -84,8 +111,9 @@ describe('configureHttpApp', () => {
 
     expect(app.set).toHaveBeenCalledWith('trust proxy', 1);
     expect(app.setGlobalPrefix).toHaveBeenCalledWith('api/v1');
-    expect(app.use).toHaveBeenCalledTimes(4);
+    expect(app.use).toHaveBeenCalledTimes(5);
     for (const path of [
+      '/api/v1/webhooks/clerk',
       '/api/v1/me/membership',
       '/api/v1/me/member-page',
       '/api/v1/me/suggestions',

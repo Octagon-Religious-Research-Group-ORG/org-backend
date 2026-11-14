@@ -16,6 +16,7 @@ import { ClerkAuthGuard } from '../../auth/auth.guard';
 import { getUserSub } from '../../auth/auth.helpers';
 import type { AuthenticatedRequest } from '../../auth/auth.types';
 import { CLAIM_REQUEST_THROTTLE, WriteThrottle } from '../../config/throttle';
+import { AccountNotDeletedGuard } from '../account-not-deleted.guard';
 import { MemberWriteThrottleGuard } from '../member-write-throttle.guard';
 import { MembersService } from '../members.service';
 import { NoStoreWhenSignedInInterceptor } from '../no-store.interceptor';
@@ -44,7 +45,7 @@ export class MyClaimsController {
 
 /** Asking for a page and taking a request back. */
 @Controller('me/claims')
-@UseGuards(ClerkAuthGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AccountNotDeletedGuard, MemberWriteThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class MyClaimWritesController {
   constructor(

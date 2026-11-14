@@ -3,6 +3,8 @@
 // reach which route, what a request may carry, that nothing is cached, and
 // that the public unsubscribe route gives one answer to every bad link.
 // Nothing here sends email. Synthetic data only.
+import { getModelToken } from '@nestjs/mongoose';
+import { AccountDeletion } from '../src/member-data/schemas/account-deletion.schema';
 import type { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { APP_GUARD, Reflector } from '@nestjs/core';
@@ -86,6 +88,11 @@ describe('notification routes (e2e)', () => {
         AdminNotificationsController,
       ],
       providers: [
+        // No deleted accounts here (Chunk 17 round 5-6, the write guard).
+        {
+          provide: getModelToken(AccountDeletion.name),
+          useValue: fakeModel([]),
+        },
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         Reflector,
         AdminRoleGuard,

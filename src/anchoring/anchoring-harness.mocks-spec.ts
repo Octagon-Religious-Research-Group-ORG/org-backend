@@ -1,3 +1,4 @@
+import type { PurgeMarksService } from './purge-marks.service';
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- in-memory fake rows */
 /* In-memory models for the anchoring specs (Chunk 16), on top of the shared
  * fake model: adds `findById`, an unordered `insertMany` that reports
@@ -223,12 +224,18 @@ export function offlineAnchoring(
 }
 
 /** A verifier on these models that trusts the synthetic TSA's root. */
-export function verifierFor(m: AnchorModels, tsa: TestTsa) {
+/** `marks`: the purge marks (Chunk 17); without them purgedAt counts for nothing. */
+export function verifierFor(
+  m: AnchorModels,
+  tsa: TestTsa,
+  marks?: PurgeMarksService,
+) {
   const verifier = new AnchorVerifierService(
     m.anchors as never,
     m.leaves as never,
     m.blocks as never,
     m.comments as never,
+    marks,
   );
   verifier.trustedRoots = [tsa.root];
   return verifier;
