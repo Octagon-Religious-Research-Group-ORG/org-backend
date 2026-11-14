@@ -224,7 +224,7 @@ describe('AnchorVerifierService', () => {
       const proof = await prove('block', blocks[0]);
       if (!proof.anchored) throw new Error('expected anchored');
       expect(proof.anchorId).toBe('2026-11-14');
-      expect(proof.leaf).toBe(leafHash(blocks[0].hash, proof.salt));
+      expect(proof.leaf).toBe(leafHash(blocks[0].hash, proof.salt as string));
       expect(rootFromPath(proof.leaf, proof.path)).toBe(proof.root);
       expect(proof.root).toBe(row().merkleRoot);
       expect(Object.values(proof.checks).map((c) => c.outcome)).toEqual([

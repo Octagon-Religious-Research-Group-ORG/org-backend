@@ -67,6 +67,9 @@ export interface HealthReport {
     unfinished: number;
     failedWhenLastChecked: number;
     neverChecked: number;
+    cannotMeasureWhenLastChecked: number;
+    /** ISO time of the oldest stored check, or null when none is stored. */
+    oldestCheck: string | null;
   };
   anchors: AnchorReport[];
   /** Versions older than the newest anchor's cutoff that no anchor holds. */
@@ -86,7 +89,7 @@ export type VersionProof =
       anchorId: string;
       leaf: string;
       /** The version's secret salt: for readers who may know the author only. */
-      salt: string;
+      salt?: string;
       path: PathStep[];
       root: string;
       anchor: TimestampAnchor;
@@ -511,6 +514,12 @@ export class AnchorVerifierService {
   private async globalCounts(): Promise<HealthReport['global']> {
     const count = (filter: Record<string, unknown>) =>
       this.anchorModel.countDocuments(filter as AnchorQuery).exec();
+    const oldest = (await this.anchorModel
+      .findOne({ 'lastCheck.at': { $exists: true } } as AnchorQuery)
+      .sort({ 'lastCheck.at': 1 })
+      .select({ lastCheck: 1 })
+      .lean()
+      .exec()) as TimestampAnchor | null;
     return {
       anchors: await count({}),
       unfinished: await count({
@@ -521,8 +530,34 @@ export class AnchorVerifierService {
         ],
       }),
       failedWhenLastChecked: await count({ 'lastCheck.outcome': 'fail' }),
+      cannotMeasureWhenLastChecked: await count({
+        'lastCheck.outcome': 'cannot-measure',
+      }),
       neverChecked: await count({ lastCheck: { $exists: false } }),
+      // How stale the oldest stored result is (review round 3, MEDIUM-2).
+      oldestCheck: oldest?.lastCheck?.at.toISOString() ?? null,
     };
+  }
+
+  /**
+   * Every person on a version chain up to `upToSeq` (round 3, MEDIUM-1):
+   * a later version's hash commits to every earlier one, so its hash
+   * material can test a guess about any of them.
+   */
+  async chainPeople(
+    kind: AnchoredKind,
+    key: string,
+    upToSeq: number,
+  ): Promise<Array<string | undefined>> {
+    const rows = (await this.modelOf(kind)
+      .find({
+        [kind === 'block' ? 'blockId' : 'commentId']: key,
+        seq: { $lte: upToSeq },
+      })
+      .select({ authorUserId: 1, suggestedBy: 1 })
+      .lean()
+      .exec()) as Array<{ authorUserId?: string; suggestedBy?: string }>;
+    return rows.flatMap((row) => [row.authorUserId, row.suggestedBy]);
   }
 
   /**
@@ -573,7 +608,8 @@ export class AnchorVerifierService {
       anchored: true,
       anchorId: claim.anchorId,
       leaf,
-      salt: String(claim.salt),
+      // A claim without a salt gives none (review round 3, L-2).
+      ...(typeof claim.salt === 'string' ? { salt: claim.salt } : {}),
       path,
       root,
       anchor,

@@ -176,6 +176,16 @@ export class CommentVersionsService {
       .exec()) as (StoredCommentVersion & { _id: Types.ObjectId }) | null;
   }
 
+  /** Who wrote each version of a comment (Chunk 16 round 3). */
+  async chainAuthors(commentId: string): Promise<string[]> {
+    const rows = (await this.versionModel
+      .find({ commentId })
+      .select({ authorUserId: 1 })
+      .lean()
+      .exec()) as Array<{ authorUserId: string }>;
+    return rows.map((row) => row.authorUserId);
+  }
+
   /** Recomputes one comment's whole chain. Read-only. */
   async verify(commentId: string): Promise<ChainVerdict> {
     const versions = (await this.versionModel

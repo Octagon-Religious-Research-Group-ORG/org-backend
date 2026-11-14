@@ -399,6 +399,8 @@ export class AnchoringService {
             versionHash: candidate.hash,
             versionCreatedAt: candidate.createdAt,
             salt: randomBytes(32).toString('hex'),
+            // Which builder wrote it (review round 3, L-1).
+            leaseId,
           })),
           { ordered: false },
         );
@@ -433,6 +435,13 @@ export class AnchoringService {
         ),
       );
     const tree = buildTree(leaves.map((entry) => entry.leaf));
+    // A claim that landed after our read (a builder whose lease ran out)
+    // would be outside the tree: then the anchor is not marked built, and
+    // the next takeover builds it with that claim (review round 3, L-1).
+    const recount = await this.leafModel
+      .countDocuments({ anchorId: day })
+      .exec();
+    if (recount !== leaves.length) return { state: 'busy' };
     const done = await this.anchorModel
       .updateOne(owned, {
         $set: {

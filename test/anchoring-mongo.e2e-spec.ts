@@ -46,6 +46,7 @@ import { MemberPageEditorService } from '../src/members/member-page-editor.servi
 import { MembersService } from '../src/members/members.service';
 import { OrgPagesService } from '../src/members/org-pages/org-pages.service';
 import { ReceiptsService } from '../src/members/receipts/receipts.service';
+import { SuggestionsService } from '../src/members/comments/suggestions.service';
 import { VoteTalliesService } from '../src/members/votes/vote-tallies.service';
 import { BlockVersionsService } from '../src/social/block-versions.service';
 import { CommentVersionsService } from '../src/social/comment-versions.service';
@@ -632,6 +633,9 @@ describeWithMongo(
     let writers: CommentWritersService;
     let comments: CommentsService;
     let receipts: ReceiptsService;
+    let suggestions: SuggestionsService;
+    let historyService: MemberHistoryService;
+    let editorService: MemberPageEditorService;
     const viewer = (userId?: string) => members.resolveViewer(request(userId));
     const writer = (userId: string): Promise<CommentWriter> =>
       writers.requireWriter(request(userId));
@@ -727,6 +731,61 @@ describeWithMongo(
       );
       verifier.trustedRoots = [tsa.root];
       receipts = new ReceiptsService(history, comments, verifier, authors);
+      historyService = history;
+      editorService = editor;
+      suggestions = new SuggestionsService(
+        m.Comment,
+        m.SocialProfile,
+        m.ProfileBlock,
+        m.BlockVersion,
+        new CommentStore(m.Comment),
+        comments,
+        editor,
+        new CommentVersionsService(m.CommentVersion),
+      );
+    });
+
+    it('round 3, MEDIUM-1: a nickname member’s accepted suggestion hides the hash material of every later version', async () => {
+      const { commentId } = await suggestions.suggest(await writer(U.anon), {
+        slug: 'open-page',
+        tabId: 'tab_b',
+        text: 'A synthetic suggested wording.',
+        baseSeq: 1,
+      });
+      await suggestions.accept(U.owner, commentId);
+      await editorService.editTabText(U.owner, 'tab_b', 'Edited again.', 2);
+      // Not anchored here: the day's anchor belongs to the next test. The
+      // hashes are withheld whatever the anchoring state.
+      const owner = await viewer(U.owner);
+      for (const seq of [3, 2]) {
+        const [version] = (
+          await receipts.belief('open-page', 'tab_b', owner, 'text', seq)
+        ).versions;
+        expect([
+          version.versionHash,
+          version.prevHash,
+          version.salt,
+          version.hashInput.included,
+        ]).toEqual([undefined, undefined, undefined, false]);
+      }
+      const history = await historyService.tabHistory(
+        'open-page',
+        'tab_b',
+        owner,
+      );
+      expect(history.entries.map((e) => [e.seq, e.hash !== undefined])).toEqual(
+        [
+          [3, false],
+          [2, false],
+          [1, true],
+        ],
+      );
+      const admin = await receipts.belief(
+        'open-page',
+        'tab_b',
+        await viewer(U.admin),
+      );
+      expect(admin.versions[0].hashInput.included).toBe(true);
     });
 
     afterAll(async () => {

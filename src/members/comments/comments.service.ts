@@ -796,9 +796,13 @@ export class CommentsService {
     );
     // The hash prefix would let a reader test a guessed author id: only for
     // a reader who may know the author (Chunk 16 review round 2, M-A).
-    const known = (
-      await this.authors.identifiable([comment.authorUserId], viewer)
-    )(comment.authorUserId);
+    // Every author on the comment's chain (review round 3, MEDIUM-1).
+    const people = [
+      comment.authorUserId,
+      ...(await this.versions.chainAuthors(commentId)),
+    ];
+    const knowable = await this.authors.identifiable(people, viewer);
+    const known = people.every(knowable);
     const skip = (page - 1) * COMMENT_HISTORY_PAGE_SIZE;
     const rows = await this.versions.page(
       commentId,

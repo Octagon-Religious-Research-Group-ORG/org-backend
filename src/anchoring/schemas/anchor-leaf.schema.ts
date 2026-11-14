@@ -69,6 +69,10 @@ export class AnchorLeaf {
   })
   salt: string;
 
+  /** The lease of the builder that wrote this claim (review round 3, L-1). */
+  @Prop({ type: String, immutable: true })
+  leaseId?: string;
+
   /** The version's own server time. */
   @Prop({ type: Date, required: true, immutable: true })
   versionCreatedAt: Date;

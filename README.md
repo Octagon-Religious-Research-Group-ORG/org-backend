@@ -375,8 +375,10 @@ are labelled as being for that page only. Coverage is over every version.
 Beside them, cheap counts over EVERY anchor: how many exist, how many are
 unfinished (still building, FreeTSA not granted, or OpenTimestamps not yet
 accepted), how many failed a check when last checked, and how many were never
-checked. Each anchor's last check is stored on it when its page is viewed, so
-"failed when last checked" is only as fresh as the last view of that page.
+checked, and how many could not be measured when last checked, with the
+date of the oldest stored check. Each anchor's last check is stored on it
+when its page is viewed, so these are only as fresh as the last view of that
+page; the oldest date shows how stale they may be.
 
 Checking the Bitcoin part yourself, as measured on 2026-11-14 with the
 reference JavaScript client (`opentimestamps` 0.4.9) on a proof our calendars
@@ -418,7 +420,19 @@ could confirm the author offline with one SHA-256. Three levels:
   from the text to the hash needs the author's complete receipt.
 - **Leaf only** (text, time, salted leaf, path, both proofs): everyone else.
   The leaf cannot be tested against a guess without the salt; the receipt
-  says it proves only that the version's sealed fingerprint existed by then. The same rule now hides the 12-character
+  says it proves only that the version's sealed fingerprint existed by then.
+
+**The whole chain counts.** Version k's hash commits to versions 1..k
+through `prevHash`, and a reader knows every other input of later versions
+(text, time, block or comment id, seq: all public). So any hash material of
+version k, or a history hash prefix of it, lets them test a guess about the
+author or suggester of ANY earlier version. Hash material for version k is
+therefore given only when every person (author and suggester) on versions
+1..k of that chain may be known to the reader (or is the reader, an admin,
+or a system record); otherwise version k is "leaf only" for them, even for
+its own author. Example: an owner who accepted a rewording from a member
+with a nickname gets no hash material for that version or any later one;
+an admin still does. The same rule now hides the 12-character
 hash prefixes in belief and comment HISTORY (from Chunks 8 and 9) from readers
 who may not know the author.
 

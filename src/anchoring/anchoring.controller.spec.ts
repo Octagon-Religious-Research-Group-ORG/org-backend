@@ -40,7 +40,7 @@ describe('AdminAnchorsController', () => {
     expect(view.coverage.outcome).toBe('pass');
     expect(view.totals.root.pass).toBe(1);
     expect(view.totalsScope).toBe('page');
-    expect(view.global).toEqual({
+    expect(view.global).toMatchObject({
       anchors: 2,
       unfinished: 1,
       failedWhenLastChecked: 0,

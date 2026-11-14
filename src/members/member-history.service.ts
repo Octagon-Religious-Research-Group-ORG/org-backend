@@ -119,8 +119,11 @@ function shortHash(hash: string) {
  * @param label - an imported outline label, for a first version only: from
  *   the first edit on, the label is part of the text itself
  */
-/** Who may get a version's hash prefix (see `HistoryEntry.hash`). */
-type Known = (userId: string | undefined) => boolean;
+/**
+ * May this reader get this version's hash prefix (see `HistoryEntry.hash`)?
+ * Only when every person on its chain up to it may be known to them.
+ */
+type Known = (row: VersionRow) => boolean;
 
 function entryOf(
   row: VersionRow,
@@ -132,9 +135,7 @@ function entryOf(
     seq: row.seq,
     savedAt: row.createdAt.toISOString(),
     text: editorText([{ label, text: row.text }]),
-    ...(known(row.authorUserId) && known(row.suggestedBy)
-      ? { hash: shortHash(row.hash) }
-      : {}),
+    ...(known(row) ? { hash: shortHash(row.hash) } : {}),
     source: versionSource(row.authorUserId),
     beforeFirstEdit: false,
     ...(row.suggestionId
@@ -318,7 +319,7 @@ export class MemberHistoryService {
     if (blocks.length === 1) {
       const rows = await this.versions({ blockId: first.blockId }, skip, 1);
       const authorOf = await this.suggesters(rows, viewer);
-      const known = await this.knownAuthors(rows, viewer);
+      const known = await this.knownChains(rows, viewer);
       return {
         entries: rows
           .slice(0, HISTORY_PAGE_SIZE)
@@ -339,7 +340,7 @@ export class MemberHistoryService {
     const editCount = await this.versionModel.countDocuments(edits).exec();
     const rows = await this.versions(edits, skip, 0);
     const authorOf = await this.suggesters(rows, viewer);
-    const known = await this.knownAuthors(rows, viewer);
+    const known = await this.knownChains(rows, viewer);
     const entries = rows.map((row) => entryOf(row, authorOf, known));
     // The earlier text is entry number `editCount` (0-based), the last one.
     if (skip <= editCount && editCount < skip + HISTORY_PAGE_SIZE) {
@@ -405,11 +406,43 @@ export class MemberHistoryService {
    * as one entry. Imported if any of them was imported.
    */
   /** Which of these rows' authors (and suggesters) this reader may know. */
-  private knownAuthors(rows: VersionRow[], viewer: Viewer) {
-    return this.authors.identifiable(
-      rows.flatMap((row) => [row.authorUserId, row.suggestedBy]),
+  /**
+   * For each row, whether every person on its block's chain up to it may
+   * be known to this reader (review round 3, MEDIUM-1): a hash prefix of
+   * version m lets a reader who knows every other input chain a guess about
+   * any earlier version's author forward and compare. One read per chain.
+   */
+  private async knownChains(
+    rows: VersionRow[],
+    viewer: Viewer,
+  ): Promise<Known> {
+    type Person = { seq: number; authorUserId?: string; suggestedBy?: string };
+    const chains = new Map<string, Person[]>();
+    for (const blockId of new Set(rows.map((row) => row.blockId))) {
+      const upTo = Math.max(
+        ...rows.filter((row) => row.blockId === blockId).map((row) => row.seq),
+      );
+      chains.set(
+        blockId,
+        await this.versionModel
+          .find({ blockId, seq: { $lte: upTo } })
+          .select({ seq: 1, authorUserId: 1, suggestedBy: 1 })
+          .lean()
+          .exec(),
+      );
+    }
+    const known = await this.authors.identifiable(
+      [...chains.values()]
+        .flat()
+        .flatMap((person) => [person.authorUserId, person.suggestedBy]),
       viewer,
     );
+    return (row) =>
+      (chains.get(row.blockId) as Person[])
+        .filter((person) => person.seq <= row.seq)
+        .every(
+          (person) => known(person.authorUserId) && known(person.suggestedBy),
+        );
   }
 
   private async earlierText(
@@ -432,11 +465,15 @@ export class MemberHistoryService {
     const imported = parts.some(
       ({ row }) => versionSource(row.authorUserId) === 'imported',
     );
-    const known = await this.knownAuthors(
-      parts.map(({ row }) => row),
+    // Each paragraph's first version is its own chain; its suggester counts
+    // as much as its author (review round 3, L-3).
+    const known = await this.authors.identifiable(
+      parts.flatMap(({ row }) => [row.authorUserId, row.suggestedBy]),
       viewer,
     );
-    const shown = parts.every(({ row }) => known(row.authorUserId));
+    const shown = parts.every(
+      ({ row }) => known(row.authorUserId) && known(row.suggestedBy),
+    );
     return {
       seq: 1,
       savedAt: new Date(latest).toISOString(),

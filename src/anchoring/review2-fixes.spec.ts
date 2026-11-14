@@ -146,7 +146,7 @@ describe('M-C: the health view says what it covered', () => {
     await m.anchors.create({ _id: '2026-11-01', status: 'building' });
     const health = await verifierFor(m, tsa).verifyAll(D1);
     expect(health.totalsScope).toBe('page');
-    expect(health.global).toEqual({
+    expect(health.global).toMatchObject({
       anchors: 2,
       unfinished: 1,
       failedWhenLastChecked: 0,

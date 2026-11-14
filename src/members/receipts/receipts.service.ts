@@ -48,21 +48,26 @@ export class ReceiptsService {
       id.startsWith('system:') ||
       viewer.isAdmin ||
       viewer.userId === id;
-    const known = await this.authors.identifiable(
-      [record.authorUserId, record.suggestedBy],
-      viewer,
+    // Version k's hash commits to versions 1..k, so its hash material can
+    // test a guess about ANY person on that chain: all of them must be
+    // knowable to this reader (review round 3, MEDIUM-1).
+    const people = await this.verifier.chainPeople(
+      kind,
+      record.key,
+      record.seq,
     );
+    const known = await this.authors.identifiable(people, viewer);
+    const chainKnown = people.every(known);
     return {
       kind,
       record,
       ...(label ? { label } : {}),
       proof: await this.verifier.proveVersion(kind, record),
-      disclose:
-        full(record.authorUserId) && full(record.suggestedBy)
+      disclose: !chainKnown
+        ? 'none'
+        : full(record.authorUserId) && full(record.suggestedBy)
           ? 'full'
-          : known(record.authorUserId) && known(record.suggestedBy)
-            ? 'hashes'
-            : 'none',
+          : 'hashes',
     };
   }
 

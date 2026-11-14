@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from 'fflate';
 import type { Check, VersionProof } from './anchor-verifier.service';
 import { FREETSA_ROOT_PEM, FREETSA_TSA_PEM } from './freetsa-certs';
-import { MERKLE_SCHEME, nodeHash } from './merkle';
+import { nodeHash } from './merkle';
 import type { AnchoredKind } from './schemas/anchor-leaf.schema';
 import { canonicalOf, type VersionRecord } from './version-records';
 
@@ -207,7 +207,8 @@ function versionOf(
       ? {
           state: 'anchored',
           anchorId: proof.anchorId,
-          merkleScheme: MERKLE_SCHEME,
+          // The anchor's own stored scheme (review round 3, L-2).
+          merkleScheme: proof.anchor.scheme ?? 'unrecorded',
           leaf: proof.leaf,
           path: proof.path,
           root: proof.root,
