@@ -23,6 +23,11 @@ import {
 import { OtsProvider, TsaProvider } from './providers';
 import { parseTimestampResponse, tokenImprint } from './rfc3161';
 import {
+  AnchorRunLock,
+  type AnchorRunLockDocument,
+  RUN_LOCK_ID,
+} from './schemas/anchor-run-lock.schema';
+import {
   AnchorLeaf,
   type AnchorLeafDocument,
   type AnchoredKind,
@@ -72,6 +77,12 @@ interface ReachBack {
 export const MAX_LEAVES = 50_000;
 /** How long a builder holds a day's anchor. */
 export const BUILD_LEASE_MS = 10 * MINUTE_MS;
+
+/**
+ * The run lock's lease (review round 7). Renewed before every step, so it
+ * runs out only when a run stops making progress for this long.
+ */
+export const RUN_LEASE_MS = 10 * MINUTE_MS;
 /** How long one provider step holds its anchor. */
 export const STEP_LEASE_MS = 5 * MINUTE_MS;
 /** How often a pending OpenTimestamps proof is asked about (etiquette). */
@@ -167,6 +178,10 @@ export interface StepOutcome {
 }
 
 export interface RunReport {
+  /** Another run held the lock: this one did nothing (review round 7). */
+  busy?: true;
+  /** This run lost its lock part-way and stopped before its next step. */
+  interrupted?: true;
   /** Builds of earlier days that had died part-way, finished now (review H1). */
   resumed: BuildOutcome[];
   /** Finished anchors whose claims outside their tree were released now. */
@@ -217,7 +232,12 @@ export class AnchoringService {
     private readonly commentVersionModel: Model<CommentVersionDocument>,
     private readonly tsa: TsaProvider,
     private readonly ots: OtsProvider,
+    @InjectModel(AnchorRunLock.name)
+    private readonly lockModel: Model<AnchorRunLockDocument>,
   ) {}
+
+  /** The lock's clock: real time, whatever `now` a run is given. */
+  lockClock = () => new Date();
 
   get enabled() {
     return this.tsa.settings.enabled;
@@ -229,17 +249,114 @@ export class AnchoringService {
    * OpenTimestamps upgrades.
    */
   async run(now = new Date(), force = false): Promise<RunReport> {
-    const resumed = await this.resumeStale(now);
-    const released = await this.sweepStray(now);
-    const build = await this.build(now, force);
-    const report: RunReport = { resumed, released, build, tsa: [], ots: [] };
-    for (const id of await this.due('tsa', now)) {
-      report.tsa.push({ anchorId: id, outcome: await this.stampTsa(id, now) });
+    const report: RunReport = {
+      resumed: [],
+      released: [],
+      build: { state: 'busy' },
+      tsa: [],
+      ots: [],
+    };
+    // One run at a time, across every caller and instance (round 7).
+    const holder = await this.acquireLock();
+    if (!holder) return { busy: true, ...report };
+    try {
+      // Each step runs only while the lock is still ours, renewing it; a
+      // run that lost it does nothing more.
+      const step = async (work: () => Promise<void>) => {
+        if (report.interrupted) return;
+        if (!(await this.renewLock(holder))) {
+          this.logger.error(
+            'Anchoring run lost the anchoring lock to another run; it stopped before its next step.',
+          );
+          report.interrupted = true;
+          return;
+        }
+        await work();
+      };
+      await step(async () => {
+        report.resumed = await this.resumeStale(now);
+      });
+      await step(async () => {
+        report.released = await this.sweepStray(now);
+      });
+      await step(async () => {
+        report.build = await this.build(now, force);
+      });
+      for (const kind of ['tsa', 'ots'] as const) {
+        for (const id of await this.due(kind, now)) {
+          await step(async () => {
+            report[kind].push({
+              anchorId: id,
+              outcome:
+                kind === 'tsa'
+                  ? await this.stampTsa(id, now)
+                  : await this.stampOts(id, now),
+            });
+          });
+        }
+      }
+      return report;
+    } finally {
+      await this.releaseLock(holder);
     }
-    for (const id of await this.due('ots', now)) {
-      report.ots.push({ anchorId: id, outcome: await this.stampOts(id, now) });
+  }
+
+  /** Takes the run lock, or returns undefined while a live run holds it. */
+  private async acquireLock(): Promise<string | undefined> {
+    const holder = randomUUID();
+    const at = this.lockClock();
+    try {
+      await this.lockModel
+        .updateOne(
+          {
+            _id: RUN_LOCK_ID,
+            $or: [{ until: { $exists: false } }, { until: { $lt: at } }],
+          } as QueryFilter<AnchorRunLock>,
+          {
+            $set: {
+              holder,
+              until: new Date(at.getTime() + RUN_LEASE_MS),
+            },
+          },
+          { upsert: true },
+        )
+        .exec();
+    } catch (error) {
+      // Held: the filter missed the live document, so the upsert collided.
+      if (isDuplicateKey(error)) return undefined;
+      throw error;
     }
-    return report;
+    const mine = await this.lockModel
+      .findOne({ _id: RUN_LOCK_ID, holder })
+      .select({ _id: 1 })
+      .lean()
+      .exec();
+    return mine ? holder : undefined;
+  }
+
+  /** Extends the lease; false when another run holds the lock now. */
+  private async renewLock(holder: string): Promise<boolean> {
+    const done = await this.lockModel
+      .updateOne(
+        { _id: RUN_LOCK_ID, holder },
+        {
+          $set: {
+            until: new Date(this.lockClock().getTime() + RUN_LEASE_MS),
+          },
+        },
+      )
+      .exec();
+    return done.matchedCount === 1;
+  }
+
+  /** Frees the lock if it is still ours. */
+  private async releaseLock(holder: string): Promise<void> {
+    await this.lockModel
+      .updateOne(
+        { _id: RUN_LOCK_ID, holder },
+        { $unset: { holder: 1, until: 1 } },
+      )
+      .exec();
   }
 
   /** Today's batch, if due and not made yet. */
@@ -484,6 +601,8 @@ export class AnchoringService {
         $or: [
           { _id: { $gte: since } },
           { 'lastCheck.outcome': { $in: ['fail', 'cannot-measure'] } },
+          // A release that died after its delete (round 7, LOW-2).
+          { rescanFrom: { $exists: true }, rescanToken: { $exists: false } },
         ],
       } as AnchorFilter)
       .select({
@@ -806,8 +925,13 @@ export class AnchoringService {
       .deleteMany(stray)
       .setOptions({ [RELEASE_STRAY_CLAIMS]: true })
       .exec();
+    // The same bounds again with the token: a covering build that cleared
+    // the point between the first write and the delete (it had read the
+    // old token) cannot make these versions lose it (round 7, LOW-1).
     await this.anchorModel
       .updateOne({ _id: day } as AnchorFilter, {
+        $min: { rescanFrom: oldest.versionCreatedAt },
+        $max: { rescanTo: newest.versionCreatedAt },
         $set: { rescanToken: randomUUID() },
       })
       .exec();

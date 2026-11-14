@@ -295,6 +295,15 @@ time-stamps for its root: an RFC 3161 token from **FreeTSA** and an
 **OpenTimestamps** proof (Bitcoin). Only the 32-byte root leaves the server,
 then the calendars' own commitments when a pending proof is upgraded.
 
+**One run at a time.** Every run (the hourly scheduler, an admin's
+`POST /api/v1/admin/anchors/run`, any server instance) first takes a single
+lock document (`anchorrunlocks`, `_id: anchoring-run`) under a 10-minute
+lease it renews before each step. A run that finds it held does nothing and
+reports `busy: true` (the admin view says so); a run that loses it part-way
+stops before its next step and reports `interrupted: true`; a holder that
+died is taken over once its lease runs out. The per-anchor leases stay as a
+second line of defence.
+
 **Version hash** (unchanged since Chunks 3 and 9). SHA-256 of the UTF-8 bytes
 of `JSON.stringify([scheme, id, seq, text, authorUserId, createdAt, prevHash])`,
 JavaScript's JSON with no spaces, `createdAt` as ISO-8601 UTC with
@@ -368,7 +377,9 @@ anchor and reports each as pass / fail / cannot-measure: the leaves rebuild
 the stored root; every leaf's version exists, its fields still give its hash,
 and that hash is the anchored one; the FreeTSA token verifies for the root;
 the `.ots` proof commits to the root and holds at least one attestation
-(one that commits but attests nothing is "cannot measure"). Whether the
+(one that commits but attests nothing is "cannot measure"). An empty anchor
+(nothing to anchor that day) passes as "nothing to anchor" unless it holds
+a claim or a reach-back point. Whether the
 Bitcoin block itself contains the proof is always "cannot measure" here (no
 Bitcoin node). The view is paged, 30 anchors a page (`?page=`); its totals
 are labelled as being for that page only. Coverage is over every version.

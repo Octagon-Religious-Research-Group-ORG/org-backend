@@ -1,6 +1,7 @@
 import type { Schema } from 'mongoose';
 import { AdminInboxEntrySchema } from '../admin-inbox/schemas/admin-inbox.schema';
 import { AnchorLeafSchema } from '../anchoring/schemas/anchor-leaf.schema';
+import { AnchorRunLockSchema } from '../anchoring/schemas/anchor-run-lock.schema';
 import { TimestampAnchorSchema } from '../anchoring/schemas/timestamp-anchor.schema';
 import { ConsentRecordSchema } from '../membership/schemas/consent-record.schema';
 import { MemberContactsSchema } from '../membership/schemas/member-contacts.schema';
@@ -68,4 +69,5 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'SearchFragmentPair', schema: SearchFragmentPairSchema },
     { name: 'TimestampAnchor', schema: TimestampAnchorSchema },
     { name: 'AnchorLeaf', schema: AnchorLeafSchema },
+    { name: 'AnchorRunLock', schema: AnchorRunLockSchema },
   ];

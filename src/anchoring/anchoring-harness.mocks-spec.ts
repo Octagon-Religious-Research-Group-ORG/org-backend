@@ -26,6 +26,8 @@ export interface AnchorModels {
   leaves: FakeModel & Extra;
   blocks: FakeModel & Extra;
   comments: FakeModel & Extra;
+  /** The run lock (review round 7); made on first use when absent. */
+  locks?: FakeModel;
 }
 
 interface Extra {
@@ -179,6 +181,8 @@ export function addCommentVersion(
  */
 export function offlineAnchoring(m: AnchorModels, tsa: TestTsa) {
   const settings = { enabled: true, hourUtc: 0 };
+  // Shared by every service on these models, as one collection would be.
+  m.locks ??= fakeModel([], { unique: [['_id']] });
   const service = new AnchoringService(
     m.anchors as never,
     m.leaves as never,
@@ -207,6 +211,7 @@ export function offlineAnchoring(m: AnchorModels, tsa: TestTsa) {
         ),
       upgrade: () => Promise.resolve({ state: 'pending' }),
     } as never,
+    m.locks as never,
   );
   service.retryPauseMs = 0;
   return service;

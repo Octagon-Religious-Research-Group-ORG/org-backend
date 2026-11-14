@@ -15,6 +15,10 @@ import { AnchoringService } from './anchoring.service';
 import { OtsProvider, TsaProvider } from './providers';
 import { AnchorLeaf, AnchorLeafSchema } from './schemas/anchor-leaf.schema';
 import {
+  AnchorRunLock,
+  AnchorRunLockSchema,
+} from './schemas/anchor-run-lock.schema';
+import {
   TimestampAnchor,
   TimestampAnchorSchema,
 } from './schemas/timestamp-anchor.schema';
@@ -30,6 +34,7 @@ import {
     MongooseModule.forFeature([
       { name: TimestampAnchor.name, schema: TimestampAnchorSchema },
       { name: AnchorLeaf.name, schema: AnchorLeafSchema },
+      { name: AnchorRunLock.name, schema: AnchorRunLockSchema },
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: CommentVersion.name, schema: CommentVersionSchema },
     ]),

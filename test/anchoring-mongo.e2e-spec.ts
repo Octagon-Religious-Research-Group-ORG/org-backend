@@ -124,6 +124,7 @@ function anchoringOn(
       },
       upgrade: p.upgrade,
     } as never,
+    m.AnchorRunLock,
   );
   service.retryPauseMs = 0;
   return service;
@@ -428,6 +429,26 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
     expect(first.leafCount).toBe(
       await m.AnchorLeaf.countDocuments({ anchorId: anchorDay(days[0]) }),
     );
+  });
+
+  it('round 7: two concurrent runs on one database, and only one does the work', async () => {
+    await blockVersion(m);
+    const at = soon();
+    const p1 = fresh();
+    const p2 = fresh();
+    const reports = await Promise.all([
+      anchoringOn(m, tsa, p1).run(at),
+      anchoringOn(m, tsa, p2).run(at),
+    ]);
+    expect(reports.filter((report) => report.busy === true)).toHaveLength(1);
+    const worked = reports.find((report) => report.busy !== true)!;
+    expect(worked.build).toMatchObject({ state: 'built', leaves: 1 });
+    // Only the run that held the lock called a provider.
+    expect(p1.tsaCalls.length + p2.tsaCalls.length).toBe(1);
+    // The lock is free again afterwards.
+    const lock = await m.AnchorRunLock.findById('anchoring-run').lean();
+    expect(lock.holder).toBeUndefined();
+    expect((await anchoringOn(m, tsa, fresh()).run(at)).busy).toBeUndefined();
   });
 
   it('a version anchored the next day is never in today’s batch', async () => {

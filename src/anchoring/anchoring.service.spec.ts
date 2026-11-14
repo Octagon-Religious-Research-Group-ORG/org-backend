@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument -- in-memory fake rows */
 import { Logger } from '@nestjs/common';
+import { fakeModel } from '../test-support/fake-model.mocks-spec';
 import {
   addBlockVersion,
   addCommentVersion,
@@ -79,6 +80,7 @@ describe('AnchoringService', () => {
       m.comments as never,
       tsa as never,
       ots as never,
+      fakeModel([], { unique: [['_id']] }) as never,
     );
     service.retryPauseMs = 0;
   });
@@ -115,6 +117,7 @@ describe('AnchoringService', () => {
       empty.comments as never,
       tsa as never,
       ots as never,
+      fakeModel([], { unique: [['_id']] }) as never,
     );
     expect(await idle.run(NOW)).toEqual({
       resumed: [],

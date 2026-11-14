@@ -51,7 +51,7 @@ export const HASHES_RECEIPT_NOTICE = [
  * version with no anchor yet has no time-stamp, so none may be claimed.
  */
 const PENDING =
-  'It has no time-stamp yet: until the next daily anchor it proves nothing about when this version existed. Download it again after that.';
+  'It has no time-stamp yet: until one arrives (normally within a day of the daily anchor) it proves nothing about when this version existed. Download it again after that.';
 
 /** A complete receipt while anchoring is pending. */
 export const RECEIPT_PENDING_NOTICE = [
@@ -74,6 +74,42 @@ export const HASHES_PENDING_RECEIPT_NOTICE = [
   'The step from the text below to that hash needs the author’s complete receipt: the hash also covers the author’s account id, which only the author and ORG admins receive.',
   ...LIMITS,
 ];
+
+/** Which time-stamps every anchored version of a receipt holds. */
+export type Stamps = 'both' | 'freetsa' | 'opentimestamps';
+
+const BOTH = 'the two independent time-stamps give';
+
+/** How a notice names the time-stamps it holds (review round 7, LOW-3). */
+const STAMP_PHRASE: Record<Stamps, string> = {
+  both: BOTH,
+  freetsa:
+    'the FreeTSA time-stamp gives (the OpenTimestamps proof is not in yet)',
+  opentimestamps:
+    'the OpenTimestamps proof gives (the FreeTSA time-stamp is not in yet)',
+};
+
+/** One of the three stamped notices, naming exactly the stamps held. */
+function stamped(notice: readonly string[], stamps: Stamps): string[] {
+  return notice.map((line) => line.replace(BOTH, STAMP_PHRASE[stamps]));
+}
+
+/**
+ * The stamps EVERY version holds: a version not anchored, or anchored with
+ * neither proof received yet, has none (review round 7, LOW-3).
+ */
+function stampsOf(versions: readonly ReceiptVersion[]): Stamps | undefined {
+  let tsa = true;
+  let ots = true;
+  for (const version of versions) {
+    if (version.anchor.state !== 'anchored') return undefined;
+    tsa &&= version.anchor.freetsa.responseBase64 !== undefined;
+    ots &&= version.anchor.opentimestamps.proofBase64 !== undefined;
+  }
+  if (tsa && ots) return 'both';
+  if (tsa) return 'freetsa';
+  return ots ? 'opentimestamps' : undefined;
+}
 
 /** How much of the hash material a reader gets (Chunk 16 rounds 2 and 3). */
 export type Disclosure = 'full' | 'hashes' | 'none';
@@ -333,24 +369,23 @@ export function buildReceipt(
   now = new Date(),
 ): Receipt {
   const versions = inputs.map((input) => versionOf(input, reader));
-  // Chosen the way the receipt panel chooses its wording (round 4, LOW-2).
-  const anchored = versions.every(
-    (version) => version.anchor.state === 'anchored',
-  );
+  // Chosen the way the receipt panel chooses its wording (round 4, LOW-2):
+  // pending unless every version is anchored AND holds a stamp (round 7).
+  const stamps = stampsOf(versions);
   return {
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
     notice: versions.some((version) => version.disclosure === 'none')
-      ? anchored
-        ? PARTIAL_RECEIPT_NOTICE
+      ? stamps
+        ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
         : PARTIAL_PENDING_RECEIPT_NOTICE
       : versions.some((version) => version.disclosure === 'hashes')
-        ? anchored
-          ? HASHES_RECEIPT_NOTICE
+        ? stamps
+          ? stamped(HASHES_RECEIPT_NOTICE, stamps)
           : HASHES_PENDING_RECEIPT_NOTICE
-        : anchored
-          ? RECEIPT_NOTICE
+        : stamps
+          ? stamped(RECEIPT_NOTICE, stamps)
           : RECEIPT_PENDING_NOTICE,
     versions,
     howToVerify: versions.flatMap((version, index) => [

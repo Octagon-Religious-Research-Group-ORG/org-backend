@@ -182,12 +182,12 @@ describe('AnchorVerifierService', () => {
     expect(health.totals.tsa['cannot-measure']).toBe(1);
   });
 
-  it('a building or empty anchor has nothing to verify yet, and says so', async () => {
+  it('a building anchor has nothing to verify yet, an empty one had nothing to anchor, and each says so', async () => {
     await m.anchors.create({ _id: '2026-11-15', status: 'building' });
     await m.anchors.create({ _id: '2026-11-16', status: 'empty' });
     const { anchors } = await verify();
     expect(anchors.map((a) => [a.anchorId, a.root.detail])).toEqual([
-      ['2026-11-16', 'anchor holds no version'],
+      ['2026-11-16', 'nothing to anchor'],
       ['2026-11-15', 'still being built'],
       ['2026-11-14', 'the leaves rebuild the stored root'],
     ]);

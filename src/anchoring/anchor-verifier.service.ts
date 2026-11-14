@@ -342,6 +342,17 @@ export class AnchorVerifierService {
     };
   }
 
+  /** An empty anchor with no claim and no reach-back point on it. */
+  private async nothingOn(anchor: TimestampAnchor): Promise<boolean> {
+    if (anchor.rescanFrom !== undefined || anchor.resumeOpen === true) {
+      return false;
+    }
+    return (
+      (await this.leafModel.countDocuments({ anchorId: anchor._id }).exec()) ===
+      0
+    );
+  }
+
   /** Every check on one anchor row. */
   async verifyAnchor(stored: TimestampAnchor): Promise<AnchorReport> {
     const anchor = withBytes(stored);
@@ -351,10 +362,22 @@ export class AnchorVerifierService {
       status: anchor.status,
       leaves: leaves.length,
     };
+    if (anchor.status === 'empty' && (await this.nothingOn(anchor))) {
+      // Nothing to anchor that day: a pass, not noise (review round 7).
+      const nothing = pass('nothing to anchor');
+      return {
+        ...base,
+        root: nothing,
+        versions: nothing,
+        tsa: nothing,
+        ots: nothing,
+        bitcoin: nothing,
+      };
+    }
     if (anchor.status !== 'built') {
       const note = unknown(
         anchor.status === 'empty'
-          ? 'anchor holds no version'
+          ? 'empty, but it holds claims or a reach-back point'
           : 'still being built',
       );
       return {

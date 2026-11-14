@@ -302,17 +302,6 @@ function issuerAndSerial(certDer: Buffer) {
 }
 
 /**
- * Checks a time-stamp token completely: its structure, that it time-stamps
- * `digest` with SHA-256, that its signature is valid, that the signer is the
- * certificate the token names, that the signer may sign time stamps, was
- * valid at the stamped time, and chains to one of `roots`.
- *
- * @param token - the TimeStampToken (CMS ContentInfo), DER
- * @param digest - the expected message imprint, hex
- * @param roots - pinned trust anchors (FreeTSA's root certificate)
- * @param nonce - the request's nonce, hex, when it must be echoed
- */
-/**
  * The message imprint a time-stamp token commits to, lowercase hex, read
  * WITHOUT checking its signature (review round 6, L2: only to tell whether
  * a stored tree still matches the token it was stamped with).
@@ -325,6 +314,17 @@ export function tokenImprint(token: Uint8Array): string {
   return readTstInfo(octets(kids(eContentWrap)[0])).imprint;
 }
 
+/**
+ * Checks a time-stamp token completely: its structure, that it time-stamps
+ * `digest` with SHA-256, that its signature is valid, that the signer is the
+ * certificate the token names, that the signer may sign time stamps, was
+ * valid at the stamped time, and chains to one of `roots`.
+ *
+ * @param token - the TimeStampToken (CMS ContentInfo), DER
+ * @param digest - the expected message imprint, hex
+ * @param roots - pinned trust anchors (FreeTSA's root certificate)
+ * @param nonce - the request's nonce, hex, when it must be echoed
+ */
 export function verifyTimestampToken(
   token: Uint8Array,
   digest: string,
