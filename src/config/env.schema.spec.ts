@@ -105,10 +105,13 @@ describe('member notifications (Chunk 14)', () => {
       { EMAIL_DAILY_LIMIT: '10', EMAIL_IMMEDIATE_RESERVE: '10' },
       { NOTIFICATION_SIGNING_SECRET: 'short' },
       { DIGEST_HOUR_UTC: '24' },
-      { PUBLIC_API_URL: 'not a url' },
     ]) {
       expect(validate({ ...required, ...env }).error).toBeDefined();
     }
+    // A bad PUBLIC_API_URL never stops the site: logged and ignored instead.
+    expect(
+      validate({ ...required, PUBLIC_API_URL: 'not a url' }).error,
+    ).toBeUndefined();
     expect(
       validate({
         ...required,

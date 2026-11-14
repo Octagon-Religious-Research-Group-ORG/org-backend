@@ -19,10 +19,43 @@ export interface NotificationConfig {
   digestHourUtc: number;
   /** Where links in emails point (the website). */
   publicAppUrl: string;
-  /** This backend's public address, for one-click unsubscribe; optional. */
+  /**
+   * This backend's public address (its origin, without `/api/v1`), for
+   * one-click unsubscribe; optional.
+   */
   publicApiUrl?: string;
+  /** Why a configured PUBLIC_API_URL was not used (logged at start-up). */
+  publicApiUrlProblem?: string;
   /** Key for unsubscribe links. */
   signingKey: Buffer;
+}
+
+/**
+ * Reads PUBLIC_API_URL in any of its likely forms: with or without a
+ * trailing slash, with or without `/api/v1` (Chunk 14 review L11).
+ *
+ * @returns the address without `/api/v1` and without a trailing slash, or
+ *   why it cannot be used
+ */
+export function normalisePublicApiUrl(raw: string): {
+  url?: string;
+  problem?: string;
+} {
+  const trimmed = raw
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/api\/v1$/i, '')
+    .replace(/\/+$/, '');
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { problem: 'it is not a web address' };
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return { problem: 'it is not a web address (http or https)' };
+  }
+  return { url: trimmed };
 }
 
 function numberOr(
@@ -59,7 +92,8 @@ export function readNotificationConfig(
     : createHmac('sha256', config.getOrThrow<string>('CLERK_SECRET_KEY'))
         .update('org-notifications-unsubscribe-v1')
         .digest();
-  const publicApiUrl = config.get<string>('PUBLIC_API_URL') || undefined;
+  const rawApiUrl = config.get<string>('PUBLIC_API_URL') || undefined;
+  const api = rawApiUrl ? normalisePublicApiUrl(rawApiUrl) : {};
   return {
     dailyLimit: numberOr(config, 'EMAIL_DAILY_LIMIT', site.dailyLimit),
     immediateReserve: numberOr(
@@ -71,7 +105,8 @@ export function readNotificationConfig(
     publicAppUrl: config
       .getOrThrow<string>('PUBLIC_APP_URL')
       .replace(/\/+$/, ''),
-    ...(publicApiUrl ? { publicApiUrl: publicApiUrl.replace(/\/+$/, '') } : {}),
+    ...(api.url ? { publicApiUrl: api.url } : {}),
+    ...(api.problem ? { publicApiUrlProblem: api.problem } : {}),
     signingKey,
   };
 }

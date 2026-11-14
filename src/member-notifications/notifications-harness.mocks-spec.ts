@@ -3,6 +3,7 @@
 // targets. Named so neither the build nor Jest treats it as code or a suite.
 import { Types } from 'mongoose';
 import { fakeConnection } from '../db/transactions.mocks-spec';
+import type { NoticeOutcome } from '../notifications/notifications.service';
 import { fakeModel } from '../test-support/fake-model.mocks-spec';
 import { DigestSender } from './digest-sender';
 import { EmailBudgetStore } from './email-budget.store';
@@ -66,9 +67,7 @@ export function harness(
   const mail = {
     state,
     noticesEnabled: jest.fn(() => state.enabled),
-    sendNotice: jest.fn(() =>
-      Promise.resolve<'sent' | 'failed' | 'skipped'>('sent'),
-    ),
+    sendNotice: jest.fn(() => Promise.resolve<NoticeOutcome>('sent')),
   };
   const directory = {
     holdersOf: jest.fn(() =>
@@ -111,7 +110,7 @@ export function harness(
       attempts: 0,
       refs: {},
       createdAt: new Date(NOW.getTime() - 60_000),
-      expiresAt: new Date(NOW.getTime() + 86_400_000),
+      expiresAt: new Date(NOW.getTime() + 29 * 86_400_000),
       ...row,
     };
     queue.docs.push(doc);

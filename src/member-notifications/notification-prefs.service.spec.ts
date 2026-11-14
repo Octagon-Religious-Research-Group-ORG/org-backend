@@ -72,6 +72,10 @@ describe('NotificationPrefsService (Chunk 14)', () => {
       userId: 'user_a',
       off: ['replies'],
       digest: false,
+    });
+    // Fields the change did not name are not written (review L6).
+    expect(model.docs[0]).not.toHaveProperty('adminImmediate');
+    expect(await service.get('user_a')).toMatchObject({
       immediate: true,
       adminImmediate: true,
     });
@@ -95,12 +99,18 @@ describe('NotificationPrefsService (Chunk 14)', () => {
       immediate: false,
       adminImmediate: false,
     });
+    // Turning several off at once.
+    await service.update('user_a', true, {
+      categories: { comments: false, adminEam: false },
+    });
+    expect((await service.get('user_a')).off.sort()).toEqual([
+      'adminEam',
+      'adminReports',
+      'comments',
+    ]);
     // An empty change keeps everything.
     await service.update('user_a', true, {});
-    expect(model.docs[0]).toMatchObject({
-      off: ['adminReports'],
-      digest: false,
-    });
+    expect(model.docs[0]).toMatchObject({ digest: false });
   });
 
   it('turns one category or one channel off from a link, twice the same', async () => {

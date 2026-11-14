@@ -1,12 +1,45 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
+import { EmailBudgetStore } from '../member-notifications/email-budget.store';
 import type { OrderDocument } from '../orders/schemas/order.schema';
 import {
   readSiteEnv,
   TEST_SITE_EMAIL_NOTICE,
   TEST_SITE_SUBJECT_PREFIX,
 } from '../config/site-env';
+
+/**
+ * What a member notification send came to (Chunk 14 review L2):
+ * - `sent`: Resend accepted it;
+ * - `refused`: Resend definitely did not send it (a 4xx answer other than
+ *   409, with Resend's own error body), so a retry may use a new key;
+ * - `unknown`: it may have been sent (timeout, network, 5xx, 409, anything
+ *   else), so a retry must use the SAME key;
+ * - `skipped`: sending is not configured.
+ */
+export type NoticeOutcome = 'sent' | 'refused' | 'unknown' | 'skipped';
+
+/** Anything shaped like an email address, out of a log line. */
+export function redactAddresses(text: string): string {
+  return text.replace(/[^\s@<>()"'`,;:]+@[^\s@<>()"'`,;:]+/g, '[address]');
+}
+
+/** Resend's error body for a request it definitely did not carry out. */
+function isRefusal(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { statusCode, name } = error as {
+    statusCode?: unknown;
+    name?: unknown;
+  };
+  return (
+    typeof name === 'string' &&
+    typeof statusCode === 'number' &&
+    statusCode >= 400 &&
+    statusCode < 500 &&
+    statusCode !== 409
+  );
+}
 
 @Injectable()
 export class NotificationsService {
@@ -20,7 +53,11 @@ export class NotificationsService {
   private readonly noticeClient?: Resend;
   private readonly noticeFrom?: string;
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    /** Counts order emails in the shared daily budget (Chunk 14 review L10). */
+    @Optional() private readonly budget?: EmailBudgetStore,
+  ) {
     const apiKey = config.get<string>('RESEND_API_KEY');
     this.from = config.get<string>('ORDER_FROM_EMAIL') || undefined;
     this.hostEmail =
@@ -55,8 +92,9 @@ export class NotificationsService {
     lines: string[];
     headers: Record<string, string>;
     idempotencyKey: string;
-  }): Promise<'sent' | 'failed' | 'skipped'> {
+  }): Promise<NoticeOutcome> {
     if (!this.noticeClient || !this.noticeFrom) return 'skipped';
+    let outcome: NoticeOutcome = 'unknown';
     try {
       const result = await this.noticeClient.emails.send(
         {
@@ -68,15 +106,31 @@ export class NotificationsService {
         },
         { idempotencyKey: message.idempotencyKey },
       );
-      if (result.error) throw new Error(result.error.message);
+      if (result.error) {
+        if (isRefusal(result.error)) outcome = 'refused';
+        throw new Error(result.error.message);
+      }
       return 'sent';
     } catch (error) {
       this.logger.error(
-        `Notification email failed (${message.idempotencyKey}): ${
-          error instanceof Error ? error.message : 'Unknown email error'
+        `Notification email ${outcome === 'refused' ? 'refused' : 'may not have been sent'} (${message.idempotencyKey}): ${redactAddresses(
+          error instanceof Error ? error.message : 'Unknown email error',
+        )}`,
+      );
+      return outcome;
+    }
+  }
+
+  /** Counts order emails; never stops one (Chunk 14 review L10). */
+  private async count(emails: number) {
+    try {
+      await this.budget?.record(emails);
+    } catch (error) {
+      this.logger.warn(
+        `Could not count order emails in the daily budget: ${
+          error instanceof Error ? error.message : String(error)
         }`,
       );
-      return 'failed';
     }
   }
 
@@ -104,6 +158,7 @@ export class NotificationsService {
       )
       .join('\n');
     const amount = (order.suggestedTotalCents / 100).toFixed(2);
+    await this.count(2);
 
     try {
       const [member, host] = await Promise.all([
@@ -158,6 +213,7 @@ export class NotificationsService {
 
   async sendStatusChanged(order: OrderDocument) {
     if (!this.resend || !this.from) return;
+    await this.count(1);
     try {
       await this.resend.emails.send(
         {

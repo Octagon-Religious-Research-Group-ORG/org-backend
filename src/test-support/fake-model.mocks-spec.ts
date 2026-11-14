@@ -128,10 +128,18 @@ function applyUpdate(doc: Doc, update: Doc, inserting = false) {
         const list = (getPath(doc, path) as unknown[]) ?? [];
         setPath(doc, path, [...list, copy(value)]);
       } else if (op === '$addToSet') {
-        const list = (getPath(doc, path) as unknown[]) ?? [];
-        if (!list.some((item) => compare(item, value) === 0)) {
-          setPath(doc, path, [...list, copy(value)]);
+        // `{ $each: [...] }` adds several, as MongoDB does.
+        const each =
+          isOperatorObject(value) && '$each' in (value as Doc)
+            ? ((value as Doc).$each as unknown[])
+            : [value];
+        let list = (getPath(doc, path) as unknown[]) ?? [];
+        for (const one of each) {
+          if (!list.some((item) => compare(item, one) === 0)) {
+            list = [...list, copy(one)];
+          }
         }
+        setPath(doc, path, list);
       } else if (op === '$pull') {
         const list = (getPath(doc, path) as Doc[]) ?? [];
         const match = sift(value as Filter);

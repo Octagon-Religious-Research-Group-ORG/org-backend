@@ -325,19 +325,95 @@ describe('NotificationsService', () => {
       const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
       const service = configuredService();
       mockSend.mockResolvedValueOnce({ data: null, error: { message: 'bad' } });
-      expect(await service.sendNotice(notice)).toBe('failed');
+      expect(await service.sendNotice(notice)).toBe('unknown');
       mockSend.mockRejectedValueOnce('odd');
-      expect(await service.sendNotice(notice)).toBe('failed');
+      expect(await service.sendNotice(notice)).toBe('unknown');
       expect(logged).toHaveBeenCalledWith(
-        'Notification email failed (org-digest-1-0): bad',
+        'Notification email may not have been sent (org-digest-1-0): bad',
       );
       expect(logged).toHaveBeenCalledWith(
-        'Notification email failed (org-digest-1-0): Unknown email error',
+        'Notification email may not have been sent (org-digest-1-0): Unknown email error',
       );
       expect(JSON.stringify(logged.mock.calls)).not.toContain(
         'member@example.test',
       );
       logged.mockRestore();
+    });
+  });
+
+  describe('Chunk 14 review: what a failed send means, and the log', () => {
+    const notice = {
+      to: 'member@example.test',
+      subject: 'S',
+      lines: ['L'],
+      headers: {},
+      idempotencyKey: 'org-notice-1-0',
+    };
+
+    it('calls only a Resend 4xx (not 409) a refusal; anything else may have been sent', async () => {
+      const service = configuredService();
+      const answer = (error: unknown) =>
+        mockSend.mockResolvedValueOnce({ data: null, error });
+      answer({ statusCode: 422, name: 'validation_error', message: 'm' });
+      expect(await service.sendNotice(notice)).toBe('refused');
+      answer({ statusCode: 429, name: 'rate_limit_exceeded', message: 'm' });
+      expect(await service.sendNotice(notice)).toBe('refused');
+      for (const error of [
+        { statusCode: 409, name: 'invalid_idempotent_request', message: 'm' },
+        { statusCode: 500, name: 'application_error', message: 'm' },
+        { statusCode: null, name: 'application_error', message: 'm' },
+        { statusCode: 400, message: 'no name' },
+        'a bare string',
+      ]) {
+        answer(error);
+        expect(await service.sendNotice(notice)).toBe('unknown');
+      }
+      mockSend.mockRejectedValueOnce(new Error('socket hang up'));
+      expect(await service.sendNotice(notice)).toBe('unknown');
+    });
+
+    it('never logs an email address from Resend’s answer', async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      const service = configuredService();
+      mockSend.mockResolvedValueOnce({
+        data: null,
+        error: {
+          statusCode: 422,
+          name: 'validation_error',
+          message: 'Invalid `to` field: Some.One+x@example.test is not allowed',
+        },
+      });
+      await service.sendNotice(notice);
+      mockSend.mockRejectedValueOnce(
+        new Error('<member@example.test> bounced'),
+      );
+      await service.sendNotice(notice);
+      const text = JSON.stringify(logged.mock.calls);
+      expect(text).not.toMatch(/@example.test/);
+      expect(text).toContain('[address]');
+      logged.mockRestore();
+    });
+
+    it('counts order emails in the shared daily budget, never refusing them', async () => {
+      mockSend.mockResolvedValue({ data: { id: 'e' }, error: null });
+      const budget = { record: jest.fn(() => Promise.resolve()) };
+      const service = new NotificationsService(
+        config({
+          RESEND_API_KEY: 'api-key',
+          ORDER_FROM_EMAIL: 'orders@example.test',
+          ORDER_NOTIFICATION_EMAIL: 'host@example.test',
+        }) as never,
+        budget as never,
+      );
+      expect(await service.sendOrderCreated(order() as never)).toBe('sent');
+      await service.sendStatusChanged(order() as never);
+      expect(budget.record.mock.calls).toEqual([[2], [1]]);
+      // A budget that cannot be counted never stops an order email.
+      budget.record.mockRejectedValueOnce(new Error('db down'));
+      expect(await service.sendOrderCreated(order() as never)).toBe('sent');
+      budget.record.mockRejectedValueOnce('odd');
+      await service.sendStatusChanged(order() as never);
+      expect(mockSend).toHaveBeenCalled();
     });
   });
 });

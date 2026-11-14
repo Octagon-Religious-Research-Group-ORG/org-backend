@@ -31,6 +31,12 @@ import {
   type NotificationQueueDocument,
   QUEUE_KEEP_DAYS,
 } from './schemas/notification-queue.schema';
+import {
+  afterFailedSend,
+  keyMayHaveExpired,
+  sendKey,
+  UNKNOWN_GIVE_UP,
+} from './send-attempts';
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -42,8 +48,19 @@ export const LEASE_MS = 10 * MINUTE_MS;
 export const RETRY_MS = 15 * MINUTE_MS;
 /** Send attempts before giving up on an email. */
 export const MAX_ATTEMPTS = 3;
+/** Tries at an admin notice while the admin list reads incomplete. */
+export const MAX_FANOUT_ATTEMPTS = 6;
 /** Rows of each kind handled per pass, so one pass stays short. */
 export const PASS_LIMIT = 50;
+/**
+ * A row this close to its TTL while still queued is marked failed instead
+ * (review M1), so it is counted rather than vanishing.
+ */
+export const EXPIRY_MARGIN_MS = DAY_MS;
+/** How long such a failed row stays to be counted. */
+export const EXPIRED_KEEP_MS = 7 * DAY_MS;
+export const EXPIRED_UNSENT = 'expired unsent';
+export const ADMIN_LIST_INCOMPLETE = 'admin list incomplete';
 
 type QueueRow = NotificationQueueRow & { _id: Types.ObjectId };
 
@@ -65,7 +82,10 @@ export interface NotificationStatusView {
   digestHourUtc: number;
   budget: Awaited<ReturnType<EmailBudgetStore['status']>>;
   waiting: { digest: number; immediate: number; adminNotices: number };
+  /** Notices that failed (single emails, and items that expired unsent). */
   failedLast7Days: number;
+  /** Daily summaries that ran out of attempts (review L7). */
+  digestFailedLast7Days: number;
 }
 
 /**
@@ -75,6 +95,10 @@ export interface NotificationStatusView {
  * that wants an immediate email. Every step claims its rows first (a lease
  * on the row, or the unique per-member-per-day digest row), so two server
  * instances never send the same email twice.
+ *
+ * A send that may have happened is retried under the SAME idempotency key
+ * with the SAME stored body; only a definite refusal gets a new key
+ * (review L2, L3).
  */
 @Injectable()
 export class NotificationDispatcher
@@ -104,6 +128,11 @@ export class NotificationDispatcher
   }
 
   onApplicationBootstrap() {
+    if (this.settings.publicApiUrlProblem) {
+      this.logger.warn(
+        `PUBLIC_API_URL is ignored: ${this.settings.publicApiUrlProblem}. Emails offer the website's unsubscribe page instead of one-click.`,
+      );
+    }
     if (!this.mail.noticesEnabled()) {
       this.logger.warn(
         'Member notifications are queued but not sent: RESEND_API_KEY or a sender address is missing.',
@@ -120,7 +149,7 @@ export class NotificationDispatcher
     clearInterval(this.timer);
   }
 
-  /** A full pass: admin fan-out, immediate emails, then due digests. */
+  /** A full pass: expiries, admin fan-out, immediate emails, due digests. */
   tick(now?: Date): Promise<void> {
     return this.enqueue(() => this.pass(true, now ?? new Date()));
   }
@@ -141,23 +170,23 @@ export class NotificationDispatcher
   async status(now = new Date()): Promise<NotificationStatusView> {
     const count = (filter: object) =>
       this.queueModel.countDocuments(filter).exec();
-    const [budget, digest, immediate, adminNotices, failedLast7Days] =
+    const since = new Date(now.getTime() - 7 * DAY_MS);
+    const [budget, digest, immediate, adminNotices, failed, digestFailed] =
       await Promise.all([
         this.budget.status(now),
         count({ status: 'queued', delivery: 'digest' }),
         count({ status: 'queued', delivery: 'immediate' }),
         count({ status: 'queued', delivery: 'fanout' }),
-        count({
-          status: 'failed',
-          updatedAt: { $gte: new Date(now.getTime() - 7 * DAY_MS) },
-        }),
+        count({ status: 'failed', updatedAt: { $gte: since } }),
+        this.digests.failedSince(since),
       ]);
     return {
       enabled: this.mail.noticesEnabled(),
       digestHourUtc: this.settings.digestHourUtc,
       budget,
       waiting: { digest, immediate, adminNotices },
-      failedLast7Days,
+      failedLast7Days: failed,
+      digestFailedLast7Days: digestFailed,
     };
   }
 
@@ -172,6 +201,7 @@ export class NotificationDispatcher
 
   private async pass(full: boolean, now: Date) {
     if (!this.mail.noticesEnabled()) return;
+    if (full) await this.step('expiries', () => this.expire(now));
     await this.step('admin fan-out', () => this.fanOut(now));
     await this.step('immediate emails', () => this.immediates(now));
     if (full) {
@@ -187,7 +217,39 @@ export class NotificationDispatcher
     }
   }
 
-  /** Takes one due row of `delivery`, holding it for {@link LEASE_MS}. */
+  /**
+   * Marks rows about to expire while still queued as failed, and keeps them
+   * a week (review M1): counted on the dashboard instead of vanishing.
+   */
+  private async expire(now: Date) {
+    const result = await this.queueModel
+      .updateMany(
+        {
+          status: 'queued',
+          expiresAt: { $lte: new Date(now.getTime() + EXPIRY_MARGIN_MS) },
+        },
+        {
+          $set: {
+            status: 'failed',
+            outcome: EXPIRED_UNSENT,
+            expiresAt: new Date(now.getTime() + EXPIRED_KEEP_MS),
+          },
+        },
+      )
+      .exec();
+    if (result.modifiedCount > 0) {
+      this.logger.warn(
+        `${result.modifiedCount} notification(s) expired without being sent.`,
+      );
+    }
+  }
+
+  /**
+   * Takes the OLDEST due row of `delivery`, holding it for
+   * {@link LEASE_MS}. Due = no wait set, or its wait is over; the order is
+   * by age alone, so a row that waited (for a new day's budget) keeps its
+   * place (review M1).
+   */
   private async claim(
     delivery: 'fanout' | 'immediate',
     now: Date,
@@ -219,7 +281,7 @@ export class NotificationDispatcher
             leaseToken: token,
           },
         },
-        { sort: { nextAttemptAt: 1, createdAt: 1 }, returnDocument: 'after' },
+        { sort: { createdAt: 1, _id: 1 }, returnDocument: 'after' },
       )
       .lean()
       .exec()) as unknown as QueueRow | null;
@@ -231,18 +293,24 @@ export class NotificationDispatcher
     row: QueueRow,
     token: string,
     set: Record<string, unknown>,
+    unset: Record<string, 1> = {},
   ) {
     await this.queueModel
       .updateOne(
         { _id: row._id, leaseToken: token },
-        { $set: set, $unset: { leaseUntil: 1, leaseToken: 1 } },
+        { $set: set, $unset: { ...unset, leaseUntil: 1, leaseToken: 1 } },
       )
       .exec();
   }
 
-  /** Copies each admin notice to every admin but the one it is about. */
+  /**
+   * Copies each admin notice to every admin but the one it is about. When
+   * the admin list reads incomplete, the admins it has are told (once each:
+   * per-admin dedupe) and the notice is kept and tried again, up to
+   * {@link MAX_FANOUT_ATTEMPTS} times (review L9).
+   */
   private async fanOut(now: Date) {
-    let admins: string[] | undefined;
+    let admins: { ids: string[]; complete: boolean } | undefined;
     for (let n = 0; n < PASS_LIMIT; n++) {
       const claimed = await this.claim('fanout', now);
       if (!claimed) return;
@@ -255,7 +323,7 @@ export class NotificationDispatcher
         });
         return;
       }
-      for (const adminId of admins) {
+      for (const adminId of admins.ids) {
         if (adminId === row.subjectUserId || adminId === row.actorUserId) {
           continue;
         }
@@ -279,11 +347,23 @@ export class NotificationDispatcher
             expiresAt: new Date(now.getTime() + QUEUE_KEEP_DAYS * DAY_MS),
           });
         } catch (error) {
-          // Fanned out already by a tick that died before finishing.
+          // Already told: an earlier try, or a tick that died part-way.
           if (!isDuplicateKey(error)) throw error;
         }
       }
-      await this.settle(row, token, { status: 'done' });
+      const attempts = row.attempts + 1;
+      if (!admins.complete && attempts < MAX_FANOUT_ATTEMPTS) {
+        await this.settle(row, token, {
+          attempts,
+          nextAttemptAt: new Date(now.getTime() + RETRY_MS),
+        });
+        continue;
+      }
+      await this.settle(row, token, {
+        status: 'done',
+        attempts,
+        ...(admins.complete ? {} : { outcome: ADMIN_LIST_INCOMPLETE }),
+      });
       if (row.refs?.inboxKey) {
         await this.inboxModel
           .updateOne(
@@ -301,12 +381,14 @@ export class NotificationDispatcher
    *
    * @returns undefined when Clerk cannot be read
    */
-  private async adminIds(): Promise<string[] | undefined> {
+  private async adminIds(): Promise<
+    { ids: string[]; complete: boolean } | undefined
+  > {
     try {
       const { holders, complete } = await this.directory.holdersOf('admin');
       if (!complete) {
         this.logger.warn(
-          'The admin list is incomplete; notices go to those read.',
+          'The admin list is incomplete; notices go to those read and are tried again.',
         );
       }
       const ids = new Set(holders.map((holder) => holder.userId));
@@ -325,7 +407,7 @@ export class NotificationDispatcher
           }
         }
       }
-      return [...ids];
+      return { ids: [...ids], complete };
     } catch (error) {
       this.logger.warn(`Could not read the admin list: ${describe(error)}`);
       return undefined;
@@ -350,6 +432,7 @@ export class NotificationDispatcher
   ): Promise<'done' | 'budget'> {
     const skip = (outcome: string) =>
       this.settle(row, token, { status: 'skipped', outcome });
+    // Nothing was sent: no key was used, so it stays as it is.
     const retry = async (outcome: string) => {
       const attempts = row.attempts + 1;
       await this.settle(
@@ -366,6 +449,13 @@ export class NotificationDispatcher
     };
     if (row.userId === ADMINS_RECIPIENT) {
       await skip('not a reader');
+      return 'done';
+    }
+    if (keyMayHaveExpired(row, now)) {
+      await this.settle(row, token, {
+        status: 'failed',
+        outcome: UNKNOWN_GIVE_UP,
+      });
       return 'done';
     }
     let recipient: Recipient | undefined;
@@ -388,15 +478,27 @@ export class NotificationDispatcher
       await skip('turned off');
       return 'done';
     }
-    if (delivery === 'digest') {
+    if (delivery === 'digest' && !row.email) {
       // Immediate emails were turned off since: it waits for the digest.
       await this.settle(row, token, { delivery: 'digest' });
       return 'done';
     }
-    const described = await this.targets.describe(row, recipient);
-    if (!described) {
-      await skip('no longer visible');
-      return 'done';
+    let email = row.email;
+    if (!email) {
+      const described = await this.targets.describe(row, recipient);
+      if (!described) {
+        await skip('no longer visible');
+        return 'done';
+      }
+      email = composeEmail({
+        items: [described],
+        digest: false,
+        userId: row.userId,
+        scope: row.category,
+        signingKey: this.settings.signingKey,
+        publicAppUrl: this.settings.publicAppUrl,
+        publicApiUrl: this.settings.publicApiUrl,
+      });
     }
     if (!recipient.email) {
       await skip('no verified address');
@@ -406,25 +508,38 @@ export class NotificationDispatcher
       await this.settle(row, token, { nextAttemptAt: nextUtcDay(now) });
       return 'budget';
     }
-    const email = composeEmail({
-      items: [described],
-      digest: false,
-      userId: row.userId,
-      scope: row.category,
-      signingKey: this.settings.signingKey,
-      publicAppUrl: this.settings.publicAppUrl,
-      publicApiUrl: this.settings.publicApiUrl,
-    });
+    // Stored before the send, so a takeover replays this very body.
+    await this.queueModel
+      .updateOne({ _id: row._id, leaseToken: token }, { $set: { email } })
+      .exec();
     const result = await this.mail.sendNotice({
       to: recipient.email,
-      ...email,
-      idempotencyKey: `org-notice-${String(row._id)}-${row.attempts}`,
+      subject: email.subject,
+      lines: email.lines,
+      headers: email.headers,
+      idempotencyKey: sendKey('org-notice', row._id, row),
     });
     if (result === 'sent') {
       await this.settle(row, token, { status: 'sent', sentAt: new Date() });
-    } else {
-      await retry('send failed');
+      return 'done';
     }
+    const next = afterFailedSend(result, row, now, MAX_ATTEMPTS);
+    await this.settle(
+      row,
+      token,
+      next.final
+        ? {
+            ...next.set,
+            status: 'failed',
+            outcome: next.refused ? 'send refused' : UNKNOWN_GIVE_UP,
+          }
+        : {
+            ...next.set,
+            outcome: next.refused ? 'send refused' : 'send outcome unknown',
+            nextAttemptAt: new Date(now.getTime() + RETRY_MS),
+          },
+      next.refused ? { ...next.unset, email: 1 } : next.unset,
+    );
     return 'done';
   }
 }

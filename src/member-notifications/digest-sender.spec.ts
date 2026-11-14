@@ -132,7 +132,7 @@ describe('DigestSender (Chunk 14)', () => {
   it('retries a failed send with a new key, and then leaves the items for tomorrow', async () => {
     const h = harness();
     const item = digestItem(h, 'user_a');
-    h.mail.sendNotice.mockResolvedValue('failed');
+    h.mail.sendNotice.mockResolvedValue('refused');
     for (let n = 1; n <= DIGEST_MAX_ATTEMPTS; n++) {
       expect(await h.digests.forMember('user_a', NOW)).toBe('failed');
       expect(h.digestRows.docs[0]).toMatchObject({
@@ -209,10 +209,19 @@ describe('DigestSender (Chunk 14)', () => {
     });
     await d.prefs.update('user_d', false, { digest: false });
     expect(await d.digests.forMember('user_d', NOW)).toBe('skipped');
+    // Immediate emails are on: it goes that way instead (review L8).
     expect(digestOff).toMatchObject({
-      status: 'skipped',
-      outcome: 'turned off',
+      status: 'queued',
+      delivery: 'immediate',
     });
+    const reply = digestItem(d, 'user_d', {
+      kind: 'reply',
+      category: 'replies',
+    });
+    expect(
+      await d.digests.forMember('user_d', new Date('2026-11-14T15:00:00Z')),
+    ).toBe('skipped');
+    expect(reply).toMatchObject({ status: 'skipped', outcome: 'turned off' });
     expect(d.mail.sendNotice).not.toHaveBeenCalled();
   });
 

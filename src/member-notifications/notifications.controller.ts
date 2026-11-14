@@ -9,6 +9,7 @@ import {
   Put,
   Query,
   Req,
+  ServiceUnavailableException,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -28,6 +29,9 @@ import { verifyUnsubscribe } from './unsubscribe-tokens';
 
 export const BAD_UNSUBSCRIBE_LINK =
   'This link is not valid. You can change your email settings after signing in.';
+
+export const ADMIN_CHECK_UNAVAILABLE =
+  'Your settings could not be saved just now. Please try again in a moment.';
 
 /** A member's own email settings (Chunk 14): signed in, stored nowhere. */
 @Controller('me/notification-settings')
@@ -50,18 +54,22 @@ export class MyNotificationSettingsController {
     @Req() request: AuthenticatedRequest,
     @Body() body: NotificationSettingsDto,
   ) {
-    return this.prefs.update(
-      getUserSub(request),
-      await this.isAdmin(request),
-      body,
-    );
+    // A save must not guess (review L5): an admin's own settings would be
+    // silently dropped while the page said "saved".
+    let isAdmin: boolean;
+    try {
+      isAdmin = await this.adminAccess.isAdminForRead(request);
+    } catch {
+      throw new ServiceUnavailableException(ADMIN_CHECK_UNAVAILABLE);
+    }
+    return this.prefs.update(getUserSub(request), isAdmin, body);
   }
 
+  /** For reading only: unknown shows the member's part alone. */
   private async isAdmin(request: AuthenticatedRequest) {
     try {
       return await this.adminAccess.isAdminForRead(request);
     } catch {
-      // Unknown: the admin section is simply not shown or saved this time.
       return false;
     }
   }

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { StoredEmail, StoredEmailSchema } from './stored-email.schema';
 
 /**
  * - `sending`: a tick holds it until `leaseUntil`; past that another takes it
@@ -44,6 +45,10 @@ export class NotificationDigestRow {
   @Prop({ type: [Types.ObjectId], default: [] })
   itemIds: Types.ObjectId[];
 
+  /** The items the stored email is about: what is marked sent. */
+  @Prop({ type: [Types.ObjectId] })
+  shownIds?: Types.ObjectId[];
+
   @Prop({ type: Number, required: true, default: 0, min: 0 })
   attempts: number;
 
@@ -55,6 +60,18 @@ export class NotificationDigestRow {
 
   @Prop({ type: Date })
   sentAt?: Date;
+
+  /** Bumped after a definite refusal: the next send gets a new key. */
+  @Prop({ type: Number, min: 0 })
+  keyGen?: number;
+
+  /** When a send under the current key first came back unknown. */
+  @Prop({ type: Date })
+  unknownSince?: Date;
+
+  /** The email as first sent under the current key (review L3). */
+  @Prop({ type: StoredEmailSchema })
+  email?: StoredEmail;
 
   @Prop({ type: Date, required: true })
   expiresAt: Date;

@@ -77,36 +77,41 @@ export class NotificationPrefsService {
   }
 
   /**
-   * Saves a change. Admin settings are ignored for a non-admin (the page
-   * never offers them), so a member cannot write fields that mean nothing
-   * for them.
+   * Saves a change: ONLY the fields it names (review L6), each as one
+   * atomic update, so a page loaded before an unsubscribe link was used can
+   * never turn that back on by saving something else. Admin settings are
+   * ignored for a non-admin (the page never offers them).
    */
   async update(
     userId: string,
     isAdmin: boolean,
     change: NotificationSettingsChange,
   ): Promise<NotificationSettingsView> {
-    const current = await this.get(userId);
-    const off = new Set(current.off);
+    const turnOn: Category[] = [];
+    const turnOff: Category[] = [];
     for (const [key, on] of Object.entries(change.categories ?? {})) {
-      const category = key as Category;
       if (!isAdmin && (ADMIN_CATEGORIES as readonly string[]).includes(key)) {
         continue;
       }
-      if (on) off.delete(category);
-      else off.add(category);
+      (on ? turnOn : turnOff).push(key as Category);
     }
-    const next: NotificationPrefs = {
-      off: CATEGORIES.filter((c) => off.has(c)),
-      digest: change.digest ?? current.digest,
-      immediate: change.immediate ?? current.immediate,
-      adminImmediate:
-        isAdmin && change.adminImmediate !== undefined
-          ? change.adminImmediate
-          : current.adminImmediate,
+    const set: Partial<NotificationPrefs> = {
+      ...(change.digest !== undefined ? { digest: change.digest } : {}),
+      ...(change.immediate !== undefined
+        ? { immediate: change.immediate }
+        : {}),
+      ...(isAdmin && change.adminImmediate !== undefined
+        ? { adminImmediate: change.adminImmediate }
+        : {}),
     };
-    await this.save(userId, next);
-    return toView(next, isAdmin);
+    if (Object.keys(set).length > 0) await this.write(userId, { $set: set });
+    if (turnOff.length > 0) {
+      await this.write(userId, { $addToSet: { off: { $each: turnOff } } });
+    }
+    if (turnOn.length > 0) {
+      await this.write(userId, { $pull: { off: { $in: turnOn } } });
+    }
+    return toView(await this.get(userId), isAdmin);
   }
 
   /**
@@ -118,33 +123,27 @@ export class NotificationPrefsService {
       scope === 'digest' || scope === 'immediate' || scope === 'adminImmediate'
         ? scope
         : undefined;
-    const write = () =>
+    await this.write(
+      userId,
+      flag ? { $set: { [flag]: false } } : { $addToSet: { off: scope } },
+    );
+  }
+
+  /** One update on the member's row, made with the defaults if missing. */
+  private async write(userId: string, update: Record<string, unknown>) {
+    const run = () =>
       this.prefsModel
-        .updateOne(
-          { userId },
-          flag ? { $set: { [flag]: false } } : { $addToSet: { off: scope } },
-          { upsert: true, setDefaultsOnInsert: true },
-        )
+        .updateOne({ userId }, update, {
+          upsert: true,
+          setDefaultsOnInsert: true,
+        })
         .exec();
     try {
-      await write();
+      await run();
     } catch (error) {
       // Two first saves at once: one inserted, the other updates it.
       if (!isDuplicateKey(error)) throw error;
-      await write();
-    }
-  }
-
-  private async save(userId: string, prefs: NotificationPrefs) {
-    const write = () =>
-      this.prefsModel
-        .updateOne({ userId }, { $set: prefs }, { upsert: true })
-        .exec();
-    try {
-      await write();
-    } catch (error) {
-      if (!isDuplicateKey(error)) throw error;
-      await write();
+      await run();
     }
   }
 }

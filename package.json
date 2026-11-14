@@ -216,7 +216,8 @@
       "member-notifications/member-notifier.service.ts",
       "member-notifications/notification-dispatcher.service.ts",
       "member-notifications/digest-sender.ts",
-      "member-notifications/notifications.controller.ts"
+      "member-notifications/notifications.controller.ts",
+      "member-notifications/send-attempts.ts"
     ],
     "coverageThreshold": {
       "global": {

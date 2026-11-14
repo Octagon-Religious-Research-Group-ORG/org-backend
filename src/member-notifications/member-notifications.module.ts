@@ -19,7 +19,6 @@ import {
   SocialProfileSchema,
 } from '../social/schemas/social-profile.schema';
 import { DigestSender } from './digest-sender';
-import { EmailBudgetStore } from './email-budget.store';
 import { MemberNotifier } from './member-notifier.service';
 import { NotificationDispatcher } from './notification-dispatcher.service';
 import { NotificationPrefsService } from './notification-prefs.service';
@@ -29,10 +28,6 @@ import {
   MyNotificationSettingsController,
   UnsubscribeController,
 } from './notifications.controller';
-import {
-  EmailBudgetDay,
-  EmailBudgetDaySchema,
-} from './schemas/email-budget.schema';
 import {
   NotificationDigestRow,
   NotificationDigestRowSchema,
@@ -54,12 +49,12 @@ import {
  */
 @Module({
   imports: [
+    // Also provides the shared daily email budget.
     NotificationsModule,
     MongooseModule.forFeature([
       { name: NotificationPrefsRow.name, schema: NotificationPrefsRowSchema },
       { name: NotificationQueueRow.name, schema: NotificationQueueRowSchema },
       { name: NotificationDigestRow.name, schema: NotificationDigestRowSchema },
-      { name: EmailBudgetDay.name, schema: EmailBudgetDaySchema },
       // Read only: what an email may say and link to.
       { name: Comment.name, schema: CommentSchema },
       { name: SocialProfile.name, schema: SocialProfileSchema },
@@ -77,7 +72,6 @@ import {
   providers: [
     NotificationPrefsService,
     NotificationTargets,
-    EmailBudgetStore,
     DigestSender,
     NotificationDispatcher,
     MemberNotifier,

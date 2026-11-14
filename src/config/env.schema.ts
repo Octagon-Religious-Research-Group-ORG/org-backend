@@ -78,8 +78,10 @@ export const envValidationSchema = Joi.object({
   NOTIFICATION_FROM_EMAIL: Joi.string().allow('').optional(),
   // Signs unsubscribe links; derived from CLERK_SECRET_KEY when unset.
   NOTIFICATION_SIGNING_SECRET: Joi.string().min(32).allow('').optional(),
-  // This backend's public address, for one-click unsubscribe headers.
-  PUBLIC_API_URL: Joi.string().uri().allow('').optional(),
+  // This backend's public address, for one-click unsubscribe headers. Any
+  // form is read (with or without "/api/v1"); a bad one is logged and
+  // ignored at start-up rather than stopping the site (review L11).
+  PUBLIC_API_URL: Joi.string().allow('').optional(),
   // The shared Resend free tier is 100 a day for BOTH sites: each site's
   // share, and how much of it is kept for immediate emails.
   EMAIL_DAILY_LIMIT: Joi.number()

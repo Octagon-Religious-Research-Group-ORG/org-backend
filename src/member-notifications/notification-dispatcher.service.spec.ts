@@ -195,7 +195,8 @@ describe('NotificationDispatcher (Chunk 14)', () => {
       expect(
         h.queue.docs.filter((d) => d.userId !== '@admins').map((d) => d.userId),
       ).toEqual(['user_admin1', 'user_listed']);
-      expect(notice.status).toBe('done');
+      // Incomplete: kept, to be tried again (review L9).
+      expect(notice).toMatchObject({ status: 'queued', attempts: 1 });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('incomplete'));
     });
 
@@ -309,7 +310,7 @@ describe('NotificationDispatcher (Chunk 14)', () => {
     it('retries a failed send, then gives up', async () => {
       const h = fresh();
       const row = immediate(h);
-      h.mail.sendNotice.mockResolvedValue('failed');
+      h.mail.sendNotice.mockResolvedValue('refused');
       let at = h.now;
       for (let n = 1; n < MAX_ATTEMPTS; n++) {
         await h.dispatcher.tick(at);
@@ -321,7 +322,7 @@ describe('NotificationDispatcher (Chunk 14)', () => {
       expect(row).toMatchObject({
         status: 'failed',
         attempts: MAX_ATTEMPTS,
-        outcome: 'send failed',
+        outcome: 'send refused',
       });
       expect(h.mail.sendNotice).toHaveBeenCalledTimes(MAX_ATTEMPTS);
       // Each attempt had its own key, so a real retry is not swallowed.
@@ -420,6 +421,7 @@ describe('NotificationDispatcher (Chunk 14)', () => {
       },
       waiting: { digest: 1, immediate: 1, adminNotices: 1 },
       failedLast7Days: 1,
+      digestFailedLast7Days: 0,
     });
     expect((await h.dispatcher.status()).budget.day).toMatch(/^\d{4}-/);
   });

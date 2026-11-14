@@ -309,6 +309,45 @@ describeWithMongo('member notifications on a real MongoDB', () => {
     ]);
   });
 
+  it('sends the oldest immediate email first, even after it waited for a new day (review M1)', async () => {
+    await comment('c_old', { moderation: 'hidden' });
+    await comment('c_new', { moderation: 'hidden' });
+    const now = new Date();
+    const row = (commentId: string, createdAt: Date, extra: object = {}) => ({
+      userId: 'user_writer',
+      category: 'moderation',
+      kind: 'comment-hidden',
+      delivery: 'immediate',
+      status: 'queued',
+      refs: { commentId },
+      attempts: 0,
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt: new Date(now.getTime() + 20 * 86_400_000),
+      ...extra,
+    });
+    // Yesterday's, held back for want of budget until today; then today's.
+    await m.NotificationQueueRow.collection.insertMany([
+      row('c_old', new Date(now.getTime() - 86_400_000), {
+        nextAttemptAt: new Date(now.getTime() - 1000),
+      }),
+      row('c_new', new Date(now.getTime() - 60_000)),
+    ]);
+    // Room for exactly one immediate email today.
+    const today = now.toISOString().slice(0, 10);
+    await m.EmailBudgetDay.collection.insertOne({
+      _id: today as never,
+      n: 4,
+      expiresAt: new Date(now.getTime() + 86_400_000),
+    });
+    await dispatcher().kick();
+    expect(sent).toHaveLength(1);
+    const sentRow = await m.NotificationQueueRow.findOne({
+      status: 'sent',
+    }).lean();
+    expect(sentRow.refs.commentId).toBe('c_old');
+  });
+
   it('never goes over the day’s budget, however many sends race', async () => {
     const taken = await Promise.all(
       Array.from({ length: 30 }, (_, n) =>

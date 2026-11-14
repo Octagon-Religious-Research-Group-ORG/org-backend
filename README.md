@@ -118,7 +118,20 @@ same day twice. `emailbudget` counts sends per UTC day against
 does not fit waits for the next day. Admins see the day's count in the
 dashboard's Settings. Addresses are read from Clerk when an email is sent and
 never stored. Sending is off until `RESEND_API_KEY` and a sender are set; until
-then notifications are only queued (and expire after 30 days).
+then notifications are only queued. A notification still unsent a day before
+its 30-day expiry is marked failed and counted on the dashboard.
+
+Offering-order emails are counted in the same day (never refused), so
+notifications yield to them. A send whose outcome is unknown (timeout,
+network, 5xx) is retried under the same Resend idempotency key with the same
+stored body; only a definite refusal (a 4xx with Resend's error) gets a new
+key. Resend keeps keys 24 hours, so an ambiguous send is not retried after
+23 hours: it is marked failed rather than risk a duplicate.
+
+`PUBLIC_API_URL` is this backend's origin, e.g.
+`https://org-backend.example.org`; a trailing slash or `/api/v1` is accepted
+and removed. A bad value is logged at start-up and ignored (emails then link
+to the website's unsubscribe page, without one-click).
 
 ## Heroku deployment
 

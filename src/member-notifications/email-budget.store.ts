@@ -67,9 +67,8 @@ export class EmailBudgetStore {
       : this.dailyLimit - this.immediateReserve;
   }
 
-  /** @returns whether a slot was taken */
-  async take(cls: BudgetClass, now = new Date()): Promise<boolean> {
-    const day = utcDay(now);
+  /** Makes sure the day's row exists (the upsert races are harmless). */
+  private async ensureDay(day: string) {
     try {
       await this.budgetModel
         .updateOne(
@@ -86,6 +85,25 @@ export class EmailBudgetStore {
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
     }
+  }
+
+  /**
+   * Counts emails sent outside the notifications, such as offering-order
+   * emails (Chunk 14 review L10): never refused, so an order email always
+   * goes, but digests and immediate emails see the day as fuller.
+   */
+  async record(emails: number, now = new Date()): Promise<void> {
+    const day = utcDay(now);
+    await this.ensureDay(day);
+    await this.budgetModel
+      .updateOne({ _id: day }, { $inc: { n: emails } })
+      .exec();
+  }
+
+  /** @returns whether a slot was taken */
+  async take(cls: BudgetClass, now = new Date()): Promise<boolean> {
+    const day = utcDay(now);
+    await this.ensureDay(day);
     const taken = await this.budgetModel
       .updateOne(
         { _id: day, n: { $lt: this.limitFor(cls) } },
