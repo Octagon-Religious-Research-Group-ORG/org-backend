@@ -41,10 +41,10 @@ export const BLOCKED_QUERY_OPERATIONS = [
  * update/remove rights is the only control for those, and the free Atlas tier
  * has no custom roles.
  *
- * The hash chain does not make such a write detectable today: it is unkeyed,
- * so a writer can recompute the hashes, and the external anchor (plan §6) that
- * would expose that does not exist yet. It only shows accidental or partial
- * edits.
+ * The hash chain alone does not make such a write detectable: it is unkeyed,
+ * so a writer can recompute the hashes. The daily external anchor (plan §6,
+ * Chunk 16) does, for versions anchored before the write: their leaves, root
+ * and both proofs no longer agree with the rewritten rows.
  *
  * @param schema - the schema to protect; must be called before the model is compiled
  * @param collection - a readable name used in the error message

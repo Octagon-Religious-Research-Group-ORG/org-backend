@@ -19,6 +19,7 @@ import { ContentModule } from './content/content.module';
 import { MembershipModule } from './membership/membership.module';
 import { MembersModule } from './members/members.module';
 import { SearchModule } from './search/search.module';
+import { AnchoringModule } from './anchoring/anchoring.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { SearchModule } from './search/search.module';
     MembershipModule,
     MembersModule,
     SearchModule,
+    AnchoringModule,
     DbModule,
   ],
   controllers: [AppController],

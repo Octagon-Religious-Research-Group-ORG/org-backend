@@ -97,6 +97,16 @@ const VERSION_FIELDS = {
   suggestedBy: 1,
 };
 
+export const VERSION_NOT_FOUND = 'That version does not exist.';
+
+/** A stored block version, every field a receipt needs to rehash it. */
+export interface ReceiptVersionRow extends VersionRow {
+  _id: Types.ObjectId;
+  prevHash: string;
+}
+
+const RECEIPT_FIELDS = { ...VERSION_FIELDS, _id: 1, prevHash: 1 };
+
 function shortHash(hash: string) {
   return hash.slice(0, SHORT_HASH_LENGTH);
 }
@@ -180,6 +190,25 @@ export class MemberHistoryService {
     field: TabHistoryField = 'text',
     page = 1,
   ) {
+    return this.listField(
+      await this.readableTabField(slug, tabId, viewer, field),
+      page,
+      viewer,
+    );
+  }
+
+  /**
+   * The blocks of one field of a tab, for a viewer allowed its history.
+   * The ONE access decision for a belief's history and its receipts.
+   *
+   * @throws NotFoundException for a tab this viewer cannot see
+   */
+  private async readableTabField(
+    slug: string,
+    tabId: string,
+    viewer: Viewer,
+    field: TabHistoryField,
+  ): Promise<FieldBlock[]> {
     const { profileId, mayManage } = await this.readablePage(slug, viewer);
     const tab = await this.tabModel
       .findOne({ profileId, tabId })
@@ -189,11 +218,62 @@ export class MemberHistoryService {
     if (!tab || (tab.removedAt && !mayManage)) {
       throw new NotFoundException(PROFILE_NOT_FOUND);
     }
-    const blocks =
-      field === 'title'
-        ? [{ blockId: titleBlockId(tabId) }]
-        : await this.textBlocks({ profileId, section: 'beliefs', tabId });
-    return this.listField(blocks, page, viewer);
+    return field === 'title'
+      ? [{ blockId: titleBlockId(tabId) }]
+      : this.textBlocks({ profileId, section: 'beliefs', tabId });
+  }
+
+  /**
+   * The stored versions one history entry is made of, for a receipt
+   * (Chunk 16): exactly who may read the history may have one.
+   *
+   * @param seq - a history entry's `seq`; omitted, the current text. Entry 1
+   *   of a field first saved as several paragraphs is all their first
+   *   versions, each with its own label.
+   * @throws NotFoundException for a tab this viewer cannot see, or no such
+   *   version
+   */
+  async tabReceiptVersions(
+    slug: string,
+    tabId: string,
+    viewer: Viewer,
+    field: TabHistoryField,
+    seq?: number,
+  ): Promise<Array<{ row: ReceiptVersionRow; label?: string }>> {
+    const blocks = await this.readableTabField(slug, tabId, viewer, field);
+    const [first] = blocks;
+    if (!first) throw new NotFoundException(VERSION_NOT_FOUND);
+    const head = await this.versionModel
+      .findOne({ blockId: first.blockId })
+      .sort({ seq: -1 })
+      .select({ seq: 1 })
+      .lean()
+      .exec();
+    const wanted = seq ?? head?.seq ?? 1;
+    const whole = wanted > 1 || blocks.length === 1;
+    const rows = (await this.versionModel
+      .find(
+        whole
+          ? { blockId: first.blockId, seq: wanted }
+          : { blockId: { $in: blocks.map((b) => b.blockId) }, seq: 1 },
+      )
+      .select(RECEIPT_FIELDS)
+      .lean()
+      .exec()) as ReceiptVersionRow[];
+    const byBlock = new Map(rows.map((row) => [row.blockId, row]));
+    const parts = blocks.flatMap((block) => {
+      const row = byBlock.get(block.blockId);
+      return row
+        ? [
+            {
+              row,
+              ...(row.seq === 1 && block.label ? { label: block.label } : {}),
+            },
+          ]
+        : [];
+    });
+    if (parts.length === 0) throw new NotFoundException(VERSION_NOT_FOUND);
+    return parts;
   }
 
   /** Every text block the field ever had, removed ones too, in reading order. */

@@ -92,6 +92,8 @@ function copy<T>(value: T): T {
 function structuredCloneWithIds(value: unknown): unknown {
   if (value instanceof Types.ObjectId) return new Types.ObjectId(value.id);
   if (value instanceof Date) return new Date(value.getTime());
+  // Proofs and tokens are stored as bytes (Chunk 16).
+  if (Buffer.isBuffer(value)) return Buffer.from(value);
   if (Array.isArray(value)) return value.map(structuredCloneWithIds);
   if (value && typeof value === 'object') {
     return Object.fromEntries(

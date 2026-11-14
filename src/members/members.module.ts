@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AdminInboxModule } from '../admin-inbox/admin-inbox.module';
+import { AnchoringModule } from '../anchoring/anchoring.module';
 import { MemberNotificationsModule } from '../member-notifications/member-notifications.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import {
@@ -92,6 +93,11 @@ import {
 } from './org-pages/org-pages.controller';
 import { OrgPagesService } from './org-pages/org-pages.service';
 import { PictureStore } from './picture-store.service';
+import {
+  OrgPageReceiptsController,
+  ReceiptsController,
+} from './receipts/receipts.controller';
+import { ReceiptsService } from './receipts/receipts.service';
 import { OrgSetting, OrgSettingSchema } from './schemas/org-setting.schema';
 import {
   AgreedBeliefsController,
@@ -108,7 +114,8 @@ import { VotesService } from './votes/votes.service';
  * and comments on ORG's own pages (Chunk 10b), and claims on imported pages
  * with the linking of imported comments (Chunk 11), and the admin dashboard
  * with the "Request EaM" button (Chunk 12), and reports with the moderation
- * queue (Chunk 13), each telling the people concerned by email (Chunk 14).
+ * queue (Chunk 13), each telling the people concerned by email (Chunk 14),
+ * and receipts for belief and comment versions (Chunk 16).
  */
 @Module({
   imports: [
@@ -116,6 +123,7 @@ import { VotesService } from './votes/votes.service';
     ModerationModule,
     AdminInboxModule,
     MemberNotificationsModule,
+    AnchoringModule,
     MongooseModule.forFeature([
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },
@@ -155,6 +163,8 @@ import { VotesService } from './votes/votes.service';
     MyReportWritesController,
     AdminModerationController,
     AdminModerationWritesController,
+    ReceiptsController,
+    OrgPageReceiptsController,
   ],
   providers: [
     MembersService,
@@ -183,6 +193,7 @@ import { VotesService } from './votes/votes.service';
     ReportsService,
     ModerationQueueService,
     ModerationThrottleGuard,
+    ReceiptsService,
   ],
   // Search (Chunk 15) asks the same service who is reading and what they may see.
   exports: [MembersService],

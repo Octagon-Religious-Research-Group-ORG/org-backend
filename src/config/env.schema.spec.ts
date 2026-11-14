@@ -121,3 +121,47 @@ describe('member notifications (Chunk 14)', () => {
     ).toContain('EMAIL_IMMEDIATE_RESERVE must be below EMAIL_DAILY_LIMIT');
   });
 });
+
+describe('timestamp anchoring settings (Chunk 16)', () => {
+  it('defaults to on, at 03:00 UTC, with FreeTSA and the four public calendars', () => {
+    const { value } = validate(required);
+    expect(value).toMatchObject({
+      ANCHORING_ENABLED: true,
+      ANCHOR_HOUR_UTC: 3,
+      FREETSA_URL: 'https://freetsa.org/tsr',
+      OTS_CALENDARS:
+        'https://a.pool.opentimestamps.org,https://b.pool.opentimestamps.org,https://a.pool.eternitywall.com,https://ots.btc.catallaxy.com',
+      ANCHOR_HTTP_TIMEOUT_MS: 20_000,
+    });
+  });
+
+  it('can be switched off', () => {
+    expect(
+      validate({ ...required, ANCHORING_ENABLED: 'false' }).value
+        .ANCHORING_ENABLED,
+    ).toBe(false);
+  });
+
+  it.each([
+    ['an http TSA', { FREETSA_URL: 'http://freetsa.org/tsr' }],
+    ['an hour out of range', { ANCHOR_HOUR_UTC: '24' }],
+    ['a timeout too short', { ANCHOR_HTTP_TIMEOUT_MS: '10' }],
+    [
+      'an http calendar',
+      { OTS_CALENDARS: 'https://a.example.test,http://b.example.test' },
+    ],
+    ['a calendar that is not an address', { OTS_CALENDARS: 'not a url' }],
+    ['no calendar at all', { OTS_CALENDARS: ' , ' }],
+  ])('refuses %s', (_case, env) => {
+    expect(validate({ ...required, ...env }).error).toBeDefined();
+  });
+
+  it('accepts a list of https calendars', () => {
+    expect(
+      validate({
+        ...required,
+        OTS_CALENDARS: 'https://a.example.test, https://b.example.test/',
+      }).error,
+    ).toBeUndefined();
+  });
+});

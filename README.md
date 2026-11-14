@@ -286,6 +286,118 @@ containing it. Each change is in the moderation log.
 `searchtermdays`. Nothing reads it now; its TTL empties it within 31 days,
 and it can then be dropped by hand.
 
+## Timestamp anchoring (Chunk 16)
+
+Every belief version (`blockversions`) and site comment version
+(`commentversions`) is hash-chained when saved. Once a day the server puts
+every version not yet anchored into a Merkle tree and gets two independent
+time-stamps for its root: an RFC 3161 token from **FreeTSA** and an
+**OpenTimestamps** proof (Bitcoin). Only the 32-byte root leaves the server,
+then the calendars' own commitments when a pending proof is upgraded.
+
+**Version hash** (unchanged since Chunks 3 and 9). SHA-256 of the UTF-8 bytes
+of `JSON.stringify([scheme, id, seq, text, authorUserId, createdAt, prevHash])`,
+JavaScript's JSON with no spaces, `createdAt` as ISO-8601 UTC with
+milliseconds (`2026-11-14T06:25:40.000Z`), `prevHash` the previous version's
+hash (64 zeros for the first). `scheme` is `org-blockversion-v1` (`id` is the
+block id), `org-commentversion-v1` (`id` is the comment id), or
+`org-blockversion-v2-suggestion` for a belief version accepted from a
+suggestion, which appends `suggestionId` and `suggestedBy` to the array. A
+receipt carries this exact string when it may (see below), so no
+reimplementation of the encoding is needed.
+
+**Merkle tree, `org-anchor-merkle-v1`.**
+
+- leaf = SHA-256(`0x00` ‖ versionHash), the hash as its 32 raw bytes;
+- node = SHA-256(`0x01` ‖ left ‖ right);
+- leaves are sorted ascending by leaf hash (bytes, i.e. lowercase hex
+  order), duplicates removed;
+- a level with an odd number of nodes carries its last node up unchanged; it
+  is never paired with itself;
+- one leaf: the root is the leaf.
+
+A path is a list of `{side, hash}` from the leaf up: `L` means
+parent = node(hash, current), `R` means parent = node(current, hash).
+
+**Time-stamps.** The RFC 3161 request's message imprint is the root itself
+(SHA-256 algorithm), with a 64-bit nonce and `certReq`. A token is stored only
+after it verifies here: the imprint and nonce match, the CMS signature over
+the signed attributes is valid, the signing-certificate attribute names the
+signer, the signer has the time-stamping purpose and was valid at the stamped
+time, and it chains to FreeTSA's root, which is pinned in
+`src/anchoring/freetsa-certs.ts` (SHA-256 of `cacert.pem` 2151b611…4438, of
+`tsa.crt` 8bfb0305…3467, as published on freetsa.org). The whole
+TimeStampResp is stored, so `openssl ts -verify -in` reads it as is. The
+OpenTimestamps root is submitted to the calendars in `OTS_CALENDARS` (each on
+its own; one is enough); the answers are merged into one standard detached
+`.ots` proof for the root (file-hash operation SHA-256, digest = root).
+
+**Schedule.** No external scheduler: one run when the server starts (Render's
+free instance sleeps, so a wake catches up) and hourly. From
+`ANCHOR_HOUR_UTC` the day's anchor is made, at most one per UTC day:
+`timestampanchors._id` is the date. Versions saved in the last two minutes
+wait for the next day (inserts in flight). A failed provider is tried again
+after 1 h, doubling up to 24 h; a pending OpenTimestamps proof is asked about
+every 6 h until one calendar returns a Bitcoin attestation, then never again.
+An admin can run it now (`POST /api/v1/admin/anchors/run`): today's anchor
+without waiting for the hour, still one a day.
+
+**Never lost, never twice.** No transaction is needed (it also runs on a
+standalone server). A version is claimed by an `anchorleaves` row whose `_id`
+names it (`b:<id>` or `c:<id>`), so a second claim is a duplicate key; both
+collections of versions are append-only, so nothing is written on them. Every
+step holds a lease on its anchor row and writes its result only while the
+lease is still its own; a crashed holder's lease runs out (10 min building,
+5 min per provider step) and the next run takes over. A batch looks back one
+day before the previous anchor's cutoff, for an insert that landed late; the
+health view reports any version older than the newest cutoff that no anchor
+holds. One day holds at most 50,000 versions; the rest go to the next day.
+
+**Verification.** `GET /api/v1/admin/anchors` re-runs every check on every
+anchor and reports each as pass / fail / cannot-measure: the leaves rebuild
+the stored root; every leaf's version exists, its fields still give its hash,
+and that hash is the anchored one; the FreeTSA token verifies for the root;
+the `.ots` proof commits to the root. Whether the Bitcoin block itself
+contains the proof is always "cannot measure" here (no Bitcoin node); the
+`ots` client checks that.
+
+**Receipts.** `GET /api/v1/members/profiles/:slug/tabs/:tabId/receipt`
+(`?field=text|title&seq=N`; omitted: the current text),
+`GET /api/v1/members/profiles/:slug/comments/:commentId/receipt` and
+`GET /api/v1/members/org-pages/:pageId/comments/:commentId/receipt`
+(`?seq=N`) return the receipt as JSON; the same path plus `/download` returns
+a zip with `receipt.json`, a `README.txt` of the exact commands, and per
+version `text.txt`, `hash-input.json`, `root.txt`, `anchor.tsr`, `anchor.ots`,
+with FreeTSA's two certificates. Who may have a receipt is decided by the
+same code that decides who may read that history; anyone else gets the
+history's own 404. A receipt names nobody: the version hash covers the
+author's Clerk id (and an accepted suggestion's suggester), so the exact
+hash input is included only for that person or an admin; anyone else gets the
+hash, the path and both proofs, which still prove the hash existed. An
+imported version says "imported from Apple Pages; originally written before
+<import date>". A version not anchored yet says so. 20 receipts a minute per
+visitor.
+
+**Indexes to create before production** (`npm run db:indexes`):
+`timestampanchors` `{tsa.status: 1}`, `{ots.status: 1}`; `anchorleaves`
+`{anchorId: 1}`, `{versionId: 1}`. The `_id` of each is its key. The
+`blockversions.createdAt` and `commentversions.createdAt` indexes already
+exist (Chunks 3 and 9).
+
+**Environment** (all optional):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANCHORING_ENABLED` | `true` | `false`: no timer, and "run now" answers 409 |
+| `ANCHOR_HOUR_UTC` | `3` | UTC hour from which the day's anchor is made |
+| `FREETSA_URL` | `https://freetsa.org/tsr` | https only; trust stays pinned to FreeTSA's root |
+| `OTS_CALENDARS` | the four public calendars | comma-separated https addresses |
+| `ANCHOR_HTTP_TIMEOUT_MS` | `20000` | per request; 2 tries per run |
+
+Upgrades are fetched only from calendars on the reference client's whitelist
+(`*.calendar.opentimestamps.org`, `*.calendar.eternitywall.com`,
+`*.calendar.catallaxy.com`, https, no port), whatever a calendar answered.
+
 ## Heroku deployment
 
 The repository includes a `Procfile` that starts the compiled application with

@@ -1,4 +1,11 @@
 import * as Joi from 'joi';
+import {
+  DEFAULT_ANCHOR_HOUR_UTC,
+  DEFAULT_ANCHOR_HTTP_TIMEOUT_MS,
+  DEFAULT_FREETSA_URL,
+  DEFAULT_OTS_CALENDARS,
+  parseCalendarList,
+} from '../anchoring/anchoring-config';
 import { IMPORT_TEST_DATABASES } from '../import/import-guard';
 import {
   BUDGET_DEFAULTS,
@@ -46,6 +53,25 @@ const requireReserveBelowLimit: Joi.CustomValidator<{
     : helpers.message({
         custom: 'EMAIL_IMMEDIATE_RESERVE must be below EMAIL_DAILY_LIMIT.',
       });
+
+/** OpenTimestamps calendars: one or more https addresses, comma-separated. */
+const requireHttpsList: Joi.CustomValidator<string> = (value, helpers) => {
+  const entries = parseCalendarList(value);
+  const bad = entries.find((entry) => {
+    try {
+      return new URL(entry).protocol !== 'https:';
+    } catch {
+      return true;
+    }
+  });
+  if (entries.length === 0 || bad !== undefined) {
+    return helpers.message({
+      custom:
+        'OTS_CALENDARS must be one or more https addresses, comma-separated.',
+    });
+  }
+  return value;
+};
 
 /**
  * Environment the app starts with. Its own module so the safety defaults can
@@ -121,6 +147,25 @@ export const envValidationSchema = Joi.object({
     .min(1)
     .max(90)
     .default(30),
+  // Timestamp anchoring (Chunk 16): on unless switched off; the UTC hour from
+  // which the day's anchor is made; the two providers; one request's timeout.
+  ANCHORING_ENABLED: Joi.boolean().default(true),
+  ANCHOR_HOUR_UTC: Joi.number()
+    .integer()
+    .min(0)
+    .max(23)
+    .default(DEFAULT_ANCHOR_HOUR_UTC),
+  FREETSA_URL: Joi.string()
+    .uri({ scheme: ['https'] })
+    .default(DEFAULT_FREETSA_URL),
+  OTS_CALENDARS: Joi.string()
+    .custom(requireHttpsList)
+    .default(DEFAULT_OTS_CALENDARS.join(',')),
+  ANCHOR_HTTP_TIMEOUT_MS: Joi.number()
+    .integer()
+    .min(1_000)
+    .max(120_000)
+    .default(DEFAULT_ANCHOR_HTTP_TIMEOUT_MS),
 })
   .custom(requireTestSiteOnTestDatabase)
   .custom(requireReserveBelowLimit);

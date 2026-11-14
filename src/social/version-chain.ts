@@ -73,9 +73,23 @@ export function computeVersionHash(
   input: VersionHashInput,
   scheme: string = HASH_SCHEME,
 ): string {
+  return createHash('sha256')
+    .update(canonicalVersionInput(input, scheme), 'utf8')
+    .digest('hex');
+}
+
+/**
+ * The exact string a version's hash is the SHA-256 of (as UTF-8). Exported
+ * so a receipt (Chunk 16) can hand it out, letting anyone recompute the hash
+ * with a public tool.
+ */
+export function canonicalVersionInput(
+  input: VersionHashInput,
+  scheme: string = HASH_SCHEME,
+): string {
   const suggested =
     scheme === HASH_SCHEME && typeof input.suggestionId === 'string';
-  const canonical = JSON.stringify([
+  return JSON.stringify([
     suggested ? SUGGESTED_HASH_SCHEME : scheme,
     input.blockId,
     input.seq,
@@ -85,7 +99,6 @@ export function computeVersionHash(
     input.prevHash,
     ...(suggested ? [input.suggestionId, input.suggestedBy ?? ''] : []),
   ]);
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
 export type ChainVerdict =
@@ -120,9 +133,10 @@ function isValidDate(value: unknown): value is Date {
  * the NEWEST version leaves a valid shorter chain; `verifyBlock` catches that
  * by comparing the head with the block's `currentVersionSeq`.
  *
- * The hash is unkeyed and no external anchor exists yet (plan §6), so this
- * finds accidents and partial edits only: someone able to write the database
- * can recompute every hash and the pointer, and nothing here would notice.
+ * The hash is unkeyed, so on its own this finds accidents and partial edits
+ * only: someone able to write the database can recompute every hash and the
+ * pointer. The daily external anchor (plan §6, Chunk 16, `anchoring/`) is
+ * what exposes such a rewrite, for every version anchored before it.
  *
  * @param blockId - the block the versions must belong to
  * @param versions - every stored version of the block, in any order

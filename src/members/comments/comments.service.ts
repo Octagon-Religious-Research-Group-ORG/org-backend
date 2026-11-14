@@ -45,6 +45,8 @@ import type { CommentWriter, WriteStatus } from './comment-writers';
 const SHORT_HASH_LENGTH = 12;
 
 export const COMMENT_NOT_FOUND = 'That comment does not exist.';
+export const COMMENT_VERSION_NOT_FOUND =
+  'That version of the comment does not exist.';
 export const NO_SUCH_BELIEF = 'That belief is not on this page.';
 export const REPLY_TO_REMOVED =
   'That comment was removed by its author, so it cannot take new replies.';
@@ -708,15 +710,17 @@ export class CommentsService {
   }
 
   /**
-   * A comment a moderator hid or removed has its history read by admins
-   * only (Chunk 13); anyone else gets the same 404 as for no comment.
+   * THE access decision for a comment's history and its receipts (Chunk 16):
+   * a native, non-suggestion comment on this page, not removed by its author,
+   * in a thread that is open, and hidden by a moderator only to non-admins.
+   *
+   * @throws NotFoundException otherwise, as for no comment
    */
-  private async historyIn(
+  private async requireReadableHistory(
     profile: { _id: Types.ObjectId },
     commentId: string,
-    page: number,
     viewer: Viewer,
-  ): Promise<CommentHistoryPage> {
+  ): Promise<void> {
     const row = await this.store.one(commentId);
     if (
       !row ||
@@ -733,7 +737,58 @@ export class CommentsService {
       commentId,
     )) as StoredComment;
     await this.requireOpenThread(profile._id, root.tabId);
+  }
 
+  /**
+   * One stored version of a comment on a member page, for a receipt: who
+   * may read the comment's history may have it.
+   *
+   * @param seq - omitted, the current version
+   * @throws NotFoundException as `history` does, or for no such version
+   */
+  async receiptVersion(
+    slug: string,
+    commentId: string,
+    viewer: Viewer,
+    seq?: number,
+  ) {
+    const { profile } = await this.readablePage(slug, viewer);
+    await this.requireReadableHistory(profile, commentId, viewer);
+    return this.storedVersion(commentId, seq);
+  }
+
+  /** The same for a comment on one of ORG's own pages (Chunk 10b). */
+  async orgReceiptVersion(
+    pageId: string,
+    commentId: string,
+    viewer: Viewer,
+    seq?: number,
+  ) {
+    await this.requireReadableHistory(
+      await this.orgPages.find(pageId),
+      commentId,
+      viewer,
+    );
+    return this.storedVersion(commentId, seq);
+  }
+
+  private async storedVersion(commentId: string, seq?: number) {
+    const row = await this.versions.full(commentId, seq);
+    if (!row) throw new NotFoundException(COMMENT_VERSION_NOT_FOUND);
+    return row;
+  }
+
+  /**
+   * A comment a moderator hid or removed has its history read by admins
+   * only (Chunk 13); anyone else gets the same 404 as for no comment.
+   */
+  private async historyIn(
+    profile: { _id: Types.ObjectId },
+    commentId: string,
+    page: number,
+    viewer: Viewer,
+  ): Promise<CommentHistoryPage> {
+    await this.requireReadableHistory(profile, commentId, viewer);
     const skip = (page - 1) * COMMENT_HISTORY_PAGE_SIZE;
     const rows = await this.versions.page(
       commentId,

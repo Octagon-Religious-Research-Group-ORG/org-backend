@@ -35,6 +35,7 @@
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/throttler": "^6.5.0",
     "@xmldom/xmldom": "0.9.12",
+    "asn1js": "3.0.10",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "express": "^5.2.1",
@@ -225,7 +226,22 @@
       "search/search-indexer.service.ts",
       "search/search.service.ts",
       "search/search-fragments.service.ts",
-      "search/search.controller.ts"
+      "search/search.controller.ts",
+      "anchoring/bytes.ts",
+      "anchoring/merkle.ts",
+      "anchoring/rfc3161.ts",
+      "anchoring/ots.ts",
+      "anchoring/freetsa-certs.ts",
+      "anchoring/anchoring-config.ts",
+      "anchoring/providers.ts",
+      "anchoring/version-records.ts",
+      "anchoring/anchoring.service.ts",
+      "anchoring/anchor-verifier.service.ts",
+      "anchoring/anchor-scheduler.service.ts",
+      "anchoring/anchoring.controller.ts",
+      "anchoring/receipt.ts",
+      "members/receipts/receipts.service.ts",
+      "members/receipts/receipts.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

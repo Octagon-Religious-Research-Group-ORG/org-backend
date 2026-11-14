@@ -4,7 +4,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, type Types } from 'mongoose';
 import {
   CommentVersion,
   type CommentVersionDocument,
@@ -36,7 +36,7 @@ export interface AppendCommentVersionInput {
 }
 
 /** A stored comment version, as the chain functions read it. */
-interface StoredCommentVersion {
+export interface StoredCommentVersion {
   commentId: string;
   seq: number;
   text: string;
@@ -161,6 +161,19 @@ export class CommentVersionsService {
       createdAt: Date;
       hash: string;
     }>;
+  }
+
+  /**
+   * One version with every stored field (for a receipt, Chunk 16).
+   *
+   * @param seq - omitted, the newest
+   */
+  async full(commentId: string, seq?: number) {
+    return (await this.versionModel
+      .findOne(seq === undefined ? { commentId } : { commentId, seq })
+      .sort({ seq: -1 })
+      .lean()
+      .exec()) as (StoredCommentVersion & { _id: Types.ObjectId }) | null;
   }
 
   /** Recomputes one comment's whole chain. Read-only. */
