@@ -405,17 +405,20 @@ history's own 404.
 **Who gets the hash material.** A version hash covers its text, time,
 previous hash and author's Clerk id. Given the text, the time and that hash
 (or even a 12-character prefix of it), anyone holding a candidate Clerk id
-could confirm the author offline with one SHA-256. So the hash, the previous
-hash, the salt and the exact hash input go only to a reader who may know who
-the author is: the author, an admin, a version with no person in it (imports,
-recorded first titles), or an author whose page is approved, NOT under a
-nickname, and visible to this reader at least by name (the rule that decides
-whether a comment shows its author's name). The Clerk id is then visible to
-that reader inside the hash input. Anyone else gets the text, the time, the
-salted leaf, the path and both proofs: the leaf cannot be tested against a
-guess without the salt. Such a receipt says plainly that it proves only that
-the version's sealed fingerprint existed by then, and that the link from the
-text to it needs the complete receipt. The same rule now hides the 12-character
+could confirm the author offline with one SHA-256. Three levels:
+
+- **Complete** (the exact hash input, which holds the Clerk id): only the
+  author, an ORG admin, or a version with no person in it (imports, recorded
+  first titles). Clerk ids never reach anyone else.
+- **Hashes** (version hash, previous hash, salt, leaf, path, both proofs; no
+  Clerk id): a reader who may know who the author is, i.e. the author's page
+  is approved, NOT under a nickname, and visible to this reader at least by
+  name (the rule that decides whether a comment shows its author's name).
+  They can check hash → leaf → root → proofs; their receipt says the step
+  from the text to the hash needs the author's complete receipt.
+- **Leaf only** (text, time, salted leaf, path, both proofs): everyone else.
+  The leaf cannot be tested against a guess without the salt; the receipt
+  says it proves only that the version's sealed fingerprint existed by then. The same rule now hides the 12-character
 hash prefixes in belief and comment HISTORY (from Chunks 8 and 9) from readers
 who may not know the author.
 

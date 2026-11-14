@@ -32,9 +32,22 @@ export const RECEIPT_NOTICE = [
  */
 export const PARTIAL_RECEIPT_NOTICE = [
   'This receipt proves only that this version’s sealed fingerprint (its leaf in the anchor) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.',
-  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the complete receipt, which only the author, an ORG admin, or a reader allowed to see who the author is can download.',
+  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the author’s complete receipt, which only the author or an ORG admin can download.',
   ...LIMITS,
 ];
+
+/**
+ * What a receipt WITH the hashes but without the hash input proves (a
+ * reader allowed to know the author): from the hash on, not the text.
+ */
+export const HASHES_RECEIPT_NOTICE = [
+  'This receipt proves that this version’s fingerprint (hash) existed no later than the times the two independent time-stamps give. Anyone can check every step from that hash on with free public tools; the commands are below.',
+  'The step from the text below to that hash needs the author’s complete receipt: the hash also covers the author’s account id, which only the author and ORG admins receive.',
+  ...LIMITS,
+];
+
+/** How much of the hash material a reader gets (Chunk 16 rounds 2 and 3). */
+export type Disclosure = 'full' | 'hashes' | 'none';
 
 export type ReceiptSubject =
   | { type: 'belief-text' | 'belief-title'; page: string; tabId: string }
@@ -54,11 +67,14 @@ export interface ReceiptVersionInput {
   label?: string;
   proof: VersionProof;
   /**
-   * May this reader know who wrote it (review round 2, M-A)? Decided by
-   * the caller from the author's page; without it, only the author, an
-   * admin, or a version with no person in it.
+   * - `full`: the hash input too, which holds the author's Clerk id: the
+   *   author, an admin, or a version with no person in it;
+   * - `hashes`: version hash, previous hash and salt, no Clerk id: a reader
+   *   allowed to know who the author is;
+   * - `none`: the salted leaf and the proofs only.
+   * Decided by the caller; without it, `full` or `none` by the reader.
    */
-  disclose?: boolean;
+  disclose?: Disclosure;
 }
 
 export interface ReceiptVersion {
@@ -69,6 +85,8 @@ export interface ReceiptVersion {
   outlineLabel?: string;
   /** Server time the version was saved (for imports: when imported). */
   serverTime: string;
+  /** How much of the hash material this reader got. */
+  disclosure: Disclosure;
   /**
    * The version hash, the previous one and the leaf's salt: only for a
    * reader who may know the author. With them a guessed author id could be
@@ -125,7 +143,10 @@ export const PENDING_MESSAGE =
   'Not anchored yet. Versions are anchored once a day; download the receipt again after the next anchor.';
 
 const WITHHELD_REASON =
-  "The version's hash is made from its text, its time and its author's account id. With that hash anyone could test a guessed account id offline and so learn who wrote it, which this site shows only to readers allowed to see the author. So this receipt holds no hash, previous hash or salt: it starts at the version's salted leaf, which proves the version was anchored but cannot be tested against a guess. The complete receipt (for the author, an admin, or a reader allowed to see the author) links the text to the leaf.";
+  "The version's hash is made from its text, its time and its author's account id. With that hash anyone could test a guessed account id offline and so learn who wrote it, which this site shows only to readers allowed to see the author. So this receipt holds no hash, previous hash or salt: it starts at the version's salted leaf, which proves the version was anchored but cannot be tested against a guess. A reader allowed to see the author gets the hash and salt; only the author's complete receipt (the author or an ORG admin) links the text to the hash.";
+
+const HASH_INPUT_REASON =
+  "The exact hash input holds the author's account id, which this site gives only to the author and to ORG admins. The version hash, previous hash and salt are here, so every step from the hash to the time-stamps can be checked; the step from the text to the hash needs the author's complete receipt.";
 
 function mayShow(id: string | undefined, reader: ReceiptReader) {
   return (
@@ -147,10 +168,11 @@ function versionOf(
   reader: ReceiptReader,
 ): ReceiptVersion {
   const { kind, record, proof } = input;
-  const disclose =
+  const disclose: Disclosure =
     input.disclose ??
-    (mayShow(record.authorUserId, reader) &&
-      mayShow(record.suggestedBy, reader));
+    (mayShow(record.authorUserId, reader) && mayShow(record.suggestedBy, reader)
+      ? 'full'
+      : 'none');
   const imported = importNote(record);
   return {
     kind,
@@ -158,7 +180,8 @@ function versionOf(
     text: record.text,
     ...(input.label ? { outlineLabel: input.label } : {}),
     serverTime: record.createdAt.toISOString(),
-    ...(disclose
+    disclosure: disclose,
+    ...(disclose !== 'none'
       ? {
           versionHash: record.hash,
           prevHash: record.prevHash,
@@ -166,13 +189,20 @@ function versionOf(
         }
       : {}),
     ...(imported ? { imported } : {}),
-    hashInput: disclose
-      ? { included: true, canonical: canonicalOf(kind, record) }
-      : {
-          included: false,
-          withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
-          reason: WITHHELD_REASON,
-        },
+    hashInput:
+      disclose === 'full'
+        ? { included: true, canonical: canonicalOf(kind, record) }
+        : disclose === 'hashes'
+          ? {
+              included: false,
+              withheld: ['hash input'],
+              reason: HASH_INPUT_REASON,
+            }
+          : {
+              included: false,
+              withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
+              reason: WITHHELD_REASON,
+            },
     anchor: proof.anchored
       ? {
           state: 'anchored',
@@ -217,6 +247,10 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
   if (version.hashInput.included) {
     lines.push(
       `1. Version hash: \`sha256sum ${folder}/hash-input.json\` (or \`openssl dgst -sha256 ${folder}/hash-input.json\`) must print ${version.versionHash}. That file is the JSON array [scheme, id, seq, text, author, server time, previous hash${version.kind === 'block' ? ', and for an accepted suggestion its id and author' : ''}] exactly as hashed, UTF-8, no spaces or newline; the text inside it is ${folder}/text.txt.`,
+    );
+  } else if (version.versionHash) {
+    lines.push(
+      `1. Text to version hash: needs the author's complete receipt (the hash input holds the author's account id). The version hash is ${version.versionHash}.`,
     );
   } else {
     lines.push(
@@ -273,9 +307,11 @@ export function buildReceipt(
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
-    notice: versions.every((version) => version.hashInput.included)
-      ? RECEIPT_NOTICE
-      : PARTIAL_RECEIPT_NOTICE,
+    notice: versions.some((version) => version.disclosure === 'none')
+      ? PARTIAL_RECEIPT_NOTICE
+      : versions.some((version) => version.disclosure === 'hashes')
+        ? HASHES_RECEIPT_NOTICE
+        : RECEIPT_NOTICE,
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

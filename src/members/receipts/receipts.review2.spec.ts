@@ -16,6 +16,8 @@ import { makeTestTsa } from '../../anchoring/test-tsa.mocks-spec';
 import { computeVersionHash, GENESIS_HASH } from '../../social/version-chain';
 import { CommentAuthorsService } from '../comments/comment-authors.service';
 import { harness, ids, U } from '../comments/comments-harness.mocks-spec';
+import { unzipSync } from 'fflate';
+import { receiptZip } from '../../anchoring/receipt';
 import { ReceiptsService } from './receipts.service';
 
 const tsa = makeTestTsa();
@@ -125,7 +127,7 @@ describe('receipts: no hash material for a reader who may not know the author', 
     );
   });
 
-  it('a named member’s comment: a reader allowed to see the author gets everything', async () => {
+  it('a named public author: a guest gets the hash and salt, never the Clerk id (JSON or zip)', async () => {
     const { h, receipts, anchor } = setUp();
     const { commentId } = await h.commentsService.create(
       await h.writer(U.named),
@@ -136,12 +138,34 @@ describe('receipts: no hash material for a reader who may not know the author', 
       },
     );
     await anchor();
-    const version = (
-      await receipts.comment('open-page', commentId, await h.viewer())
-    ).versions[0];
-    expect(version.versionHash).toBeDefined();
-    expect(version.salt).toBeDefined();
-    expect(version.hashInput.included).toBe(true);
+    const receipt = await receipts.comment(
+      'open-page',
+      commentId,
+      await h.viewer(),
+    );
+    const [version] = receipt.versions;
+    const stored = h.commentVersions.docs[0] as Record<string, any>;
+    expect(version.versionHash).toBe(stored.hash);
+    expect(version.salt).toMatch(/^[0-9a-f]{64}$/);
+    expect(version.hashInput.included).toBe(false);
+    expect(JSON.stringify(receipt)).not.toContain(U.named);
+    const files = unzipSync(receiptZip(receipt));
+    expect(files['version-1/hash-input.json']).toBeUndefined();
+    for (const bytes of Object.values(files)) {
+      expect(Buffer.from(bytes).toString('utf8')).not.toContain(U.named);
+    }
+    expect(receipt.notice.join(' ')).toContain(
+      'needs the author’s complete receipt',
+    );
+    // The author, and an admin, get the full hash input.
+    for (const reader of [U.named, U.admin]) {
+      const full = await receipts.comment(
+        'open-page',
+        commentId,
+        await h.viewer(reader),
+      );
+      expect(full.versions[0].hashInput.included).toBe(true);
+    }
   });
 
   it('an anonymous member’s belief: other readers get no hash material', async () => {

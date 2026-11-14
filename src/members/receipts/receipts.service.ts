@@ -41,6 +41,13 @@ export class ReceiptsService {
     label?: string,
   ): Promise<ReceiptVersionInput> {
     const record = toRecord(kind, row);
+    // The full hash input holds a Clerk id: the author or an admin only
+    // (round 3); a reader who may know the author gets the hashes.
+    const full = (id: string | undefined) =>
+      id === undefined ||
+      id.startsWith('system:') ||
+      viewer.isAdmin ||
+      viewer.userId === id;
     const known = await this.authors.identifiable(
       [record.authorUserId, record.suggestedBy],
       viewer,
@@ -50,7 +57,12 @@ export class ReceiptsService {
       record,
       ...(label ? { label } : {}),
       proof: await this.verifier.proveVersion(kind, record),
-      disclose: known(record.authorUserId) && known(record.suggestedBy),
+      disclose:
+        full(record.authorUserId) && full(record.suggestedBy)
+          ? 'full'
+          : known(record.authorUserId) && known(record.suggestedBy)
+            ? 'hashes'
+            : 'none',
     };
   }
 

@@ -165,10 +165,12 @@ describe('belief receipts follow the history access rules', () => {
       text: 'The owner rewrote it.',
     });
     expect(current.versions[0].hashInput.included).toBe(true);
-    // The owner's page is public and named: a guest may see who wrote it,
-    // so may recompute it too (review round 2, M-A).
+    // The owner's page is public and named: a guest may know who wrote it,
+    // so gets the hashes, but never the Clerk id in the hash input (round 3).
     const guest = await receipts.belief('open-page', 'tab_a', await h.viewer());
-    expect(guest.versions[0].hashInput).toMatchObject({ included: true });
+    expect(guest.versions[0].hashInput).toMatchObject({ included: false });
+    expect(guest.versions[0].disclosure).toBe('hashes');
+    expect(guest.versions[0].versionHash).toBeDefined();
     const first = await receipts.belief('open-page', 'tab_a', owner, 'text', 1);
     expect(first.versions[0]).toMatchObject({
       seq: 1,
