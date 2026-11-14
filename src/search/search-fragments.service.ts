@@ -51,7 +51,7 @@ export const ELIGIBLE_CACHE_MS = 60_000;
 export const MAX_TERMS_PER_VISITOR = 50;
 /**
  * Searchers the per-searcher limit remembers per window, at most. When it
- * is full the searcher seen LONGEST AGO is forgotten (round-3 review L2), so
+ * is full the searcher FIRST COUNTED longest ago is forgotten (round-3 review L2), so
  * a new searcher is always counted: nobody is frozen out. A forgotten
  * searcher may add up to {@link MAX_TERMS_PER_VISITOR} terms again, which
  * takes this many other new searchers arriving after them first.
@@ -238,7 +238,8 @@ export class SearchFragmentsService {
     const id = (this.keys as FragmentKeys).visitorId(window, visitor);
     const known = counts.get(id);
     if (known === undefined && counts.size >= MAX_TRACKED_VISITORS) {
-      // A Map keeps insertion order: its first key was seen longest ago.
+      // A Map keeps insertion order (updating a key does not move it), so its
+      // first key is the searcher first counted longest ago.
       counts.delete(counts.keys().next().value as string);
     }
     counts.set(id, (known ?? 0) + 1);

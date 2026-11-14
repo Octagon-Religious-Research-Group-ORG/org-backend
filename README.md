@@ -213,6 +213,7 @@ differently from the `$text` and regex engines.
 run of `SEARCH_FRAGMENT_WINDOW_DAYS` days (default 30); a person counts once
 per window, however many days they search and however often the server
 restarts. Two things are stored:
+
 - `searchtermwindows`: term, window number, number of different searchers.
   Deleted by TTL once the next window has ended.
 - `searchfragmentpairs`: one row per (searcher, term, window) whose `_id` is
@@ -226,6 +227,7 @@ window)`, and `serverSecret = HMAC(CLERK_SECRET_KEY, "org-search-fragments-v1")`
 database, so the database alone cannot recover a searcher, cannot test whether
 a given address or account searched a term, and cannot even tell which term a
 pair row is about. Nothing outlives its window by more than a day.
+
 - **No new setting:** `CLERK_SECRET_KEY` is already required on every site. The
   derivation is domain-separated, so the derived key is useless for anything
   else.
@@ -250,8 +252,8 @@ pair row is about. Nothing outlives its window by more than a day.
 
 **Per-searcher limit.** One searcher adds at most 50 different terms per
 window. The limit is kept in memory only (a restart resets it), for up to
-100,000 searchers per window. When that is full, the searcher seen longest ago
-is forgotten, so new searchers are always counted. A forgotten searcher could
+100,000 searchers per window. When that is full, the searcher first counted longest
+ago is forgotten, so new searchers are always counted. A forgotten searcher could
 add up to 50 terms again, but only after 100,000 other new searchers have
 arrived. The store is therefore bounded by roughly 50 rows per searcher per
 window, on top of the 30 searches a minute rate limit. A term is checked for public content before
@@ -260,6 +262,7 @@ anything is written, so searches for private or empty terms store nothing.
 **When a term is suggested.** Its count in the current window, or in the
 window just before it, reaches `SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5).
 The two counts are never added. The term must also:
+
 - have EVERY word of it, as a phrase, in belief text or an ORG page a
   signed-out reader can see now. A member's name or a belief title never
   counts.
