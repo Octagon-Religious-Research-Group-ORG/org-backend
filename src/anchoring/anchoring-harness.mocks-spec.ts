@@ -30,6 +30,7 @@ export interface AnchorModels {
 
 interface Extra {
   findById: (id: unknown) => ReturnType<FakeModel['findOne']>;
+  distinct: (field: string) => { exec: () => Promise<unknown[]> };
   insertMany: (docs: Doc[], options?: unknown) => Promise<Doc[]>;
 }
 
@@ -39,6 +40,10 @@ export function withAnchorQueries(
 ): FakeModel & Extra {
   const extended = model as FakeModel & Extra;
   extended.findById = (id) => model.findOne({ _id: id });
+  extended.distinct = (field) => ({
+    exec: () =>
+      Promise.resolve([...new Set(model.docs.map((doc) => doc[field]))]),
+  });
   extended.insertMany = async (docs) => {
     const writeErrors: Array<{ code: number; index: number }> = [];
     const inserted: Doc[] = [];

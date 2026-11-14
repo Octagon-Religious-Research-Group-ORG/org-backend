@@ -258,25 +258,47 @@ function namesCertificate(
 }
 
 /** Walks from the signer up through the token's certificates to a root. */
-function chainsTo(
+/**
+ * @returns the certificates from the signer up to and including the trusted
+ *   root, or undefined when no chain reaches one of `roots`
+ */
+function chainTo(
   signer: X509Certificate,
   pool: readonly X509Certificate[],
   roots: readonly X509Certificate[],
-): boolean {
+): X509Certificate[] | undefined {
   const issuedBy = (child: X509Certificate, parent: X509Certificate) =>
     child.checkIssued(parent) && child.verify(parent.publicKey);
   const seen = new Set<X509Certificate>();
+  const chain: X509Certificate[] = [];
   let current = signer;
   for (;;) {
-    if (roots.some((root) => issuedBy(current, root))) return true;
+    chain.push(current);
+    const root = roots.find((candidate) => issuedBy(current, candidate));
+    if (root) return [...chain, root];
     seen.add(current);
     const next = pool.find(
       (candidate) =>
         !seen.has(candidate) && candidate.ca && issuedBy(current, candidate),
     );
-    if (!next) return false;
+    if (!next) return undefined;
     current = next;
   }
+}
+
+function validAt(cert: X509Certificate, at: number) {
+  return (
+    at >= new Date(cert.validFrom).getTime() &&
+    at <= new Date(cert.validTo).getTime()
+  );
+}
+
+/** A certificate's issuer (DER) and serial (hex), as a SignerInfo names it. */
+function issuerAndSerial(certDer: Buffer) {
+  const tbs = kids(kids(parse(certDer))[0]);
+  // `[0] version` is optional: the serial is the first integer.
+  const at = isContext(tbs[0], 0) ? 1 : 0;
+  return { issuer: raw(tbs[at + 2]), serial: integerHex(tbs[at]) };
 }
 
 /**
@@ -352,10 +374,15 @@ export function verifyTimestampToken(
       return { outcome: 'fail', reason: 'message digest mismatch' };
     }
 
-    const serial = integerHex(kids(sid)[1]);
-    const signer = certs.find(
-      ({ x509 }) => x509.serialNumber.toLowerCase() === serial,
-    );
+    // Issuer AND serial (review L2): a serial alone is unique per issuer only.
+    const [sidIssuer, sidSerial] = kids(sid);
+    const wanted = { issuer: raw(sidIssuer), serial: integerHex(sidSerial) };
+    const signer = certs.find(({ der }) => {
+      const named = issuerAndSerial(der);
+      return (
+        named.serial === wanted.serial && named.issuer.equals(wanted.issuer)
+      );
+    });
     if (!signer) {
       return { outcome: 'cannot-measure', reason: 'signer certificate absent' };
     }
@@ -375,20 +402,23 @@ export function verifyTimestampToken(
       return { outcome: 'fail', reason: 'signer may not sign time stamps' };
     }
     const at = tst.genTime.getTime();
-    if (
-      at < new Date(signer.x509.validFrom).getTime() ||
-      at > new Date(signer.x509.validTo).getTime()
-    ) {
+    if (!validAt(signer.x509, at)) {
       return { outcome: 'fail', reason: 'signer not valid at that time' };
     }
-    if (
-      !chainsTo(
-        signer.x509,
-        certs.map((cert) => cert.x509),
-        roots,
-      )
-    ) {
+    const chain = chainTo(
+      signer.x509,
+      certs.map((cert) => cert.x509),
+      roots,
+    );
+    if (!chain) {
       return { outcome: 'fail', reason: 'not signed by a trusted TSA' };
+    }
+    // Every certificate up to the root, the root too (review L2).
+    if (!chain.every((cert) => validAt(cert, at))) {
+      return {
+        outcome: 'fail',
+        reason: 'a certificate in the chain was not valid at that time',
+      };
     }
     if (tst.hashAlgorithm !== OID.sha256 || tst.imprint !== digest) {
       return { outcome: 'fail', reason: 'imprint does not match' };

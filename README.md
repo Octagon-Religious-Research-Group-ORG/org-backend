@@ -348,18 +348,40 @@ names it (`b:<id>` or `c:<id>`), so a second claim is a duplicate key; both
 collections of versions are append-only, so nothing is written on them. Every
 step holds a lease on its anchor row and writes its result only while the
 lease is still its own; a crashed holder's lease runs out (10 min building,
-5 min per provider step) and the next run takes over. A batch looks back one
-day before the previous anchor's cutoff, for an insert that landed late; the
-health view reports any version older than the newest cutoff that no anchor
-holds. One day holds at most 50,000 versions; the rest go to the next day.
+5 min per provider step) and the next run takes over. Every run first
+finishes any EARLIER day's build that died after claiming its versions, from
+those claims, before making today's. A batch looks back one day before the
+previous anchor's cutoff, for an insert that landed late. One day holds at
+most 50,000 versions, the oldest first, belief and comment versions merged by
+time; when the cap is reached the anchor records the oldest version it had to
+leave (`resumeFrom`) and the next day's batch starts there, so the rest go to
+the next day and none falls out of every window. The health view reports any
+version older than the newest cutoff that no BUILT anchor holds: never
+claimed, or claimed by a build that never finished (a build still holding
+its lease is in progress, not a failure).
 
 **Verification.** `GET /api/v1/admin/anchors` re-runs every check on every
 anchor and reports each as pass / fail / cannot-measure: the leaves rebuild
 the stored root; every leaf's version exists, its fields still give its hash,
 and that hash is the anchored one; the FreeTSA token verifies for the root;
-the `.ots` proof commits to the root. Whether the Bitcoin block itself
-contains the proof is always "cannot measure" here (no Bitcoin node); the
-`ots` client checks that.
+the `.ots` proof commits to the root and holds at least one attestation
+(one that commits but attests nothing is "cannot measure"). Whether the
+Bitcoin block itself contains the proof is always "cannot measure" here (no
+Bitcoin node). The view is paged, 30 anchors a page (`?page=`); its totals
+are for that page, coverage is over every version.
+
+Checking the Bitcoin part yourself, as measured on 2026-11-14 with the
+reference JavaScript client (`opentimestamps` 0.4.9) on a proof our calendars
+had confirmed: `ots-cli.js verify <file>.ots` printed "Could not connect to
+local Bitcoin node", then "Lite-client verification, assuming block … is
+valid" and "Success! Bitcoin block 975755 attests existence", so that client
+works without a node by trusting a public explorer. Without any client
+feature: `ots-cli.js info <file>.ots` printed
+`verify BitcoinBlockHeaderAttestation(975755)` and
+`# Bitcoin block merkle root c484ebc9…0500d9`, and
+`https://blockstream.info/api/block/<hash of block 975755>` gave the same
+`merkle_root`. The receipt's README gives both routes. The Python client was
+not run here (see Chunk 16 notes).
 
 **Receipts.** `GET /api/v1/members/profiles/:slug/tabs/:tabId/receipt`
 (`?field=text|title&seq=N`; omitted: the current text),
@@ -373,7 +395,22 @@ same code that decides who may read that history; anyone else gets the
 history's own 404. A receipt names nobody: the version hash covers the
 author's Clerk id (and an accepted suggestion's suggester), so the exact
 hash input is included only for that person or an admin; anyone else gets the
-hash, the path and both proofs, which still prove the hash existed. An
+hash, the path and both proofs. Such a receipt says plainly that it proves
+only that the hash existed by then, and that the link from the text to the
+hash can be checked only with the author's complete receipt.
+
+Why login ids are never shown to other readers: the hash input is the
+version's text, time and author id, all but the id printed in the receipt.
+Anyone holding a candidate Clerk id (from anywhere) could test it offline
+against the receipt's hash, one SHA-256 per guess, and so learn who wrote an
+anonymous member's belief or comment. Withholding the id is what prevents
+that.
+
+Receipts are served from a per-anchor cache of the tree and the two proof
+checks (built anchors never change; the key includes the root and both
+proofs' bytes, at most 32 anchors). The admin health view never uses it and
+re-checks everything, so a leaf list altered behind an unchanged root is
+caught there. An
 imported version says "imported from Apple Pages; originally written before
 <import date>". A version not anchored yet says so. 20 receipts a minute per
 visitor.

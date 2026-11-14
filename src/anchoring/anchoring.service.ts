@@ -100,6 +100,8 @@ export interface StepOutcome {
 }
 
 export interface RunReport {
+  /** Builds of earlier days that had died part-way, finished now (review H1). */
+  resumed: BuildOutcome[];
   build: BuildOutcome;
   tsa: StepOutcome[];
   ots: StepOutcome[];
@@ -132,6 +134,8 @@ export class AnchoringService {
   private readonly logger = new Logger(AnchoringService.name);
   /** Pause between the tries of one provider (tests set it to 0). */
   retryPauseMs?: number;
+  /** Most versions in one day's batch (tests set a small one). */
+  maxLeaves = MAX_LEAVES;
 
   constructor(
     @InjectModel(TimestampAnchor.name)
@@ -156,8 +160,9 @@ export class AnchoringService {
    * OpenTimestamps upgrades.
    */
   async run(now = new Date(), force = false): Promise<RunReport> {
+    const resumed = await this.resumeStale(now);
     const build = await this.build(now, force);
-    const report: RunReport = { build, tsa: [], ots: [] };
+    const report: RunReport = { resumed, build, tsa: [], ots: [] };
     for (const id of await this.due('tsa', now)) {
       report.tsa.push({ anchorId: id, outcome: await this.stampTsa(id, now) });
     }
@@ -218,17 +223,61 @@ export class AnchoringService {
     return this.finishBuild(day, lease.id, now);
   }
 
-  /** The latest built anchor's cutoff, less the look-back; else the start. */
+  /**
+   * Finishes every build of an EARLIER day whose builder died after claiming
+   * its versions (review H1): its lease ran out, so it is taken over and
+   * built from its own claims. Today's is left to `build`.
+   */
+  private async resumeStale(now: Date): Promise<BuildOutcome[]> {
+    const stale = await this.anchorModel
+      .find({
+        status: 'building',
+        _id: { $lt: anchorDay(now) },
+        'lease.until': { $lt: now },
+      } as AnchorFilter)
+      .sort({ _id: 1 })
+      .select({ _id: 1 })
+      .lean()
+      .exec();
+    const outcomes: BuildOutcome[] = [];
+    for (const { _id } of stale) {
+      const lease = {
+        id: randomUUID(),
+        until: new Date(now.getTime() + BUILD_LEASE_MS),
+      };
+      const taken = await this.anchorModel
+        .findOneAndUpdate(
+          { _id, status: 'building', 'lease.until': { $lt: now } },
+          { $set: { lease } },
+        )
+        .lean()
+        .exec();
+      if (taken)
+        outcomes.push(await this.finishBuild(String(_id), lease.id, now));
+    }
+    return outcomes;
+  }
+
+  /**
+   * Where a new batch starts looking. The latest built anchor's cutoff less
+   * the look-back; but when that anchor was capped, from the oldest version
+   * it had to leave (`resumeFrom`), so no version ever falls outside every
+   * window (review M1). The first batch looks at all history.
+   */
   private async lowerBound(): Promise<Date> {
     const last = await this.anchorModel
       .findOne({ status: 'built' })
       .sort({ _id: -1 })
-      .select({ cutoff: 1 })
+      .select({ cutoff: 1, resumeFrom: 1 })
       .lean()
       .exec();
-    return last?.cutoff
-      ? new Date(last.cutoff.getTime() - LOOKBACK_MS)
-      : new Date(0);
+    if (!last?.cutoff) return new Date(0);
+    const lookBack = last.cutoff.getTime() - LOOKBACK_MS;
+    return new Date(
+      last.resumeFrom
+        ? Math.min(lookBack, last.resumeFrom.getTime() - 1)
+        : lookBack,
+    );
   }
 
   /** Versions of both kinds in (lower, cutoff] that no anchor has claimed. */
@@ -253,19 +302,24 @@ export class AnchoringService {
       { $limit: max },
       { $project: { _id: 1, hash: 1, createdAt: 1 } },
     ];
+    // Both kinds, merged oldest first, so neither can starve the other
+    // (review M1). One more than the limit says whether the cap was hit.
     const blocks = await this.blockVersionModel
-      .aggregate<Candidate>(pipeline(limit))
+      .aggregate<Candidate>(pipeline(limit + 1))
       .exec();
-    const comments =
-      blocks.length < limit
-        ? await this.commentVersionModel
-            .aggregate<Candidate>(pipeline(limit - blocks.length))
-            .exec()
-        : [];
+    const comments = await this.commentVersionModel
+      .aggregate<Candidate>(pipeline(limit + 1))
+      .exec();
     return [
       ...blocks.map((row) => ({ ...row, kind: 'block' as const })),
       ...comments.map((row) => ({ ...row, kind: 'comment' as const })),
-    ];
+    ]
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          String(a._id).localeCompare(String(b._id)),
+      )
+      .slice(0, limit + 1);
   }
 
   private async finishBuild(
@@ -278,11 +332,14 @@ export class AnchoringService {
       .select({ cutoff: 1 })
       .lean()
       .exec()) as { cutoff: Date };
-    const candidates = await this.unclaimed(
+    const found = await this.unclaimed(
       await this.lowerBound(),
       row.cutoff,
-      MAX_LEAVES,
+      this.maxLeaves,
     );
+    const candidates = found.slice(0, this.maxLeaves);
+    // Capped: the oldest version left behind is where the next batch starts.
+    const left = found.at(this.maxLeaves);
     if (candidates.length > 0) {
       try {
         await this.leafModel.insertMany(
@@ -339,6 +396,7 @@ export class AnchoringService {
           merkleRoot: tree.root,
           leaves,
           builtAt: now,
+          ...(left ? { resumeFrom: left.createdAt } : {}),
           tsa: { status: 'pending', attempts: 0 },
           ots: { status: 'submit', attempts: 0 },
         },

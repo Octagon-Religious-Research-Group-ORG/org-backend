@@ -1,4 +1,4 @@
-import { X509Certificate } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model, Types } from 'mongoose';
@@ -58,6 +58,8 @@ export interface AnchorReport {
 
 export interface HealthReport {
   checkedAt: string;
+  page: number;
+  hasMore: boolean;
   anchors: AnchorReport[];
   /** Versions older than the newest anchor's cutoff that no anchor holds. */
   coverage: Check;
@@ -85,6 +87,11 @@ export type VersionProof =
         ots: Check;
       };
     };
+
+/** Anchors whose checks receipts keep (the newest ones, in practice). */
+export const ANCHOR_CACHE_SIZE = 32;
+/** Anchors per page of the admin health view. */
+export const ANCHORS_PAGE_SIZE = 30;
 
 const pass = (detail: string): Check => ({ outcome: 'pass', detail });
 const fail = (detail: string): Check => ({ outcome: 'fail', detail });
@@ -146,6 +153,13 @@ export function checkOts(
       };
     }
     const summary = summarize(tree);
+    if (summary.pending.length === 0 && summary.bitcoin.length === 0) {
+      // Commits to the root, but nobody attests it (review L3).
+      return {
+        ots: unknown('the proof commits to the root but holds no attestation'),
+        bitcoin: unknown('no attestation'),
+      };
+    }
     return {
       ots: pass(
         `commits to the root; ${summary.pending.length} calendar(s) pending, ${summary.bitcoin.length} Bitcoin attestation(s)`,
@@ -179,6 +193,16 @@ export function checkOts(
 export class AnchorVerifierService {
   /** The only trust anchor: FreeTSA's root (tests pin their own). */
   trustedRoots = [new X509Certificate(FREETSA_ROOT_PEM)];
+  /** How many anchors' checks receipts keep (tests set a small one). */
+  anchorCacheSize = ANCHOR_CACHE_SIZE;
+  private readonly anchorChecks = new Map<
+    string,
+    {
+      tree: ReturnType<typeof safeTree>;
+      tsa: Check;
+      ots: Check;
+    }
+  >();
 
   constructor(
     @InjectModel(TimestampAnchor.name)
@@ -294,17 +318,64 @@ export class AnchorVerifierService {
     };
   }
 
-  /** Versions older than the newest cutoff that no anchor has claimed. */
-  private async coverage(): Promise<Check> {
+  /**
+   * Claims whose anchor is not built: a build that died part-way, or an
+   * anchor row that went missing (review H1). A build still holding its
+   * lease is in progress, not a problem.
+   */
+  private async unfinishedClaims(now: Date): Promise<string[]> {
+    const anchorIds = await this.leafModel.distinct('anchorId').exec();
+    if (anchorIds.length === 0) return [];
+    const rows = (await this.anchorModel
+      .find({ _id: { $in: anchorIds } })
+      .select({ status: 1, lease: 1 })
+      .lean()
+      .exec()) as TimestampAnchor[];
+    const fine = new Set(
+      rows
+        .filter(
+          (row) =>
+            row.status === 'built' ||
+            (row.status === 'building' &&
+              row.lease !== undefined &&
+              row.lease.until.getTime() >= now.getTime()),
+        )
+        .map((row) => row._id),
+    );
+    const unfinished = anchorIds.filter((id) => !fine.has(id));
+    if (unfinished.length === 0) return [];
+    const claims = (await this.leafModel
+      .find({ anchorId: { $in: unfinished } })
+      .sort({ _id: 1 })
+      .limit(20)
+      .select({ _id: 1, anchorId: 1 })
+      .lean()
+      .exec()) as Array<{ _id: string; anchorId: string }>;
+    return claims.map(
+      (claim) =>
+        `${claim._id} (claimed by unfinished anchor ${claim.anchorId})`,
+    );
+  }
+
+  /**
+   * Versions older than the newest cutoff that no BUILT anchor holds: never
+   * claimed, or claimed by an anchor that was never finished.
+   */
+  private async coverage(now: Date): Promise<Check> {
+    const unfinished = await this.unfinishedClaims(now);
     const newest = await this.anchorModel
       .findOne({ status: 'built' })
       .sort({ _id: -1 })
       .select({ cutoff: 1 })
       .lean()
       .exec();
-    if (!newest?.cutoff) return unknown('no anchor built yet');
+    if (!newest?.cutoff) {
+      return unfinished.length === 0
+        ? unknown('no anchor built yet')
+        : fail(`not anchored: ${unfinished.join(', ')}`);
+    }
     const cutoff = newest.cutoff;
-    const missing: string[] = [];
+    const missing: string[] = [...unfinished];
     for (const kind of ['block', 'comment'] as const) {
       const rows = await this.modelOf(kind)
         .aggregate<{ _id: Types.ObjectId }>([
@@ -330,13 +401,20 @@ export class AnchorVerifierService {
       : fail(`not anchored: ${missing.join(', ')}`);
   }
 
-  /** The admin health view: every anchor, each check counted on its own. */
-  async verifyAll(now = new Date()): Promise<HealthReport> {
-    const anchors = (await this.anchorModel
+  /**
+   * The admin health view: one page of anchors, newest first, each check
+   * counted on its own (totals are for that page); coverage is always over
+   * every version.
+   */
+  async verifyAll(now = new Date(), page = 1): Promise<HealthReport> {
+    const found = (await this.anchorModel
       .find({})
       .sort({ _id: -1 })
+      .skip((page - 1) * ANCHORS_PAGE_SIZE)
+      .limit(ANCHORS_PAGE_SIZE + 1)
       .lean()
       .exec()) as TimestampAnchor[];
+    const anchors = found.slice(0, ANCHORS_PAGE_SIZE);
     const reports: AnchorReport[] = [];
     for (const anchor of anchors) reports.push(await this.verifyAnchor(anchor));
     const totals = {} as HealthReport['totals'];
@@ -346,8 +424,10 @@ export class AnchorVerifierService {
     }
     return {
       checkedAt: now.toISOString(),
+      page,
+      hasMore: found.length > ANCHORS_PAGE_SIZE,
       anchors: reports,
-      coverage: await this.coverage(),
+      coverage: await this.coverage(now),
       totals,
     };
   }
@@ -365,8 +445,10 @@ export class AnchorVerifierService {
       .lean()
       .exec();
     if (!claim) return { anchored: false };
+    // Without its leaves: those are read once per anchor (review L1).
     const found = (await this.anchorModel
       .findById(claim.anchorId)
+      .select({ leaves: 0 })
       .lean()
       .exec()) as TimestampAnchor | null;
     // Claimed by a batch still being built: honestly not anchored yet.
@@ -378,7 +460,8 @@ export class AnchorVerifierService {
       : { _id: claim.anchorId, status: 'built' };
     const root = anchor.merkleRoot ?? '';
     const leaf = leafHash(claim.versionHash);
-    const tree = safeTree(anchor.leaves ?? []);
+    const checked = found ? await this.checkedAnchor(anchor) : undefined;
+    const tree = checked?.tree;
     const path = tree?.pathOf(leaf) ?? [];
     const pathCheck =
       tree && anchor.status === 'built' && rootFromPath(leaf, path) === root
@@ -403,9 +486,46 @@ export class AnchorVerifierService {
       checks: {
         hash,
         path: pathCheck,
-        tsa: checkTsa(anchor.tsa?.response, root, this.trustedRoots),
-        ots: checkOts(anchor.ots?.proof, root).ots,
+        tsa: checked?.tsa ?? checkTsa(undefined, root, this.trustedRoots),
+        ots: checked?.ots ?? checkOts(undefined, root).ots,
       },
     };
+  }
+
+  /**
+   * One anchor's tree and proof checks, for receipts. A built anchor never
+   * changes, so this is worked out once per anchor and kept, keyed by its
+   * root and the exact bytes of both proofs: a replaced root or proof is
+   * checked again at once. The admin health view never uses this; it
+   * re-checks everything, leaves included, on every read.
+   */
+  private async checkedAnchor(anchor: TimestampAnchor) {
+    const digest = (bytes?: Buffer) =>
+      bytes ? createHash('sha256').update(bytes).digest('hex') : '-';
+    const key = [
+      anchor._id,
+      anchor.status,
+      anchor.merkleRoot,
+      digest(anchor.tsa?.response),
+      digest(anchor.ots?.proof),
+    ].join('|');
+    const kept = this.anchorChecks.get(key);
+    if (kept) return kept;
+    const stored = (await this.anchorModel
+      .findById(anchor._id)
+      .select({ leaves: 1 })
+      .lean()
+      .exec()) as { leaves?: AnchoredLeaf[] } | null;
+    const root = anchor.merkleRoot ?? '';
+    const checked = {
+      tree: safeTree(stored?.leaves ?? []),
+      tsa: checkTsa(anchor.tsa?.response, root, this.trustedRoots),
+      ots: checkOts(anchor.ots?.proof, root).ots,
+    };
+    if (this.anchorChecks.size >= this.anchorCacheSize) {
+      this.anchorChecks.delete(this.anchorChecks.keys().next().value as string);
+    }
+    this.anchorChecks.set(key, checked);
+    return checked;
   }
 }

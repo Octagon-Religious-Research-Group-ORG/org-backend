@@ -88,6 +88,10 @@ class Reader {
     for (let shift = 0; shift <= 49; shift += 7) {
       const b = this.byte();
       value += (b & 0x7f) * 2 ** shift;
+      // Past 2^53 a JavaScript number is no longer exact (review L4).
+      if (value > Number.MAX_SAFE_INTEGER) {
+        throw new OtsFormatError('varuint too large');
+      }
       if (!(b & 0x80)) return value;
     }
     throw new OtsFormatError('varuint too long');
@@ -148,7 +152,11 @@ function readNode(r: Reader, msg: Buffer, depth: number): TimestampNode {
  * @throws OtsFormatError on bytes that are not a whole timestamp
  */
 export function parseTimestamp(bytes: Buffer, msg: Buffer): TimestampNode {
-  const r = new Reader(bytes);
+  return readWhole(new Reader(bytes), msg);
+}
+
+/** The rest of the reader as one timestamp, with nothing after it. */
+function readWhole(r: Reader, msg: Buffer): TimestampNode {
   const node = readNode(r, msg, 0);
   if (!r.done) throw new OtsFormatError('trailing bytes');
   return node;
@@ -249,8 +257,8 @@ export function parseDetached(file: Buffer): {
   if (r.varuint() !== 1) throw new OtsFormatError('unknown proof version');
   if (r.byte() !== OP_SHA256) throw new OtsFormatError('not a SHA-256 proof');
   const digest = r.bytes(32);
-  const rest = file.subarray(MAGIC.length + 2 + 32);
-  return { digest, tree: parseTimestamp(Buffer.from(rest), digest) };
+  // Read on from where the header ended, however long its version was.
+  return { digest, tree: readWhole(r, digest) };
 }
 
 /** What a proof attests, for status and verification. */

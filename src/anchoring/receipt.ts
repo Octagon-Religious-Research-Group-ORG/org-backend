@@ -11,12 +11,29 @@ export const RECEIPT_FORMAT = 'org-receipt-v1';
 const SYSTEM_AUTHOR = /^system:/;
 const IMPORTED_AUTHOR = 'system:import';
 
-/** What a receipt proves and does not prove, in plain words. */
-export const RECEIPT_NOTICE = [
-  'This receipt shows that the text below existed, exactly as written, no later than the times the two independent time-stamps give.',
+const LIMITS = [
   'It does not show who wrote it, that it is true, or that it was not written earlier somewhere else.',
   'FreeTSA is a free time-stamp service; it is not an EU "qualified" time-stamp authority. OpenTimestamps relies on the Bitcoin blockchain and becomes final only once its proof is confirmed in a block.',
   'This is not legal advice.',
+];
+
+/**
+ * What a COMPLETE receipt proves (the author's, or an admin's): anyone can
+ * recompute every step from the text with public tools.
+ */
+export const RECEIPT_NOTICE = [
+  'This receipt shows that the text below existed, exactly as written, no later than the times the two independent time-stamps give. Anyone can check every step with free public tools; the commands are below.',
+  ...LIMITS,
+];
+
+/**
+ * What a receipt WITHOUT the hash input proves (anyone else's): the
+ * time-stamps, not the link from the text to the hash (review M3).
+ */
+export const PARTIAL_RECEIPT_NOTICE = [
+  'This receipt proves only that this version’s fingerprint (hash) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.',
+  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the author’s complete receipt, which only the author (or an ORG admin) can download.',
+  ...LIMITS,
 ];
 
 export type ReceiptSubject =
@@ -216,7 +233,7 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
       ? `4. FreeTSA: \`openssl ts -verify -digest ${a.root} -in ${folder}/anchor.tsr -CAfile freetsa/cacert.pem -untrusted freetsa/tsa.crt\` must print "Verification: OK"; \`openssl ts -reply -in ${folder}/anchor.tsr -text\` shows its time ("Time stamp:"). The certificates are FreeTSA's own, from https://freetsa.org/files/.`
       : '4. FreeTSA: no token yet (the request will be tried again on the next run).',
     a.opentimestamps.proofBase64
-      ? `5. OpenTimestamps: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it.`
+      ? `5. OpenTimestamps: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it. Without a Bitcoin node: \`ots info ${folder}/anchor.ots\` prints "BitcoinBlockHeaderAttestation(<height>)" then "# Bitcoin block merkle root <root>"; look the block height up on any public block explorer (e.g. https://blockstream.info/block-height/<height>) and check that its Merkle root is the same.`
       : '5. OpenTimestamps: no proof yet (it will be tried again on the next run).',
   );
   return lines;
@@ -234,7 +251,9 @@ export function buildReceipt(
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
-    notice: RECEIPT_NOTICE,
+    notice: versions.every((version) => version.hashInput.included)
+      ? RECEIPT_NOTICE
+      : PARTIAL_RECEIPT_NOTICE,
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

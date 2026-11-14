@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call -- real Mongo rows */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- real Mongo rows */
 // Timestamp anchoring (Chunk 16) against a REAL MongoDB: the indexes, both
 // version kinds in one batch, idempotency and racing instances (no version
 // lost, none anchored twice), the nothing-new no-op, one provider down, the
@@ -415,6 +415,76 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
     p.upgrade.mockClear();
     await anchoringOn(m, tsa, p).run(new Date(when.getTime() + 48 * 3_600_000));
     expect(p.upgrade).not.toHaveBeenCalled();
+  });
+
+  it('review H1: a build that died after its claims is finished on the next day', async () => {
+    const old = [await blockVersion(m), await commentVersion(m)];
+    const p = fresh();
+    const today = soon();
+    const day = anchorDay(today);
+    const service = anchoringOn(m, tsa, p);
+    // Dies between the claims and the root write.
+    const spy = jest
+      .spyOn(m.TimestampAnchor, 'updateOne')
+      .mockImplementationOnce(() => {
+        throw new Error('process killed');
+      });
+    await expect(service.run(today)).rejects.toThrow('process killed');
+    spy.mockRestore();
+    expect((await m.TimestampAnchor.findById(day).lean()).status).toBe(
+      'building',
+    );
+    expect(await m.AnchorLeaf.countDocuments({ anchorId: day })).toBe(2);
+    // While it is stuck, coverage is no pass.
+    const stuckHealth = await verifier.verifyAll(
+      new Date(today.getTime() + 3_600_000),
+    );
+    expect(stuckHealth.coverage.outcome).toBe('fail');
+    expect(stuckHealth.coverage.detail).toContain(
+      'claimed by unfinished anchor',
+    );
+
+    const tomorrow = new Date(today.getTime() + 24 * 3_600_000);
+    await blockVersion(m, new Date(today.getTime() + 3_600_000));
+    const report = await anchoringOn(m, tsa, p).run(tomorrow);
+    expect(report.resumed).toEqual([
+      { state: 'built', anchorId: day, leaves: 2 },
+    ]);
+    const row = await m.TimestampAnchor.findById(day).lean();
+    expect(row.status).toBe('built');
+    expect(row.leaves.map((l: any) => String(l.versionId)).sort()).toEqual(
+      old.map((v) => String(v._id)).sort(),
+    );
+    expect(report.build).toMatchObject({
+      state: 'built',
+      anchorId: anchorDay(tomorrow),
+      leaves: 1,
+    });
+    expect((await verifier.verifyAll(tomorrow)).coverage.outcome).toBe('pass');
+  });
+
+  it('review M1: a capped first run over old history anchors every version over the next days', async () => {
+    for (let i = 0; i < 7; i++) {
+      await blockVersion(m, new Date(Date.UTC(2026, 8, 1 + i)));
+    }
+    for (let i = 0; i < 3; i++) {
+      await commentVersion(m, new Date(Date.UTC(2026, 8, 1 + i, 12)));
+    }
+    const start = soon();
+    for (let day = 0; day < 4; day++) {
+      const service = anchoringOn(m, tsa, fresh());
+      service.maxLeaves = 3;
+      await service.run(new Date(start.getTime() + day * 24 * 3_600_000));
+    }
+    expect(await m.AnchorLeaf.countDocuments()).toBe(10);
+    const first = await m.TimestampAnchor.findById(anchorDay(start)).lean();
+    // The oldest three of either kind, merged by time.
+    expect(first.leaves.map((l: any) => l.kind).sort()).toEqual([
+      'block',
+      'block',
+      'comment',
+    ]);
+    expect(first.resumeFrom).toBeInstanceOf(Date);
   });
 
   describe('tampering with real rows is detected', () => {

@@ -84,6 +84,8 @@ export interface CertOptions {
   timeStamping?: boolean;
   notBefore?: Date;
   notAfter?: Date;
+  /** An X.509 v1 certificate: no version field, no extensions. */
+  v1?: boolean;
 }
 
 export function makeCert(o: CertOptions): {
@@ -110,7 +112,7 @@ export function makeCert(o: CertOptions): {
     );
   }
   const tbs = seq(
-    ctx(0, new asn1js.Integer({ value: 2 })),
+    ...(o.v1 ? [] : [ctx(0, new asn1js.Integer({ value: 2 }))]),
     int(o.serial),
     algorithm(o.signer),
     name(o.issuer),
@@ -120,7 +122,7 @@ export function makeCert(o: CertOptions): {
     ),
     name(o.subject),
     parsed(o.key.publicKey.export({ type: 'spki', format: 'der' })),
-    ...(extensions.length > 0 ? [ctx(3, seq(...extensions))] : []),
+    ...(extensions.length > 0 && !o.v1 ? [ctx(3, seq(...extensions))] : []),
   );
   const tbsDer = der(tbs);
   const signature = sign('sha256', tbsDer, o.signer.privateKey);
@@ -192,6 +194,13 @@ export function makeTestTsa(
     tsaNotBefore?: Date;
     tsaNotAfter?: Date;
     intermediate?: boolean;
+    /** The root stops being valid at this time. */
+    rootNotAfter?: Date;
+    /**
+     * Put first in the token a certificate with the TSA's serial but another
+     * issuer, as a TSA's certificate list may hold (review L2).
+     */
+    decoy?: boolean | 'v1';
   } = {},
 ): TestTsa {
   const rootKey = newKey();
@@ -202,6 +211,17 @@ export function makeTestTsa(
     key: rootKey,
     signer: rootKey,
     ca: true,
+    notAfter: o.rootNotAfter,
+  });
+  const decoyKey = newKey();
+  const decoy = makeCert({
+    subject: 'Synthetic Decoy TSA',
+    issuer: 'Synthetic Decoy CA',
+    serial: '00c2e9',
+    key: decoyKey,
+    signer: decoyKey,
+    timeStamping: true,
+    v1: o.decoy === 'v1',
   });
   let issuerKey = rootKey;
   let issuerName = 'Synthetic Test Root';
@@ -338,7 +358,9 @@ export function makeTestTsa(
     );
     const certs = t.junkCertificate
       ? [int('01')]
-      : [tsa.der, ...chain, root.der].map(parsed);
+      : [...(o.decoy ? [decoy.der] : []), tsa.der, ...chain, root.der].map(
+          parsed,
+        );
     const signedData = seq(
       new asn1js.Integer({ value: 3 }),
       set(seq(oid(OID.sha256))),

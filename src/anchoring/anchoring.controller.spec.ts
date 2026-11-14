@@ -35,7 +35,7 @@ describe('AdminAnchorsController', () => {
 
   it('lists every anchor with each provider state and its checks, never the leaves or proofs', async () => {
     const { controller } = await setUp();
-    const view = await controller.list();
+    const view = await controller.list({});
     expect(view.enabled).toBe(true);
     expect(view.coverage.outcome).toBe('pass');
     expect(view.totals.root.pass).toBe(1);
@@ -79,7 +79,7 @@ describe('AdminAnchorsController', () => {
     row.ots.calendars[0].error = 'HTTP 503';
     row.ots.lastUpgradeAt = NOW;
     row.ots.bitcoinHeights = [870_123];
-    const built = (await controller.list()).anchors[1];
+    const built = (await controller.list({})).anchors[1];
     expect(built.tsa.lastError).toBe('HTTP 503');
     expect(built.ots).toMatchObject({
       lastError: 'no calendar accepted the root',

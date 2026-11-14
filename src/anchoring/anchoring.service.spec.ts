@@ -117,6 +117,7 @@ describe('AnchoringService', () => {
       ots as never,
     );
     expect(await idle.run(NOW)).toEqual({
+      resumed: [],
       build: { state: 'nothing-new' },
       tsa: [],
       ots: [],

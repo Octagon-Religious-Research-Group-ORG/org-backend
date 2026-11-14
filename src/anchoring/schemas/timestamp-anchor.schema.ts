@@ -108,6 +108,13 @@ export class TimestampAnchor {
   @Prop({ type: Date })
   builtAt?: Date;
 
+  /**
+   * Set when the day's cap was reached: the oldest version left for later.
+   * The next batch looks from here, so it is never left behind (review M1).
+   */
+  @Prop({ type: Date })
+  resumeFrom?: Date;
+
   @Prop({ type: String, match: /^[0-9a-f]{64}$/ })
   merkleRoot?: string;
 

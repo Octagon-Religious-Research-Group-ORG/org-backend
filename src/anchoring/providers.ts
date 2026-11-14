@@ -54,8 +54,22 @@ export async function fetchBytes(
     await response.body?.cancel();
     throw new Error(`answer too large (${declared} bytes)`);
   }
-  const body = Buffer.from(await response.arrayBuffer());
-  if (body.length > MAX_RESPONSE_BYTES) throw new Error('answer too large');
+  // Counted while it streams, so an answer with no (or a false) length is
+  // cut off at the cap instead of being read whole (review M4).
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const reader = response.body?.getReader();
+  for (;;) {
+    const next = reader ? await reader.read() : { done: true as const };
+    if (next.done) break;
+    size += next.value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader?.cancel();
+      throw new Error('answer too large');
+    }
+    chunks.push(next.value);
+  }
+  const body = Buffer.concat(chunks);
   return {
     status: response.status,
     type: response.headers.get('content-type') ?? '',

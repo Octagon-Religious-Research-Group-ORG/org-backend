@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   Post,
+  Query,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -14,6 +15,7 @@ import { ClerkAuthGuard } from '../auth/auth.guard';
 import { WriteThrottle } from '../config/throttle';
 import { NoStoreWhenSignedInInterceptor } from '../members/no-store.interceptor';
 import { AnchorScheduler } from './anchor-scheduler.service';
+import { AnchorsQueryDto } from './anchoring.dto';
 import {
   type AnchorReport,
   AnchorVerifierService,
@@ -79,10 +81,10 @@ export class AdminAnchorsController {
   ) {}
 
   @Get()
-  async list() {
-    const health = await this.verifier.verifyAll();
+  async list(@Query() query: AnchorsQueryDto) {
+    const health = await this.verifier.verifyAll(new Date(), query.page ?? 1);
     const rows = (await this.anchorModel
-      .find({})
+      .find({ _id: { $in: health.anchors.map((a) => a.anchorId) } })
       .sort({ _id: -1 })
       .select({ leaves: 0, 'tsa.response': 0, 'ots.proof': 0 })
       .lean()
@@ -119,6 +121,8 @@ export class AdminAnchorsController {
     return {
       enabled: this.anchoring.enabled,
       checkedAt: health.checkedAt,
+      page: health.page,
+      hasMore: health.hasMore,
       coverage: health.coverage,
       totals: health.totals,
       anchors,
