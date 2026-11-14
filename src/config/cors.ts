@@ -11,5 +11,7 @@ export function createCorsOptions(origins: string[]): CorsOptions {
       'Idempotency-Key',
       'X-Cart-Token',
     ],
+    // A receipt download (Chunk 16) names its file here; the website reads it.
+    exposedHeaders: ['Content-Disposition'],
   };
 }

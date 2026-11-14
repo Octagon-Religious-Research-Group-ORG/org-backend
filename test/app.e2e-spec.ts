@@ -311,4 +311,11 @@ describe('ORG API (e2e)', () => {
         expect(headers['access-control-allow-methods']).toContain('PUT');
       });
   });
+
+  it('lets the website read a receipt download’s file name (Chunk 16)', async () => {
+    await request(app.getHttpServer())
+      .get('/api/v1/health')
+      .set('Origin', 'http://localhost:50073')
+      .expect('Access-Control-Expose-Headers', 'Content-Disposition');
+  });
 });
