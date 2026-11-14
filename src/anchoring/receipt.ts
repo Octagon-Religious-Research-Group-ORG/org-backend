@@ -95,6 +95,24 @@ const STAMP_PHRASE: Record<Stamps, string> = {
     'the time-stamps each version holds give (some versions hold only one of the two time-stamps; each version below says which)',
 };
 
+/**
+ * When this server's own check of a version's hash or its path to the root
+ * failed (review round 9, L2): the receipt says so plainly, on every tier.
+ */
+export const UNCONFIRMED_RECEIPT_NOTICE = [
+  "This receipt could not be confirmed: this server's own check of the version's fingerprint, or of its place in the anchor, failed. It proves nothing about when the text existed; do not rely on it, and tell an ORG admin.",
+  ...LIMITS,
+];
+
+/** A version whose hash or path check failed on this server. */
+function failedCheck(version: ReceiptVersion): boolean {
+  return (
+    version.anchor.state === 'anchored' &&
+    (version.anchor.serverChecks.hash.outcome === 'fail' ||
+      version.anchor.serverChecks.path.outcome === 'fail')
+  );
+}
+
 /** Said when the only proof held cannot give a time yet (round 8). */
 const UNCONFIRMED_OTS =
   'An OpenTimestamps proof is in but not yet confirmed in a Bitcoin block, so it gives no time yet.';
@@ -109,10 +127,15 @@ function versionStamps(
   version: ReceiptVersion,
 ): Exclude<Stamps, 'mixed'> | undefined {
   if (version.anchor.state !== 'anchored') return undefined;
-  const tsa = version.anchor.freetsa.responseBase64 !== undefined;
+  // A stamp counts only when its own server check did not fail (round 9).
+  const checks = version.anchor.serverChecks;
+  const tsa =
+    version.anchor.freetsa.responseBase64 !== undefined &&
+    checks.tsa.outcome !== 'fail';
   const ots =
     version.anchor.opentimestamps.proofBase64 !== undefined &&
-    version.anchor.opentimestamps.bitcoinHeights.length > 0;
+    version.anchor.opentimestamps.bitcoinHeights.length > 0 &&
+    checks.ots.outcome !== 'fail';
   if (tsa && ots) return 'both';
   if (tsa) return 'freetsa';
   return ots ? 'opentimestamps' : undefined;
@@ -391,7 +414,11 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
       ? `4. FreeTSA: \`openssl ts -verify -digest ${a.root} -in ${folder}/anchor.tsr -CAfile freetsa/cacert.pem -untrusted freetsa/tsa.crt\` must print "Verification: OK"; \`openssl ts -reply -in ${folder}/anchor.tsr -text\` shows its time ("Time stamp:"). The certificates are FreeTSA's own, from https://freetsa.org/files/.`
       : '4. FreeTSA: no token yet (the request will be tried again on the next run).',
     a.opentimestamps.proofBase64
-      ? `5. OpenTimestamps: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it. Without a Bitcoin node: \`ots info ${folder}/anchor.ots\` prints "BitcoinBlockHeaderAttestation(<height>)" then "# Bitcoin block merkle root <root>"; look the block height up on any public block explorer (e.g. https://blockstream.info/block-height/<height>) and check that its Merkle root is the same.`
+      ? `5. OpenTimestamps, ${
+          a.opentimestamps.bitcoinHeights.length > 0
+            ? `confirmed in Bitcoin block ${a.opentimestamps.bitcoinHeights.join(', ')}`
+            : 'not yet confirmed in Bitcoin; it gives no time yet'
+        }: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it. Without a Bitcoin node: \`ots info ${folder}/anchor.ots\` prints "BitcoinBlockHeaderAttestation(<height>)" then "# Bitcoin block merkle root <root>"; look the block height up on any public block explorer (e.g. https://blockstream.info/block-height/<height>) and check that its Merkle root is the same.`
       : '5. OpenTimestamps: no proof yet (it will be tried again on the next run).',
   );
   return lines;
@@ -412,20 +439,22 @@ export function buildReceipt(
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
-    notice: withUnconfirmed(
-      versions,
-      versions.some((version) => version.disclosure === 'none')
-        ? stamps
-          ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
-          : PARTIAL_PENDING_RECEIPT_NOTICE
-        : versions.some((version) => version.disclosure === 'hashes')
-          ? stamps
-            ? stamped(HASHES_RECEIPT_NOTICE, stamps)
-            : HASHES_PENDING_RECEIPT_NOTICE
-          : stamps
-            ? stamped(RECEIPT_NOTICE, stamps)
-            : RECEIPT_PENDING_NOTICE,
-    ),
+    notice: versions.some(failedCheck)
+      ? [...UNCONFIRMED_RECEIPT_NOTICE]
+      : withUnconfirmed(
+          versions,
+          versions.some((version) => version.disclosure === 'none')
+            ? stamps
+              ? stamped(PARTIAL_RECEIPT_NOTICE, stamps)
+              : PARTIAL_PENDING_RECEIPT_NOTICE
+            : versions.some((version) => version.disclosure === 'hashes')
+              ? stamps
+                ? stamped(HASHES_RECEIPT_NOTICE, stamps)
+                : HASHES_PENDING_RECEIPT_NOTICE
+              : stamps
+                ? stamped(RECEIPT_NOTICE, stamps)
+                : RECEIPT_PENDING_NOTICE,
+        ),
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

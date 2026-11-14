@@ -16,6 +16,7 @@ import {
 import { AnchorVerifierService } from './anchor-verifier.service';
 import { AnchoringService } from './anchoring.service';
 import { parseTimestamp } from './ots';
+import type { OtsProvider } from './providers';
 import { CALENDAR_RESPONSES } from './step0-fixtures.mocks-spec';
 import type { TestTsa } from './test-tsa.mocks-spec';
 
@@ -179,7 +180,11 @@ export function addCommentVersion(
  * FreeTSA by the synthetic TSA (same token shape, its own root), and the
  * calendars by the REAL Step 0 answers replayed for the root.
  */
-export function offlineAnchoring(m: AnchorModels, tsa: TestTsa) {
+export function offlineAnchoring(
+  m: AnchorModels,
+  tsa: TestTsa,
+  options: { upgrade?: OtsProvider['upgrade'] } = {},
+) {
   const settings = { enabled: true, hourUtc: 0 };
   // Shared by every service on these models, as one collection would be.
   m.locks ??= fakeModel([], { unique: [['_id']] });
@@ -209,7 +214,7 @@ export function offlineAnchoring(m: AnchorModels, tsa: TestTsa) {
             tree: parseTimestamp(body, Buffer.from(root, 'hex')),
           })),
         ),
-      upgrade: () => Promise.resolve({ state: 'pending' }),
+      upgrade: options.upgrade ?? (() => Promise.resolve({ state: 'pending' })),
     } as never,
     m.locks as never,
   );

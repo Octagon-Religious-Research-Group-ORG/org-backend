@@ -169,7 +169,8 @@ function onlyDuplicates(error: unknown): boolean {
 }
 
 export type BuildOutcome =
-  | { state: 'not-due' | 'nothing-new' | 'busy' }
+  /** `not-reached`: the run stopped before its build (review round 9). */
+  | { state: 'not-due' | 'nothing-new' | 'busy' | 'not-reached' }
   | { state: 'failed'; anchorId: string; error: string }
   | { state: 'already-built' | 'empty'; anchorId: string }
   | { state: 'built'; anchorId: string; leaves: number };
@@ -254,13 +255,13 @@ export class AnchoringService {
     const report: RunReport = {
       resumed: [],
       released: [],
-      build: { state: 'busy' },
+      build: { state: 'not-reached' },
       tsa: [],
       ots: [],
     };
     // One run at a time, across every caller and instance (round 7).
     const lock = await this.acquireLock();
-    if (!lock) return { busy: true, ...report };
+    if (!lock) return { busy: true, ...report, build: { state: 'busy' } };
     try {
       // Still ours? Renews the lease; a run that lost it does nothing more.
       const ours = async (): Promise<boolean> => {
@@ -1087,7 +1088,7 @@ export class AnchoringService {
     const { leaseId, anchor } = taken;
     const proof = asBytes(anchor.ots?.proof);
     return anchor.ots?.status === 'pending' && proof
-      ? this.upgradeOts(id, leaseId, proof, now)
+      ? this.upgradeOts(id, leaseId, proof, anchor.ots.attempts, now)
       : this.submitOts(id, leaseId, anchor, now);
   }
 
@@ -1142,15 +1143,32 @@ export class AnchoringService {
     id: string,
     leaseId: string,
     proof: Buffer,
+    attempts: number,
     now: Date,
   ): Promise<string> {
-    const { digest, tree } = parseDetached(proof);
+    let parsed: ReturnType<typeof parseDetached>;
+    try {
+      parsed = parseDetached(proof);
+    } catch (error) {
+      // A stored proof that cannot be read stops only itself (round 9, L1).
+      const tries = attempts + 1;
+      const kept = await this.finishStep(id, 'ots', leaseId, {
+        $set: {
+          'ots.attempts': tries,
+          'ots.lastError': `the stored proof cannot be read: ${describe(error)}`,
+          'ots.nextAttemptAt': new Date(now.getTime() + retryDelay(tries)),
+        },
+      });
+      return kept ? 'failed' : 'lease-lost';
+    }
+    const { digest, tree } = parsed;
     const problems: string[] = [];
     for (const { uri, commitment } of summarize(tree).pending) {
       try {
         const answer = await this.ots.upgrade(uri, commitment);
         if (answer.state === 'upgraded') {
-          mergeInto(nodeFor(tree, commitment) as TimestampNode, answer.tree);
+          const refused = this.graft(digest, tree, commitment, answer.tree);
+          if (refused) problems.push(`${uri}: ${refused}`);
         } else if (answer.state === 'refused') {
           problems.push(`${uri}: ${answer.reason}`);
         }
@@ -1176,6 +1194,37 @@ export class AnchoringService {
     });
     if (!kept) return 'lease-lost';
     return confirmed ? 'confirmed' : 'pending';
+  }
+
+  /**
+   * Grafts a calendar's upgrade into the proof, or refuses it (review round
+   * 9, L1): an answer with no Bitcoin attestation (it would only make the
+   * proof grow), or one after which the whole proof would no longer read
+   * back (e.g. too deep from the root once grafted). A refused graft
+   * leaves the proof exactly as it was.
+   *
+   * @returns why it was refused, or undefined when grafted
+   */
+  private graft(
+    digest: Buffer,
+    tree: TimestampNode,
+    commitment: string,
+    answer: TimestampNode,
+  ): string | undefined {
+    if (summarize(answer).bitcoin.length === 0) {
+      return 'refused an upgrade that holds no Bitcoin attestation';
+    }
+    const node = nodeFor(tree, commitment) as TimestampNode;
+    const sizes = [node.attestations.length, node.ops.length] as const;
+    mergeInto(node, answer);
+    try {
+      parseDetached(serializeDetached(digest, tree));
+      return undefined;
+    } catch (error) {
+      node.attestations.length = sizes[0];
+      node.ops.length = sizes[1];
+      return `refused an upgrade the proof could not read back (${describe(error)})`;
+    }
   }
 
   /** The anchor and claim of one version, if it has been anchored. */
