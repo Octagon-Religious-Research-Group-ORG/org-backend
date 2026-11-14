@@ -392,6 +392,44 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
     ).toEqual([String(late._id)]);
   });
 
+  it('round 4 sweep: a builder that crashed after its insert leaves a claim; a later run releases it and anchors the version', async () => {
+    const start = soon();
+    const days = [0, 1, 2].map(
+      (n) => new Date(start.getTime() + n * 24 * 3_600_000),
+    );
+    for (const at of days) {
+      await blockVersion(m, new Date(at.getTime() - 3_600_000));
+      await anchoringOn(m, tsa, fresh()).run(at);
+    }
+    const late = await blockVersion(
+      m,
+      new Date(days[0].getTime() - 3 * 3_600_000),
+    );
+    // What the crashed builder left in the first day's anchor.
+    await m.AnchorLeaf.create({
+      _id: 'b:' + String(late._id),
+      anchorId: anchorDay(days[0]),
+      kind: 'block',
+      versionId: late._id,
+      versionHash: late.hash,
+      versionCreatedAt: late.createdAt,
+      salt: 'c'.repeat(64),
+      leaseId: 'a-builder-that-crashed',
+    });
+    const later = new Date(start.getTime() + 5 * 24 * 3_600_000);
+    await blockVersion(m, new Date(later.getTime() - 3_600_000));
+    const report = await anchoringOn(m, tsa, fresh()).run(later);
+    expect(report.released).toEqual([anchorDay(days[0])]);
+    expect(report.build).toMatchObject({ state: 'built', leaves: 2 });
+    const claim = await m.AnchorLeaf.findById('b:' + String(late._id)).lean();
+    expect(claim.anchorId).toBe(anchorDay(later));
+    const first = await m.TimestampAnchor.findById(anchorDay(days[0])).lean();
+    expect(first.rescanFrom).toBeUndefined();
+    expect(first.leafCount).toBe(
+      await m.AnchorLeaf.countDocuments({ anchorId: anchorDay(days[0]) }),
+    );
+  });
+
   it('a version anchored the next day is never in today’s batch', async () => {
     await blockVersion(m);
     const p = fresh();

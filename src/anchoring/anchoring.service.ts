@@ -45,6 +45,20 @@ export const SETTLE_MS = 2 * MINUTE_MS;
  * version whose insert landed after that anchor was built.
  */
 export const LOOKBACK_MS = DAY_MS;
+
+/**
+ * How far back each run sweeps finished anchors for claims outside their
+ * tree (review round 4); older anchors are swept only when flagged by their
+ * last check.
+ */
+export const SWEEP_DAYS = 30;
+
+/** A released anchor's rescan point, as read by one build. */
+interface Rescan {
+  _id: string;
+  rescanFrom: Date;
+  rescanToken: string;
+}
 /** Most versions in one day's batch; the rest wait for the next day. */
 export const MAX_LEAVES = 50_000;
 /** How long a builder holds a day's anchor. */
@@ -104,6 +118,8 @@ export interface StepOutcome {
 export interface RunReport {
   /** Builds of earlier days that had died part-way, finished now (review H1). */
   resumed: BuildOutcome[];
+  /** Finished anchors whose claims outside their tree were released now. */
+  released: string[];
   build: BuildOutcome;
   tsa: StepOutcome[];
   ots: StepOutcome[];
@@ -163,8 +179,9 @@ export class AnchoringService {
    */
   async run(now = new Date(), force = false): Promise<RunReport> {
     const resumed = await this.resumeStale(now);
+    const released = await this.sweepStray(now);
     const build = await this.build(now, force);
-    const report: RunReport = { resumed, build, tsa: [], ots: [] };
+    const report: RunReport = { resumed, released, build, tsa: [], ots: [] };
     for (const id of await this.due('tsa', now)) {
       report.tsa.push({ anchorId: id, outcome: await this.stampTsa(id, now) });
     }
@@ -214,7 +231,7 @@ export class AnchoringService {
       if (!taken) return { state: 'busy' };
     } else {
       const cutoff = new Date(now.getTime() - SETTLE_MS);
-      const lower = await this.lowerBound();
+      const { lower } = await this.lowerBound();
       if ((await this.unclaimed(lower, cutoff, 1)).length === 0) {
         return { state: 'nothing-new' };
       }
@@ -296,20 +313,84 @@ export class AnchoringService {
    * it had to leave (`resumeFrom`), so no version ever falls outside every
    * window (review M1). The first batch looks at all history.
    */
-  private async lowerBound(): Promise<Date> {
+  private async lowerBound(): Promise<{ lower: Date; rescans: Rescan[] }> {
+    // Released claims make their versions unclaimed again, possibly older
+    // than the look-back: the batch reaches back to them (review round 4).
+    const rescans = (await this.anchorModel
+      .find({ rescanFrom: { $exists: true } } as AnchorFilter)
+      .select({ rescanFrom: 1, rescanToken: 1 })
+      .lean()
+      .exec()) as Rescan[];
+    const earliest = Math.min(
+      ...rescans.map((rescan) => rescan.rescanFrom.getTime() - 1),
+    );
     const last = await this.anchorModel
       .findOne({ status: 'built' })
       .sort({ _id: -1 })
       .select({ cutoff: 1, resumeFrom: 1 })
       .lean()
       .exec();
-    if (!last?.cutoff) return new Date(0);
+    if (!last?.cutoff) return { lower: new Date(0), rescans };
     const lookBack = last.cutoff.getTime() - LOOKBACK_MS;
-    return new Date(
-      last.resumeFrom
-        ? Math.min(lookBack, last.resumeFrom.getTime() - 1)
-        : lookBack,
-    );
+    const usual = last.resumeFrom
+      ? Math.min(lookBack, last.resumeFrom.getTime() - 1)
+      : lookBack;
+    return { lower: new Date(Math.min(earliest, usual)), rescans };
+  }
+
+  /**
+   * Clears the rescan points a finished build has covered. Matched on the
+   * token read, so a release made after that read keeps its point.
+   */
+  private async clearRescans(rescans: Rescan[]): Promise<void> {
+    for (const rescan of rescans) {
+      await this.anchorModel
+        .updateOne(
+          { _id: rescan._id, rescanToken: rescan.rescanToken } as AnchorFilter,
+          { $unset: { rescanFrom: 1, rescanToken: 1 } },
+        )
+        .exec();
+    }
+  }
+
+  /**
+   * Releases claims outside their tree in finished anchors (review round 4):
+   * a builder that died between its insert and its re-check leaves them.
+   * Bounded: anchors of the last {@link SWEEP_DAYS} days, plus older ones
+   * whose stored last check was not a pass. One failing anchor does not
+   * stop the others.
+   *
+   * @returns the anchors whose claims were released
+   */
+  private async sweepStray(now: Date): Promise<string[]> {
+    const since = anchorDay(new Date(now.getTime() - SWEEP_DAYS * DAY_MS));
+    const rows = (await this.anchorModel
+      .find({
+        status: { $in: ['built', 'empty'] },
+        $or: [
+          { _id: { $gte: since } },
+          { 'lastCheck.outcome': { $in: ['fail', 'cannot-measure'] } },
+        ],
+      } as AnchorFilter)
+      .select({ status: 1, leafCount: 1 })
+      .lean()
+      .exec()) as Array<Pick<TimestampAnchor, '_id' | 'status' | 'leafCount'>>;
+    const released: string[] = [];
+    for (const row of rows) {
+      try {
+        const claims = await this.leafModel
+          .countDocuments({ anchorId: row._id })
+          .exec();
+        const expected = row.status === 'built' ? row.leafCount : 0;
+        if (claims === expected) continue;
+        if ((await this.releaseStray(row._id)) > 0) released.push(row._id);
+      } catch (error) {
+        this.logger.error(
+          `Anchor ${row._id}: the sweep for claims outside its tree failed: ${String(error)}`,
+        );
+      }
+    }
+    return released;
   }
 
   /** Versions of both kinds in (lower, cutoff] that no anchor has claimed. */
@@ -368,11 +449,8 @@ export class AnchoringService {
     // the cap is claimed now, so retries never grow one anchor (review M-B).
     const held = await this.leafModel.countDocuments({ anchorId: day }).exec();
     const budget = Math.max(0, this.maxLeaves - held);
-    const found = await this.unclaimed(
-      await this.lowerBound(),
-      row.cutoff,
-      budget,
-    );
+    const { lower, rescans } = await this.lowerBound();
+    const found = await this.unclaimed(lower, row.cutoff, budget);
     const candidates = found.slice(0, budget);
     // Capped: the oldest version left behind is where the next batch starts.
     const left = found.at(budget);
@@ -435,6 +513,7 @@ export class AnchoringService {
         .exec();
       if (done.modifiedCount !== 1) return { state: 'busy' };
       await this.releaseStray(day);
+      await this.clearRescans(rescans);
       return { state: 'empty', anchorId: day };
     }
     const leaves = claims
@@ -477,6 +556,7 @@ export class AnchoringService {
     // A claim that landed between the recount and the update slipped past
     // the guard: release it (review round 4, LOW-1).
     await this.releaseStray(day);
+    await this.clearRescans(rescans);
     this.logger.log(
       `Anchor ${day}: ${leaves.length} versions, root ${tree.root}`,
     );
@@ -491,25 +571,40 @@ export class AnchoringService {
    * lease holder reads every claim before building, and its recount turns
    * any later one into a takeover.
    */
-  private async releaseStray(day: string): Promise<void> {
+  private async releaseStray(day: string): Promise<number> {
     const row = (await this.anchorModel
       .findById(day)
       .select({ status: 1, leaves: 1 })
       .lean()
       .exec()) as Pick<TimestampAnchor, 'status' | 'leaves'>;
-    if (row.status === 'building') return;
+    if (row.status === 'building') return 0;
     const kept = (row.leaves ?? []).map((entry) =>
       leafId(entry.kind, entry.versionId),
     );
+    const stray = { anchorId: day, _id: { $nin: kept } };
+    const oldest = (await this.leafModel
+      .findOne(stray)
+      .sort({ versionCreatedAt: 1 })
+      .select({ versionCreatedAt: 1 })
+      .lean()
+      .exec()) as { versionCreatedAt: Date } | null;
+    if (!oldest) return 0;
     const { deletedCount } = await this.leafModel
-      .deleteMany({ anchorId: day, _id: { $nin: kept } })
+      .deleteMany(stray)
       .setOptions({ [RELEASE_STRAY_CLAIMS]: true })
       .exec();
-    if (deletedCount > 0) {
-      this.logger.warn(
-        `Anchor ${day}: released ${deletedCount} claim(s) that a builder made after the tree was built; they will be anchored in a later batch.`,
-      );
-    }
+    // Recorded AFTER the delete, so a build that reads this point also
+    // finds the versions unclaimed; the next build reaches back to them.
+    await this.anchorModel
+      .updateOne({ _id: day } as AnchorFilter, {
+        $min: { rescanFrom: oldest.versionCreatedAt },
+        $set: { rescanToken: randomUUID() },
+      })
+      .exec();
+    this.logger.warn(
+      `Anchor ${day}: released ${deletedCount} claim(s) that a builder made after the tree was built; they will be anchored in a later batch.`,
+    );
+    return deletedCount;
   }
 
   /** Built anchors whose provider step is waiting or due to retry. */

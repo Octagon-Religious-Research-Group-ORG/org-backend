@@ -124,6 +124,17 @@ export class TimestampAnchor {
   @Prop({ type: Date })
   resumeFrom?: Date;
 
+  /**
+   * Set when claims outside the tree were released (review round 4): the
+   * oldest released version's time, so the next batch reaches back to it.
+   * Cleared, by its token, once a finished build has covered it.
+   */
+  @Prop({ type: Date })
+  rescanFrom?: Date;
+
+  @Prop({ type: String })
+  rescanToken?: string;
+
   @Prop({ type: String, match: /^[0-9a-f]{64}$/ })
   merkleRoot?: string;
 

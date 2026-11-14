@@ -7,7 +7,7 @@
 // Supported: find/findOne (sort, skip, limit, select and session ignored,
 // lean), exists,
 // countDocuments, deleteOne/deleteMany, create (unique keys, timestamps), updateOne/updateMany/
-// findOneAndUpdate ($set, $unset, $inc, $push, $addToSet, $pull; updateOne also
+// findOneAndUpdate ($set, $unset, $inc, $min, $push, $addToSet, $pull; updateOne also
 // upserts), and aggregate with
 // $match, $sort, $group ($first, $min, $max, $sum, $push), $skip, $limit
 // and $project (1 and $slice). Not a database: no
@@ -170,6 +170,11 @@ function applyUpdate(doc: Doc, update: Doc | Doc[], inserting = false) {
           path,
           ((getPath(doc, path) as number) ?? 0) + (value as number),
         );
+      } else if (op === '$min') {
+        const current = getPath(doc, path);
+        if (current === undefined || compare(value, current) < 0) {
+          setPath(doc, path, copy(value));
+        }
       } else if (op === '$push') {
         const list = (getPath(doc, path) as unknown[]) ?? [];
         setPath(doc, path, [...list, copy(value)]);
