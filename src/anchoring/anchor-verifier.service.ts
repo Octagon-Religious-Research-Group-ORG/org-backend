@@ -1,7 +1,7 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import type { Model, Types } from 'mongoose';
+import type { Model, QueryFilter, Types } from 'mongoose';
 import {
   BlockVersion,
   type BlockVersionDocument,
@@ -60,6 +60,14 @@ export interface HealthReport {
   checkedAt: string;
   page: number;
   hasMore: boolean;
+  /** `totals` count this page's anchors only. */
+  totalsScope: 'page';
+  global: {
+    anchors: number;
+    unfinished: number;
+    failedWhenLastChecked: number;
+    neverChecked: number;
+  };
   anchors: AnchorReport[];
   /** Versions older than the newest anchor's cutoff that no anchor holds. */
   coverage: Check;
@@ -77,6 +85,8 @@ export type VersionProof =
       anchored: true;
       anchorId: string;
       leaf: string;
+      /** The version's secret salt: for readers who may know the author only. */
+      salt: string;
       path: PathStep[];
       root: string;
       anchor: TimestampAnchor;
@@ -88,8 +98,11 @@ export type VersionProof =
       };
     };
 
-/** Anchors whose checks receipts keep (the newest ones, in practice). */
-export const ANCHOR_CACHE_SIZE = 32;
+/**
+ * Most leaves the receipt cache holds, over all its anchors (review L-c): a
+ * tree costs memory per leaf, so the bound is on leaves, not anchors.
+ */
+export const ANCHOR_CACHE_LEAVES = 200_000;
 /** Anchors per page of the admin health view. */
 export const ANCHORS_PAGE_SIZE = 30;
 
@@ -100,10 +113,30 @@ const unknown = (detail: string): Check => ({
   detail,
 });
 
+type AnchorQuery = QueryFilter<TimestampAnchor>;
+
+/** The worst outcome of an anchor's checks, the Bitcoin block aside. */
+function worstOf(report: AnchorReport): Outcome {
+  const outcomes = [report.root, report.versions, report.tsa, report.ots].map(
+    (check) => check.outcome,
+  );
+  if (outcomes.includes('fail')) return 'fail';
+  return outcomes.includes('cannot-measure') ? 'cannot-measure' : 'pass';
+}
+
+/** The salted leaf of a claim, or undefined for a malformed one. */
+function saltedLeaf(versionHash: string, salt: string | undefined) {
+  try {
+    return leafHash(versionHash, String(salt));
+  } catch {
+    return undefined;
+  }
+}
+
 /** The tree the leaves give, or undefined when they give none. */
 function safeTree(leaves: readonly AnchoredLeaf[]) {
   try {
-    return buildTree(leaves.map((leaf) => leaf.versionHash));
+    return buildTree(leaves.map((leaf) => leaf.leaf));
   } catch {
     return undefined;
   }
@@ -193,14 +226,16 @@ export function checkOts(
 export class AnchorVerifierService {
   /** The only trust anchor: FreeTSA's root (tests pin their own). */
   trustedRoots = [new X509Certificate(FREETSA_ROOT_PEM)];
-  /** How many anchors' checks receipts keep (tests set a small one). */
-  anchorCacheSize = ANCHOR_CACHE_SIZE;
+  /** How many leaves the receipt cache may hold (tests set a small one). */
+  anchorCacheLeaves = ANCHOR_CACHE_LEAVES;
+  private cachedLeaves = 0;
   private readonly anchorChecks = new Map<
     string,
     {
       tree: ReturnType<typeof safeTree>;
       tsa: Check;
       ots: Check;
+      size: number;
     }
   >();
 
@@ -241,12 +276,13 @@ export class AnchorVerifierService {
   ): Promise<Check> {
     const claims = (await this.leafModel
       .find({ anchorId })
-      .select({ versionHash: 1 })
+      .select({ versionHash: 1, salt: 1 })
       .lean()
-      .exec()) as Array<{ _id: string; versionHash: string }>;
+      .exec()) as Array<{ _id: string; versionHash: string; salt: string }>;
     const claimed = new Map(
       claims.map((claim) => [claim._id, claim.versionHash]),
     );
+    const saltOf = new Map(claims.map((claim) => [claim._id, claim.salt]));
     const problems: string[] = [];
     if (claimed.size !== leaves.length) {
       problems.push(`${claimed.size} claims for ${leaves.length} leaves`);
@@ -266,6 +302,8 @@ export class AnchorVerifierService {
       const record = byKind[leaf.kind].get(String(leaf.versionId));
       if (claimed.get(id) !== leaf.versionHash) {
         problems.push(`${id}: not claimed by this anchor with this hash`);
+      } else if (saltedLeaf(leaf.versionHash, saltOf.get(id)) !== leaf.leaf) {
+        problems.push(`${id}: its salted leaf does not match its claim`);
       } else if (!record) {
         problems.push(`${id}: version missing`);
       } else if (record.hash !== leaf.versionHash) {
@@ -324,13 +362,31 @@ export class AnchorVerifierService {
    * lease is in progress, not a problem.
    */
   private async unfinishedClaims(now: Date): Promise<string[]> {
-    const anchorIds = await this.leafModel.distinct('anchorId').exec();
-    if (anchorIds.length === 0) return [];
+    const counted = await this.leafModel
+      .aggregate<{
+        _id: string;
+        n: number;
+      }>([{ $group: { _id: '$anchorId', n: { $sum: 1 } } }])
+      .exec();
+    if (counted.length === 0) return [];
+    const anchorIds = counted.map((entry) => entry._id);
     const rows = (await this.anchorModel
       .find({ _id: { $in: anchorIds } })
-      .select({ status: 1, lease: 1 })
+      .select({ status: 1, lease: 1, leafCount: 1 })
       .lean()
       .exec()) as TimestampAnchor[];
+    // A built anchor must hold exactly its claims (review L-a): a claim it
+    // does not hold was never anchored.
+    const claimsOf = new Map(counted.map((entry) => [entry._id, entry.n]));
+    const mismatched = rows
+      .filter(
+        (row) =>
+          row.status === 'built' && row.leafCount !== claimsOf.get(row._id),
+      )
+      .map(
+        (row) =>
+          `anchor ${row._id} has ${claimsOf.get(row._id)} claims for ${row.leafCount ?? 'no recorded'} leaves`,
+      );
     const fine = new Set(
       rows
         .filter(
@@ -343,7 +399,7 @@ export class AnchorVerifierService {
         .map((row) => row._id),
     );
     const unfinished = anchorIds.filter((id) => !fine.has(id));
-    if (unfinished.length === 0) return [];
+    if (unfinished.length === 0) return mismatched;
     const claims = (await this.leafModel
       .find({ anchorId: { $in: unfinished } })
       .sort({ _id: 1 })
@@ -351,10 +407,13 @@ export class AnchorVerifierService {
       .select({ _id: 1, anchorId: 1 })
       .lean()
       .exec()) as Array<{ _id: string; anchorId: string }>;
-    return claims.map(
-      (claim) =>
-        `${claim._id} (claimed by unfinished anchor ${claim.anchorId})`,
-    );
+    return [
+      ...mismatched,
+      ...claims.map(
+        (claim) =>
+          `${claim._id} (claimed by unfinished anchor ${claim.anchorId})`,
+      ),
+    ];
   }
 
   /**
@@ -416,7 +475,17 @@ export class AnchorVerifierService {
       .exec()) as TimestampAnchor[];
     const anchors = found.slice(0, ANCHORS_PAGE_SIZE);
     const reports: AnchorReport[] = [];
-    for (const anchor of anchors) reports.push(await this.verifyAnchor(anchor));
+    for (const anchor of anchors) {
+      const report = await this.verifyAnchor(anchor);
+      reports.push(report);
+      // Remembered, so the global count covers pages nobody opened since.
+      await this.anchorModel
+        .updateOne(
+          { _id: anchor._id },
+          { $set: { lastCheck: { at: now, outcome: worstOf(report) } } },
+        )
+        .exec();
+    }
     const totals = {} as HealthReport['totals'];
     for (const key of ['root', 'versions', 'tsa', 'ots', 'bitcoin'] as const) {
       totals[key] = { pass: 0, fail: 0, 'cannot-measure': 0 };
@@ -428,7 +497,31 @@ export class AnchorVerifierService {
       hasMore: found.length > ANCHORS_PAGE_SIZE,
       anchors: reports,
       coverage: await this.coverage(now),
+      totalsScope: 'page',
       totals,
+      global: await this.globalCounts(),
+    };
+  }
+
+  /**
+   * Over EVERY anchor, cheaply (review M-C): how many there are, how many
+   * have a provider step or the build itself unfinished, and how many failed
+   * a check when last checked or were never checked.
+   */
+  private async globalCounts(): Promise<HealthReport['global']> {
+    const count = (filter: Record<string, unknown>) =>
+      this.anchorModel.countDocuments(filter as AnchorQuery).exec();
+    return {
+      anchors: await count({}),
+      unfinished: await count({
+        $or: [
+          { status: 'building' },
+          { status: 'built', 'tsa.status': { $ne: 'granted' } },
+          { status: 'built', 'ots.status': { $in: ['submit', 'failed'] } },
+        ],
+      }),
+      failedWhenLastChecked: await count({ 'lastCheck.outcome': 'fail' }),
+      neverChecked: await count({ lastCheck: { $exists: false } }),
     };
   }
 
@@ -459,7 +552,7 @@ export class AnchorVerifierService {
       ? withBytes(found)
       : { _id: claim.anchorId, status: 'built' };
     const root = anchor.merkleRoot ?? '';
-    const leaf = leafHash(claim.versionHash);
+    const leaf = saltedLeaf(claim.versionHash, claim.salt) ?? '';
     const checked = found ? await this.checkedAnchor(anchor) : undefined;
     const tree = checked?.tree;
     const path = tree?.pathOf(leaf) ?? [];
@@ -480,6 +573,7 @@ export class AnchorVerifierService {
       anchored: true,
       anchorId: claim.anchorId,
       leaf,
+      salt: String(claim.salt),
       path,
       root,
       anchor,
@@ -517,15 +611,23 @@ export class AnchorVerifierService {
       .lean()
       .exec()) as { leaves?: AnchoredLeaf[] } | null;
     const root = anchor.merkleRoot ?? '';
+    const leaves = stored?.leaves ?? [];
     const checked = {
-      tree: safeTree(stored?.leaves ?? []),
+      tree: safeTree(leaves),
       tsa: checkTsa(anchor.tsa?.response, root, this.trustedRoots),
       ots: checkOts(anchor.ots?.proof, root).ots,
+      size: Math.max(1, leaves.length),
     };
-    if (this.anchorChecks.size >= this.anchorCacheSize) {
-      this.anchorChecks.delete(this.anchorChecks.keys().next().value as string);
+    // Oldest first out, until this one fits; one too big alone is not kept.
+    for (const [oldKey, old] of this.anchorChecks) {
+      if (this.cachedLeaves + checked.size <= this.anchorCacheLeaves) break;
+      this.anchorChecks.delete(oldKey);
+      this.cachedLeaves -= old.size;
     }
-    this.anchorChecks.set(key, checked);
+    if (this.cachedLeaves + checked.size <= this.anchorCacheLeaves) {
+      this.anchorChecks.set(key, checked);
+      this.cachedLeaves += checked.size;
+    }
     return checked;
   }
 }

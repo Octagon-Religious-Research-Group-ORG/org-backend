@@ -124,7 +124,9 @@ export class AdminAnchorsController {
       page: health.page,
       hasMore: health.hasMore,
       coverage: health.coverage,
+      totalsScope: health.totalsScope,
       totals: health.totals,
+      global: health.global,
       anchors,
     };
   }

@@ -206,6 +206,9 @@ function setup(
     {} as never,
   );
   const authors = {
+    // Who may get hash prefixes (Chunk 16 round 2): everyone, here; the
+    // refusals are tested over the real services (receipts.review2.spec).
+    identifiable: jest.fn(() => Promise.resolve(() => true)),
     resolve: jest.fn(() =>
       Promise.resolve((userId: string) => ({
         kind: 'member' as const,

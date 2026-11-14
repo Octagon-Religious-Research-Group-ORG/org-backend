@@ -273,12 +273,12 @@ describe('M3: a receipt without the hash input says what it can and cannot prove
     });
     const text = partial.notice.join(' ');
     expect(text).toContain(
-      'proves only that this version’s fingerprint (hash) existed',
+      'proves only that this version’s sealed fingerprint (its leaf in the anchor) existed',
     );
-    expect(text).toContain('only with the author’s complete receipt');
+    expect(text).toContain('only with the complete receipt');
     expect(text).not.toContain('exactly as written');
     expect(strFromU8(unzipSync(receiptZip(partial))['README.txt'])).toContain(
-      'only with the author’s complete receipt',
+      'only with the complete receipt',
     );
     const full = buildReceipt(subject, [{ kind: 'block', record, proof }], {
       userId: 'user_owner',
@@ -373,7 +373,7 @@ describe('review fixes: the remaining edges', () => {
     const b = addBlockVersion(m, { createdAt: at(DAY / 2) });
     await offlineAnchoring(m, tsa).run(at(DAY));
     const verifier = verifierFor(m, tsa);
-    verifier.anchorCacheSize = 1;
+    verifier.anchorCacheLeaves = 1;
     const verify = jest.spyOn(rfc3161, 'verifyTimestampToken');
     for (const v of [a, b, a]) {
       await verifier.proveVersion('block', toRecord('block', v));

@@ -720,7 +720,7 @@ export class CommentsService {
     profile: { _id: Types.ObjectId },
     commentId: string,
     viewer: Viewer,
-  ): Promise<void> {
+  ): Promise<{ authorUserId?: string }> {
     const row = await this.store.one(commentId);
     if (
       !row ||
@@ -737,6 +737,7 @@ export class CommentsService {
       commentId,
     )) as StoredComment;
     await this.requireOpenThread(profile._id, root.tabId);
+    return row;
   }
 
   /**
@@ -788,7 +789,16 @@ export class CommentsService {
     page: number,
     viewer: Viewer,
   ): Promise<CommentHistoryPage> {
-    await this.requireReadableHistory(profile, commentId, viewer);
+    const comment = await this.requireReadableHistory(
+      profile,
+      commentId,
+      viewer,
+    );
+    // The hash prefix would let a reader test a guessed author id: only for
+    // a reader who may know the author (Chunk 16 review round 2, M-A).
+    const known = (
+      await this.authors.identifiable([comment.authorUserId], viewer)
+    )(comment.authorUserId);
     const skip = (page - 1) * COMMENT_HISTORY_PAGE_SIZE;
     const rows = await this.versions.page(
       commentId,
@@ -800,7 +810,7 @@ export class CommentsService {
         seq: version.seq,
         savedAt: version.createdAt.toISOString(),
         text: version.text,
-        hash: version.hash.slice(0, SHORT_HASH_LENGTH),
+        ...(known ? { hash: version.hash.slice(0, SHORT_HASH_LENGTH) } : {}),
       })),
       page,
       hasMore: rows.length > COMMENT_HISTORY_PAGE_SIZE,

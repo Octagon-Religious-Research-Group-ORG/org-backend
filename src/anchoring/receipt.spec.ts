@@ -104,9 +104,9 @@ describe('receipts', () => {
       v.prevHash,
     ]);
     // Step 2-3: leaf and path, as the README spells out.
-    expect(version.anchor.leaf).toBe(leafHash(v.hash));
+    expect(version.anchor.leaf).toBe(leafHash(v.hash, version.salt as string));
     const lines = receipt.howToVerify.join('\n');
-    expect(lines).toContain(`printf '00${v.hash}'`);
+    expect(lines).toContain(`printf '00${v.hash}${version.salt}'`);
     expect(lines).toContain(version.anchor.leaf);
     expect(lines).toContain(
       `The last value must be the anchored root ${version.anchor.root}`,
@@ -158,13 +158,13 @@ describe('receipts', () => {
     const [version] = forGuest.versions;
     expect(version.hashInput).toEqual({
       included: false,
-      withheld: ['authorUserId'],
-      reason: expect.stringContaining(
-        'only to the author and to administrators',
-      ),
+      withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
+      reason: expect.stringContaining('test a guessed account id offline'),
     });
     expect(JSON.stringify(forGuest)).not.toContain('user_owner');
-    expect(forGuest.howToVerify.join('\n')).toContain('not recomputable');
+    expect(forGuest.howToVerify.join('\n')).toContain(
+      'it starts at the version',
+    );
     const files = unzipSync(receiptZip(forGuest));
     expect(files['version-1/hash-input.json']).toBeUndefined();
     expect(strFromU8(files['receipt.json'])).not.toContain('user_owner');
@@ -190,7 +190,7 @@ describe('receipts', () => {
     const forOwner = buildReceipt(subject, [await input('block', v)], OWNER);
     expect(forOwner.versions[0].hashInput).toMatchObject({
       included: false,
-      withheld: ['suggestedBy'],
+      withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
     });
     expect(JSON.stringify(forOwner)).not.toContain('user_suggester');
     const forBoth = buildReceipt(subject, [await input('block', v)], ADMIN);
@@ -204,7 +204,7 @@ describe('receipts', () => {
       isAdmin: false,
     });
     expect(forSuggester.versions[0].hashInput).toMatchObject({
-      withheld: ['authorUserId'],
+      withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
     });
   });
 
@@ -270,9 +270,10 @@ describe('receipts', () => {
     const proof: VersionProof = {
       anchored: true,
       anchorId: '2026-11-14',
-      leaf: leafHash(record.hash),
+      leaf: leafHash(record.hash, 'e'.repeat(64)),
+      salt: 'e'.repeat(64),
       path: [],
-      root: leafHash(record.hash),
+      root: leafHash(record.hash, 'e'.repeat(64)),
       anchor: { _id: '2026-11-14', status: 'built' },
       checks: {
         hash: { outcome: 'pass', detail: '' },

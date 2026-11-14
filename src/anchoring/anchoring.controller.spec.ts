@@ -39,6 +39,13 @@ describe('AdminAnchorsController', () => {
     expect(view.enabled).toBe(true);
     expect(view.coverage.outcome).toBe('pass');
     expect(view.totals.root.pass).toBe(1);
+    expect(view.totalsScope).toBe('page');
+    expect(view.global).toEqual({
+      anchors: 2,
+      unfinished: 1,
+      failedWhenLastChecked: 0,
+      neverChecked: 0,
+    });
     expect(view.anchors.map((a) => a.anchorId)).toEqual([
       '2026-11-15',
       '2026-11-14',

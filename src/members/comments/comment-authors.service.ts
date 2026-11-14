@@ -48,6 +48,46 @@ export class CommentAuthorsService {
   ) {}
 
   /**
+   * May this reader be given what lets them CONFIRM a guessed author id
+   * (a version hash, its prefix, a receipt's salt): only when they may know
+   * who the author is (Chunk 16 review round 2, M-A). That is: no person
+   * (an import or system record), the author themselves, an admin, or an
+   * author whose page is approved, NOT under a nickname, and visible to the
+   * reader at least by name.
+   */
+  async identifiable(
+    userIds: ReadonlyArray<string | undefined>,
+    viewer: Viewer,
+  ): Promise<(userId: string | undefined) => boolean> {
+    const people = [
+      ...new Set(
+        userIds.filter(
+          (id): id is string => id !== undefined && !id.startsWith('system:'),
+        ),
+      ),
+    ];
+    const pages = (people.length === 0
+      ? []
+      : await this.profileModel
+          .find({ ownerUserId: { $in: people } })
+          .select(AUTHOR_PAGE_FIELDS)
+          .lean()
+          .exec()) as unknown as Array<ProfileRow & { anonymous?: boolean }>;
+    const pageOf = new Map(pages.map((page) => [page.ownerUserId, page]));
+    return (userId) => {
+      if (userId === undefined || userId.startsWith('system:')) return true;
+      if (viewer.isAdmin || viewer.userId === userId) return true;
+      const page = pageOf.get(userId);
+      return Boolean(
+        page &&
+        (page.reviewStatus ?? 'approved') === 'approved' &&
+        !page.anonymous &&
+        decideProfileAccess(viewer, page).level !== 'none',
+      );
+    };
+  }
+
+  /**
    * @returns a lookup from Clerk user id to how the reader sees that author;
    *   `writtenAsAdmin` says what to show for an author not named
    */

@@ -139,10 +139,14 @@ describe('AnchoringService', () => {
       leaves: 2,
     });
     const row = anchor();
-    const root = buildTree([b.hash, c.hash]).root;
+    const root = buildTree(
+      m.leaves.docs.map((d) =>
+        leafHash(d.versionHash as string, d.salt as string),
+      ),
+    ).root;
     expect(row).toMatchObject({
       status: 'built',
-      scheme: 'org-anchor-merkle-v1',
+      scheme: 'org-anchor-merkle-v2',
       merkleRoot: root,
       cutoff: later(-SETTLE_MS),
     });
@@ -550,7 +554,8 @@ describe('AnchoringService', () => {
       const found = await service.anchorOf('block', v._id);
       expect(found?.anchor._id).toBe('2026-11-14');
       expect(found?.claim.versionHash).toBe(v.hash);
-      expect(leafHash(v.hash)).toBe(buildTree([v.hash]).root);
+      const leaf = leafHash(v.hash, found?.claim.salt as string);
+      expect(buildTree([leaf]).root).toBe(found?.anchor.merkleRoot);
       anchor().status = 'building';
       expect(await service.anchorOf('block', v._id)).toBeUndefined();
     });

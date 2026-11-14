@@ -9,6 +9,7 @@ import {
 } from '../../anchoring/receipt';
 import type { AnchoredKind } from '../../anchoring/schemas/anchor-leaf.schema';
 import { type RawVersionRow, toRecord } from '../../anchoring/version-records';
+import { CommentAuthorsService } from '../comments/comment-authors.service';
 import { CommentsService } from '../comments/comments.service';
 import { MemberHistoryService } from '../member-history.service';
 import type { TabHistoryField } from '../members.dto';
@@ -30,19 +31,26 @@ export class ReceiptsService {
     private readonly history: MemberHistoryService,
     private readonly comments: CommentsService,
     private readonly verifier: AnchorVerifierService,
+    private readonly authors: CommentAuthorsService,
   ) {}
 
   private async input(
     kind: AnchoredKind,
     row: AnyVersionRow,
+    viewer: Viewer,
     label?: string,
   ): Promise<ReceiptVersionInput> {
     const record = toRecord(kind, row);
+    const known = await this.authors.identifiable(
+      [record.authorUserId, record.suggestedBy],
+      viewer,
+    );
     return {
       kind,
       record,
       ...(label ? { label } : {}),
       proof: await this.verifier.proveVersion(kind, record),
+      disclose: known(record.authorUserId) && known(record.suggestedBy),
     };
   }
 
@@ -63,7 +71,7 @@ export class ReceiptsService {
     );
     const inputs: ReceiptVersionInput[] = [];
     for (const part of parts) {
-      inputs.push(await this.input('block', part.row, part.label));
+      inputs.push(await this.input('block', part.row, viewer, part.label));
     }
     const subject: ReceiptSubject = {
       type: field === 'title' ? 'belief-title' : 'belief-text',
@@ -88,7 +96,7 @@ export class ReceiptsService {
     );
     return buildReceipt(
       { type: 'comment', page: slug, commentId },
-      [await this.input('comment', row)],
+      [await this.input('comment', row, viewer)],
       viewer,
     );
   }
@@ -108,7 +116,7 @@ export class ReceiptsService {
     );
     return buildReceipt(
       { type: 'org-page-comment', orgPage: pageId, commentId },
-      [await this.input('comment', row)],
+      [await this.input('comment', row, viewer)],
       viewer,
     );
   }

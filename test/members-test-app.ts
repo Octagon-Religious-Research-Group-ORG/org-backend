@@ -118,7 +118,19 @@ export const profiles = {
     }
     return chain(OWN_PAGES[filter.ownerUserId as string] ?? null);
   }),
-  find: jest.fn(() => chain(PAGES)),
+  // By owner, one page each, as an account has at most one (Chunk 16 round
+  // 2: who may know a version's author is read from the owner's page).
+  find: jest.fn((filter?: { ownerUserId?: { $in?: string[] } }) => {
+    const owners = filter?.ownerUserId?.$in;
+    if (!owners) return chain(PAGES);
+    return chain(
+      PAGES.filter(
+        (p, i) =>
+          owners.includes(p.ownerUserId) &&
+          PAGES.findIndex((q) => q.ownerUserId === p.ownerUserId) === i,
+      ),
+    );
+  }),
   updateOne: jest.fn(() => ({
     exec: () => Promise.resolve({ matchedCount: 1, modifiedCount: 1 }),
   })),

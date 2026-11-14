@@ -11,28 +11,30 @@ const h = (n: number) => createHash('sha256').update(`v${n}`).digest('hex');
 const sha = (hex: string) =>
   createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
 
-describe('the anchor Merkle tree (org-anchor-merkle-v1)', () => {
+describe('the anchor Merkle tree (org-anchor-merkle-v2)', () => {
   it('is named, so a receipt says which rules built it', () => {
-    expect(MERKLE_SCHEME).toBe('org-anchor-merkle-v1');
+    expect(MERKLE_SCHEME).toBe('org-anchor-merkle-v2');
   });
 
-  it('a leaf is SHA-256(0x00 || hash) and a node SHA-256(0x01 || left || right)', () => {
-    expect(leafHash(h(1))).toBe(sha(`00${h(1)}`));
+  it('a leaf is SHA-256(0x00 || hash || salt) and a node SHA-256(0x01 || left || right)', () => {
+    expect(leafHash(h(1), h(8))).toBe(sha(`00${h(1)}${h(8)}`));
     expect(nodeHash(h(1), h(2))).toBe(sha(`01${h(1)}${h(2)}`));
-    // Domain separation: a leaf is never the same bytes as a node.
-    expect(leafHash(h(1))).not.toBe(sha(h(1)));
+    // Another salt, another leaf: a guess cannot be tested without it.
+    expect(leafHash(h(1), h(8))).not.toBe(leafHash(h(1), h(9)));
   });
 
   it('refuses anything that is not a SHA-256 hex digest', () => {
-    expect(() => leafHash('xyz')).toThrow('Not a SHA-256 hex digest');
+    expect(() => leafHash('xyz', h(1))).toThrow('Not a SHA-256 hex digest');
+    expect(() => leafHash(h(1), 'short')).toThrow('Not a SHA-256 hex digest');
+    expect(() => buildTree(['xyz'])).toThrow('Not a SHA-256 hex digest');
     expect(() => nodeHash(h(1), 'AB'.repeat(32))).toThrow();
     expect(() => buildTree([])).toThrow('No leaves');
   });
 
   it('one leaf: the root is that leaf, and its path is empty', () => {
     const tree = buildTree([h(1)]);
-    expect(tree.root).toBe(leafHash(h(1)));
-    expect(tree.pathOf(leafHash(h(1)))).toEqual([]);
+    expect(tree.root).toBe(h(1));
+    expect(tree.pathOf(h(1))).toEqual([]);
   });
 
   it('sorts leaves by their leaf hash and drops duplicates, so input order never matters', () => {
@@ -77,7 +79,7 @@ describe('the anchor Merkle tree (org-anchor-merkle-v1)', () => {
     );
     expect(rootFromPath(leaf, swapped)).not.toBe(tree.root);
     expect(rootFromPath(leaf, edited)).not.toBe(tree.root);
-    expect(rootFromPath(leafHash(h(9)), path)).not.toBe(tree.root);
+    expect(rootFromPath(h(9), path)).not.toBe(tree.root);
   });
 
   it('a malformed path or leaf gives no root rather than throwing', () => {
@@ -89,6 +91,6 @@ describe('the anchor Merkle tree (org-anchor-merkle-v1)', () => {
   });
 
   it('a leaf not in the tree has no path', () => {
-    expect(buildTree([h(1)]).pathOf(leafHash(h(2)))).toBeUndefined();
+    expect(buildTree([h(1)]).pathOf(h(2))).toBeUndefined();
   });
 });

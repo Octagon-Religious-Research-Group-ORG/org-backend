@@ -104,8 +104,11 @@ export interface CommentHistoryEntry {
   seq: number;
   savedAt: string;
   text: string;
-  /** The start of its SHA-256, enough to compare with a receipt. */
-  hash: string;
+  /**
+   * The start of its SHA-256, enough to compare with a receipt; only for a
+   * reader who may know the author (Chunk 16 review round 2).
+   */
+  hash?: string;
 }
 
 export interface CommentHistoryPage {

@@ -306,9 +306,12 @@ suggestion, which appends `suggestionId` and `suggestedBy` to the array. A
 receipt carries this exact string when it may (see below), so no
 reimplementation of the encoding is needed.
 
-**Merkle tree, `org-anchor-merkle-v1`.**
+**Merkle tree, `org-anchor-merkle-v2`.**
 
-- leaf = SHA-256(`0x00` ‖ versionHash), the hash as its 32 raw bytes;
+- leaf = SHA-256(`0x00` ‖ versionHash ‖ salt), each as its 32 raw bytes;
+  `salt` is 32 random bytes made for that version when it is anchored and
+  kept only on the server (`anchorleaves.salt`). v1 (no salt) was never
+  deployed: its leaves let a reader test a guessed author id offline;
 - node = SHA-256(`0x01` ‖ left ‖ right);
 - leaves are sorted ascending by leaf hash (bytes, i.e. lowercase hex
   order), duplicates removed;
@@ -368,7 +371,12 @@ the `.ots` proof commits to the root and holds at least one attestation
 (one that commits but attests nothing is "cannot measure"). Whether the
 Bitcoin block itself contains the proof is always "cannot measure" here (no
 Bitcoin node). The view is paged, 30 anchors a page (`?page=`); its totals
-are for that page, coverage is over every version.
+are labelled as being for that page only. Coverage is over every version.
+Beside them, cheap counts over EVERY anchor: how many exist, how many are
+unfinished (still building, FreeTSA not granted, or OpenTimestamps not yet
+accepted), how many failed a check when last checked, and how many were never
+checked. Each anchor's last check is stored on it when its page is viewed, so
+"failed when last checked" is only as fresh as the last view of that page.
 
 Checking the Bitcoin part yourself, as measured on 2026-11-14 with the
 reference JavaScript client (`opentimestamps` 0.4.9) on a proof our calendars
@@ -392,23 +400,32 @@ a zip with `receipt.json`, a `README.txt` of the exact commands, and per
 version `text.txt`, `hash-input.json`, `root.txt`, `anchor.tsr`, `anchor.ots`,
 with FreeTSA's two certificates. Who may have a receipt is decided by the
 same code that decides who may read that history; anyone else gets the
-history's own 404. A receipt names nobody: the version hash covers the
-author's Clerk id (and an accepted suggestion's suggester), so the exact
-hash input is included only for that person or an admin; anyone else gets the
-hash, the path and both proofs. Such a receipt says plainly that it proves
-only that the hash existed by then, and that the link from the text to the
-hash can be checked only with the author's complete receipt.
+history's own 404.
 
-Why login ids are never shown to other readers: the hash input is the
-version's text, time and author id, all but the id printed in the receipt.
-Anyone holding a candidate Clerk id (from anywhere) could test it offline
-against the receipt's hash, one SHA-256 per guess, and so learn who wrote an
-anonymous member's belief or comment. Withholding the id is what prevents
-that.
+**Who gets the hash material.** A version hash covers its text, time,
+previous hash and author's Clerk id. Given the text, the time and that hash
+(or even a 12-character prefix of it), anyone holding a candidate Clerk id
+could confirm the author offline with one SHA-256. So the hash, the previous
+hash, the salt and the exact hash input go only to a reader who may know who
+the author is: the author, an admin, a version with no person in it (imports,
+recorded first titles), or an author whose page is approved, NOT under a
+nickname, and visible to this reader at least by name (the rule that decides
+whether a comment shows its author's name). The Clerk id is then visible to
+that reader inside the hash input. Anyone else gets the text, the time, the
+salted leaf, the path and both proofs: the leaf cannot be tested against a
+guess without the salt. Such a receipt says plainly that it proves only that
+the version's sealed fingerprint existed by then, and that the link from the
+text to it needs the complete receipt. The same rule now hides the 12-character
+hash prefixes in belief and comment HISTORY (from Chunks 8 and 9) from readers
+who may not know the author.
+
+Remaining assumption, stated plainly: the salt stays secret on the server. A
+reader who obtains the database (or a complete receipt from someone allowed
+one) can still test guesses for that version.
 
 Receipts are served from a per-anchor cache of the tree and the two proof
 checks (built anchors never change; the key includes the root and both
-proofs' bytes, at most 32 anchors). The admin health view never uses it and
+proofs' bytes, at most 200,000 leaves in all). The admin health view never uses it and
 re-checks everything, so a leaf list altered behind an unchanged root is
 caught there. An
 imported version says "imported from Apple Pages; originally written before

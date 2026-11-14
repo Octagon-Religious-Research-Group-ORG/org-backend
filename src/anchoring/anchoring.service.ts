@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model, PipelineStage, QueryFilter, Types } from 'mongoose';
@@ -11,7 +11,7 @@ import {
   type CommentVersionDocument,
 } from '../social/schemas/comment-version.schema';
 import { asBytes } from './bytes';
-import { buildTree, MERKLE_SCHEME } from './merkle';
+import { buildTree, leafHash, MERKLE_SCHEME } from './merkle';
 import {
   mergeInto,
   nodeFor,
@@ -91,6 +91,7 @@ function onlyDuplicates(error: unknown): boolean {
 
 export type BuildOutcome =
   | { state: 'not-due' | 'nothing-new' | 'busy' }
+  | { state: 'failed'; anchorId: string; error: string }
   | { state: 'already-built' | 'empty'; anchorId: string }
   | { state: 'built'; anchorId: string; leaves: number };
 
@@ -196,7 +197,15 @@ export class AnchoringService {
     if (existing) {
       const taken = await this.anchorModel
         .findOneAndUpdate(
-          { _id: day, status: 'building', 'lease.until': { $lt: now } },
+          {
+            _id: day,
+            status: 'building',
+            // No lease at all is as stale as a run-out one (review L-b).
+            $or: [
+              { lease: { $exists: false } },
+              { 'lease.until': { $lt: now } },
+            ],
+          } as AnchorFilter,
           { $set: { lease } },
         )
         .lean()
@@ -233,7 +242,7 @@ export class AnchoringService {
       .find({
         status: 'building',
         _id: { $lt: anchorDay(now) },
-        'lease.until': { $lt: now },
+        $or: [{ lease: { $exists: false } }, { 'lease.until': { $lt: now } }],
       } as AnchorFilter)
       .sort({ _id: 1 })
       .select({ _id: 1 })
@@ -245,15 +254,37 @@ export class AnchoringService {
         id: randomUUID(),
         until: new Date(now.getTime() + BUILD_LEASE_MS),
       };
-      const taken = await this.anchorModel
-        .findOneAndUpdate(
-          { _id, status: 'building', 'lease.until': { $lt: now } },
-          { $set: { lease } },
-        )
-        .lean()
-        .exec();
-      if (taken)
-        outcomes.push(await this.finishBuild(String(_id), lease.id, now));
+      // Each on its own: one that cannot be finished stops nothing else
+      // (review M-B). It stays stale, so the next run tries again.
+      try {
+        const taken = await this.anchorModel
+          .findOneAndUpdate(
+            {
+              _id,
+              status: 'building',
+              $or: [
+                { lease: { $exists: false } },
+                { 'lease.until': { $lt: now } },
+              ],
+            } as AnchorFilter,
+            { $set: { lease } },
+          )
+          .lean()
+          .exec();
+        if (taken) {
+          outcomes.push(await this.finishBuild(String(_id), lease.id, now));
+        }
+      } catch (error) {
+        const reason = describe(error);
+        this.logger.error(
+          `Anchor ${String(_id)}: resuming failed (${reason}).`,
+        );
+        outcomes.push({
+          state: 'failed',
+          anchorId: String(_id),
+          error: reason,
+        });
+      }
     }
     return outcomes;
   }
@@ -332,14 +363,31 @@ export class AnchoringService {
       .select({ cutoff: 1 })
       .lean()
       .exec()) as { cutoff: Date };
+    // A takeover keeps the claims a dead builder made: only the rest of
+    // the cap is claimed now, so retries never grow one anchor (review M-B).
+    const held = await this.leafModel.countDocuments({ anchorId: day }).exec();
+    const budget = Math.max(0, this.maxLeaves - held);
     const found = await this.unclaimed(
       await this.lowerBound(),
       row.cutoff,
-      this.maxLeaves,
+      budget,
     );
-    const candidates = found.slice(0, this.maxLeaves);
+    const candidates = found.slice(0, budget);
     // Capped: the oldest version left behind is where the next batch starts.
-    const left = found.at(this.maxLeaves);
+    const left = found.at(budget);
+    const owned: AnchorFilter = {
+      _id: day,
+      status: 'building',
+      'lease.id': leaseId,
+    };
+    // Still ours? A builder whose lease was taken over claims nothing
+    // (review L-a).
+    const stillOurs = await this.anchorModel
+      .findOne(owned)
+      .select({ _id: 1 })
+      .lean()
+      .exec();
+    if (!stillOurs) return { state: 'busy' };
     if (candidates.length > 0) {
       try {
         await this.leafModel.insertMany(
@@ -350,6 +398,7 @@ export class AnchoringService {
             versionId: candidate._id,
             versionHash: candidate.hash,
             versionCreatedAt: candidate.createdAt,
+            salt: randomBytes(32).toString('hex'),
           })),
           { ordered: false },
         );
@@ -360,14 +409,9 @@ export class AnchoringService {
     }
     const claims = (await this.leafModel
       .find({ anchorId: day })
-      .select({ kind: 1, versionId: 1, versionHash: 1 })
+      .select({ kind: 1, versionId: 1, versionHash: 1, salt: 1 })
       .lean()
-      .exec()) as AnchoredLeaf[];
-    const owned: AnchorFilter = {
-      _id: day,
-      status: 'building',
-      'lease.id': leaseId,
-    };
+      .exec()) as Array<Omit<AnchoredLeaf, 'leaf'> & { salt: string }>;
     if (claims.length === 0) {
       const done = await this.anchorModel
         .updateOne(owned, { $set: { status: 'empty' }, $unset: { lease: 1 } })
@@ -376,18 +420,19 @@ export class AnchoringService {
         ? { state: 'empty', anchorId: day }
         : { state: 'busy' };
     }
-    const tree = buildTree(claims.map((claim) => claim.versionHash));
     const leaves = claims
       .map((claim) => ({
         kind: claim.kind,
         versionId: claim.versionId,
         versionHash: claim.versionHash,
+        leaf: leafHash(claim.versionHash, claim.salt),
       }))
       .sort((a, b) =>
         `${a.kind}:${String(a.versionId)}`.localeCompare(
           `${b.kind}:${String(b.versionId)}`,
         ),
       );
+    const tree = buildTree(leaves.map((entry) => entry.leaf));
     const done = await this.anchorModel
       .updateOne(owned, {
         $set: {
@@ -395,6 +440,7 @@ export class AnchoringService {
           scheme: MERKLE_SCHEME,
           merkleRoot: tree.root,
           leaves,
+          leafCount: leaves.length,
           builtAt: now,
           ...(left ? { resumeFrom: left.createdAt } : {}),
           tsa: { status: 'pending', attempts: 0 },

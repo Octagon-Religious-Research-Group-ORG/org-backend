@@ -17,6 +17,7 @@ import {
 } from '../comments/comments.service';
 import { VERSION_NOT_FOUND } from '../member-history.service';
 import { PROFILE_NOT_FOUND } from '../members.service';
+import { CommentAuthorsService } from '../comments/comment-authors.service';
 import { ReceiptsService } from './receipts.service';
 
 const tsa = makeTestTsa();
@@ -35,6 +36,7 @@ function setUp() {
     h.history,
     h.commentsService,
     verifierFor(m, tsa),
+    new CommentAuthorsService(h.profiles as never),
   );
   // Comments are saved at the real time: anchor a little after it.
   const anchor = () =>
@@ -163,8 +165,10 @@ describe('belief receipts follow the history access rules', () => {
       text: 'The owner rewrote it.',
     });
     expect(current.versions[0].hashInput.included).toBe(true);
+    // The owner's page is public and named: a guest may see who wrote it,
+    // so may recompute it too (review round 2, M-A).
     const guest = await receipts.belief('open-page', 'tab_a', await h.viewer());
-    expect(guest.versions[0].hashInput).toMatchObject({ included: false });
+    expect(guest.versions[0].hashInput).toMatchObject({ included: true });
     const first = await receipts.belief('open-page', 'tab_a', owner, 'text', 1);
     expect(first.versions[0]).toMatchObject({
       seq: 1,
@@ -209,7 +213,11 @@ describe('comment receipts follow the comment history rules', () => {
 
   it('a reader of the thread gets one; the author can recompute its hash, others cannot', async () => {
     const { h, receipts, anchor } = setUp();
-    const { commentId } = await posted(h);
+    // By an anonymous member: nobody else may know who wrote it.
+    const { commentId } = await h.commentsService.create(
+      await h.writer(U.anon),
+      { slug: 'open-page', tabId: 'tab_a', body: 'A synthetic comment.' },
+    );
     await anchor();
     const guest = await receipts.comment(
       'open-page',
@@ -227,11 +235,11 @@ describe('comment receipts follow the comment history rules', () => {
       hashInput: { included: false },
       anchor: { state: 'anchored' },
     });
-    expect(JSON.stringify(guest)).not.toContain(U.named);
+    expect(JSON.stringify(guest)).not.toContain(U.anon);
     const author = await receipts.comment(
       'open-page',
       commentId,
-      await h.viewer(U.named),
+      await h.viewer(U.anon),
     );
     expect(author.versions[0].hashInput.included).toBe(true);
     await expect(

@@ -44,8 +44,12 @@ export interface HistoryEntry {
   /** Server time the version was saved (for imports: when it was imported). */
   savedAt: string;
   text: string;
-  /** The start of its SHA-256, enough to compare with a receipt. */
-  hash: string;
+  /**
+   * The start of its SHA-256, enough to compare with a receipt. Only for a
+   * reader who may know who wrote it: with the text, time and previous
+   * versions it would confirm a guessed author id (Chunk 16 review round 2).
+   */
+  hash?: string;
   source: VersionSource;
   /**
    * The text as it was kept before the field's first edit here, one record
@@ -115,16 +119,22 @@ function shortHash(hash: string) {
  * @param label - an imported outline label, for a first version only: from
  *   the first edit on, the label is part of the text itself
  */
+/** Who may get a version's hash prefix (see `HistoryEntry.hash`). */
+type Known = (userId: string | undefined) => boolean;
+
 function entryOf(
   row: VersionRow,
   authorOf: AuthorLookup,
+  known: Known,
   label?: string,
 ): HistoryEntry {
   return {
     seq: row.seq,
     savedAt: row.createdAt.toISOString(),
     text: editorText([{ label, text: row.text }]),
-    hash: shortHash(row.hash),
+    ...(known(row.authorUserId) && known(row.suggestedBy)
+      ? { hash: shortHash(row.hash) }
+      : {}),
     source: versionSource(row.authorUserId),
     beforeFirstEdit: false,
     ...(row.suggestionId
@@ -308,11 +318,17 @@ export class MemberHistoryService {
     if (blocks.length === 1) {
       const rows = await this.versions({ blockId: first.blockId }, skip, 1);
       const authorOf = await this.suggesters(rows, viewer);
+      const known = await this.knownAuthors(rows, viewer);
       return {
         entries: rows
           .slice(0, HISTORY_PAGE_SIZE)
           .map((row) =>
-            entryOf(row, authorOf, row.seq === 1 ? first.label : undefined),
+            entryOf(
+              row,
+              authorOf,
+              known,
+              row.seq === 1 ? first.label : undefined,
+            ),
           ),
         page,
         hasMore: rows.length > HISTORY_PAGE_SIZE,
@@ -323,10 +339,11 @@ export class MemberHistoryService {
     const editCount = await this.versionModel.countDocuments(edits).exec();
     const rows = await this.versions(edits, skip, 0);
     const authorOf = await this.suggesters(rows, viewer);
-    const entries = rows.map((row) => entryOf(row, authorOf));
+    const known = await this.knownAuthors(rows, viewer);
+    const entries = rows.map((row) => entryOf(row, authorOf, known));
     // The earlier text is entry number `editCount` (0-based), the last one.
     if (skip <= editCount && editCount < skip + HISTORY_PAGE_SIZE) {
-      const earlier = await this.earlierText(blocks, editCount > 0);
+      const earlier = await this.earlierText(blocks, editCount > 0, viewer);
       if (earlier) entries.push(earlier);
     }
     return {
@@ -387,9 +404,18 @@ export class MemberHistoryService {
    * The paragraphs as first saved, in reading order with their outline labels,
    * as one entry. Imported if any of them was imported.
    */
+  /** Which of these rows' authors (and suggesters) this reader may know. */
+  private knownAuthors(rows: VersionRow[], viewer: Viewer) {
+    return this.authors.identifiable(
+      rows.flatMap((row) => [row.authorUserId, row.suggestedBy]),
+      viewer,
+    );
+  }
+
   private async earlierText(
     blocks: FieldBlock[],
     edited: boolean,
+    viewer: Viewer,
   ): Promise<HistoryEntry | undefined> {
     const rows: VersionRow[] = await this.versionModel
       .find({ blockId: { $in: blocks.map((block) => block.blockId) }, seq: 1 })
@@ -406,16 +432,25 @@ export class MemberHistoryService {
     const imported = parts.some(
       ({ row }) => versionSource(row.authorUserId) === 'imported',
     );
+    const known = await this.knownAuthors(
+      parts.map(({ row }) => row),
+      viewer,
+    );
+    const shown = parts.every(({ row }) => known(row.authorUserId));
     return {
       seq: 1,
       savedAt: new Date(latest).toISOString(),
       text: editorText(
         parts.map(({ label, row }) => ({ label, text: row.text })),
       ),
-      hash: shortHash(parts[0].row.hash),
+      ...(shown
+        ? {
+            hash: shortHash(parts[0].row.hash),
+            partHashes: parts.map(({ row }) => shortHash(row.hash)),
+          }
+        : {}),
       source: imported ? 'imported' : 'member',
       beforeFirstEdit: edited,
-      partHashes: parts.map(({ row }) => shortHash(row.hash)),
     };
   }
 }

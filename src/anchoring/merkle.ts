@@ -4,7 +4,10 @@ import { createHash } from 'node:crypto';
  * The daily anchor's Merkle tree (plan §6, Chunk 16). Named so a reader of a
  * receipt can tell which rules built it; bumped only if the rules change.
  *
- * - leaf  = SHA-256(0x00 || versionHash), versionHash as its 32 raw bytes;
+ * - leaf  = SHA-256(0x00 || versionHash || salt), each as its 32 raw bytes;
+ *   the salt is a random secret kept per version on the server, so a leaf
+ *   given to a reader cannot be used to test a guessed author id offline
+ *   (review round 2, M-A; v1 had no salt and was never deployed);
  * - node  = SHA-256(0x01 || left || right);
  * - leaves are sorted by their leaf hash, ascending, as raw bytes (the same
  *   order as lowercase hex), duplicates removed;
@@ -16,7 +19,7 @@ import { createHash } from 'node:crypto';
  * The 0x00 / 0x01 prefixes keep a leaf from ever being read as a node
  * (RFC 6962 §2.1 uses the same two prefixes for the same reason).
  */
-export const MERKLE_SCHEME = 'org-anchor-merkle-v1';
+export const MERKLE_SCHEME = 'org-anchor-merkle-v2';
 
 const HEX_64 = /^[0-9a-f]{64}$/;
 
@@ -31,9 +34,13 @@ function bytesOf(hex: string): Buffer {
   return Buffer.from(hex, 'hex');
 }
 
-/** @returns the leaf hash (hex) of one version hash (hex) */
-export function leafHash(versionHash: string): string {
-  return sha256(Buffer.from([0x00]), bytesOf(versionHash)).toString('hex');
+/** @returns the leaf hash (hex) of one version hash and its salt (hex) */
+export function leafHash(versionHash: string, salt: string): string {
+  return sha256(
+    Buffer.from([0x00]),
+    bytesOf(versionHash),
+    bytesOf(salt),
+  ).toString('hex');
 }
 
 /** @returns the parent (hex) of two nodes (hex), left first */
@@ -59,13 +66,15 @@ export interface MerkleTree {
 }
 
 /**
- * Builds the tree over the given version hashes.
+ * Builds the tree over the given leaf hashes (see `leafHash`).
  *
  * @throws Error on an empty list or a value that is not a SHA-256 hex digest
  */
-export function buildTree(versionHashes: readonly string[]): MerkleTree {
-  if (versionHashes.length === 0) throw new Error('No leaves to anchor.');
-  const leaves = [...new Set(versionHashes.map(leafHash))].sort();
+export function buildTree(leafHashes: readonly string[]): MerkleTree {
+  if (leafHashes.length === 0) throw new Error('No leaves to anchor.');
+  const leaves = [
+    ...new Set(leafHashes.map((leaf) => bytesOf(leaf).toString('hex'))),
+  ].sort();
   const levels: string[][] = [leaves];
   while (levels[levels.length - 1].length > 1) {
     const level = levels[levels.length - 1];

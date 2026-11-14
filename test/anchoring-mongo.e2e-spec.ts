@@ -551,7 +551,7 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
       );
       await m.TimestampAnchor.collection.updateOne(
         { _id: anchorId as never },
-        { $set: { [`leaves.${other}.versionHash`]: 'a'.repeat(64) } },
+        { $set: { [`leaves.${other}.leaf`]: 'a'.repeat(64) } },
       );
       const r = (await verifier.verifyAll()).anchors[0];
       expect(r.root.outcome).toBe('fail');
@@ -726,7 +726,7 @@ describeWithMongo(
         m.CommentVersion,
       );
       verifier.trustedRoots = [tsa.root];
-      receipts = new ReceiptsService(history, comments, verifier);
+      receipts = new ReceiptsService(history, comments, verifier, authors);
     });
 
     afterAll(async () => {
@@ -843,6 +843,13 @@ describeWithMongo(
         expect(receipt.versions[0].hashInput.included).toBe(false);
         expect(JSON.stringify(receipt)).not.toContain(U.anon);
         expect(JSON.stringify(receipt)).not.toContain('anon-writer');
+        // Round 2, M-A: nothing to test a guessed id with, not even a prefix.
+        const stored = await m.CommentVersion.findOne({ commentId }).lean();
+        expect(JSON.stringify(receipt)).not.toContain(stored.hash.slice(0, 12));
+        const claim = await m.AnchorLeaf.findById(
+          `c:${String(stored._id)}`,
+        ).lean();
+        expect(JSON.stringify(receipt)).not.toContain(claim.salt);
       }
       const own = await receipts.comment(
         'open-page',

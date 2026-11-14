@@ -91,13 +91,15 @@ describe('AnchorVerifierService', () => {
   });
 
   it('an edited leaf list is detected (the root no longer rebuilds, the claims disagree)', async () => {
-    row().leaves[0].versionHash = 'e'.repeat(64);
+    row().leaves[0].leaf = 'e'.repeat(64);
     const r = await report();
     expect(r.root).toEqual({
       outcome: 'fail',
       detail: 'the leaves do not rebuild the stored root',
     });
-    expect(r.versions.detail).toContain(
+    expect(r.versions.detail).toContain('salted leaf does not match');
+    row().leaves[1].versionHash = 'e'.repeat(64);
+    expect((await report()).versions.detail).toContain(
       'not claimed by this anchor with this hash',
     );
   });
@@ -222,7 +224,7 @@ describe('AnchorVerifierService', () => {
       const proof = await prove('block', blocks[0]);
       if (!proof.anchored) throw new Error('expected anchored');
       expect(proof.anchorId).toBe('2026-11-14');
-      expect(proof.leaf).toBe(leafHash(blocks[0].hash));
+      expect(proof.leaf).toBe(leafHash(blocks[0].hash, proof.salt));
       expect(rootFromPath(proof.leaf, proof.path)).toBe(proof.root);
       expect(proof.root).toBe(row().merkleRoot);
       expect(Object.values(proof.checks).map((c) => c.outcome)).toEqual([
@@ -253,10 +255,8 @@ describe('AnchorVerifierService', () => {
       const proof = await prove('block', blocks[0]);
       if (!proof.anchored) throw new Error('expected anchored');
       const sibling = proof.path[0].hash;
-      const at = row().leaves.findIndex(
-        (l: any) => leafHash(l.versionHash) === sibling,
-      );
-      row().leaves[at].versionHash = 'd'.repeat(64);
+      const at = row().leaves.findIndex((l: any) => l.leaf === sibling);
+      row().leaves[at].leaf = 'd'.repeat(64);
       const again = await prove('block', blocks[0]);
       expect(again.anchored && again.checks.path).toEqual({
         outcome: 'fail',

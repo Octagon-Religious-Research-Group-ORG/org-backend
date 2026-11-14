@@ -56,6 +56,19 @@ export class AnchorLeaf {
   })
   versionHash: string;
 
+  /**
+   * The version's secret salt (32 random bytes, hex), mixed into its leaf
+   * (`org-anchor-merkle-v2`). Never sent to a reader who may not know the
+   * author (review round 2, M-A).
+   */
+  @Prop({
+    type: String,
+    required: true,
+    match: /^[0-9a-f]{64}$/,
+    immutable: true,
+  })
+  salt: string;
+
   /** The version's own server time. */
   @Prop({ type: Date, required: true, immutable: true })
   versionCreatedAt: Date;

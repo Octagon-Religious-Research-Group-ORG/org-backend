@@ -33,6 +33,15 @@ export interface AnchoredLeaf {
   kind: AnchoredKind;
   versionId: Types.ObjectId;
   versionHash: string;
+  /** The salted leaf hash the tree is built from. */
+  leaf: string;
+}
+
+/** The last health check of an anchor (review round 2, M-C). */
+export interface LastCheck {
+  at: Date;
+  /** The worst outcome of its checks, the Bitcoin block aside. */
+  outcome: 'pass' | 'fail' | 'cannot-measure';
 }
 
 export interface TsaState {
@@ -126,11 +135,25 @@ export class TimestampAnchor {
         kind: { type: String, enum: ANCHORED_KINDS },
         versionId: Types.ObjectId,
         versionHash: String,
+        leaf: String,
       },
     ],
     default: undefined,
   })
   leaves?: AnchoredLeaf[];
+
+  /** How many leaves, so coverage can compare claims without the array. */
+  @Prop({ type: Number })
+  leafCount?: number;
+
+  @Prop({
+    type: {
+      _id: false,
+      at: Date,
+      outcome: { type: String, enum: ['pass', 'fail', 'cannot-measure'] },
+    },
+  })
+  lastCheck?: LastCheck;
 
   @Prop({
     type: {

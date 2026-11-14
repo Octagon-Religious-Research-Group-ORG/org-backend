@@ -31,8 +31,8 @@ export const RECEIPT_NOTICE = [
  * time-stamps, not the link from the text to the hash (review M3).
  */
 export const PARTIAL_RECEIPT_NOTICE = [
-  'This receipt proves only that this version’s fingerprint (hash) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.',
-  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the author’s complete receipt, which only the author (or an ORG admin) can download.',
+  'This receipt proves only that this version’s sealed fingerprint (its leaf in the anchor) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.',
+  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the complete receipt, which only the author, an ORG admin, or a reader allowed to see who the author is can download.',
   ...LIMITS,
 ];
 
@@ -53,6 +53,12 @@ export interface ReceiptVersionInput {
   /** An imported outline label shown before the text (not hashed). */
   label?: string;
   proof: VersionProof;
+  /**
+   * May this reader know who wrote it (review round 2, M-A)? Decided by
+   * the caller from the author's page; without it, only the author, an
+   * admin, or a version with no person in it.
+   */
+  disclose?: boolean;
 }
 
 export interface ReceiptVersion {
@@ -63,8 +69,14 @@ export interface ReceiptVersion {
   outlineLabel?: string;
   /** Server time the version was saved (for imports: when imported). */
   serverTime: string;
-  versionHash: string;
-  prevHash: string;
+  /**
+   * The version hash, the previous one and the leaf's salt: only for a
+   * reader who may know the author. With them a guessed author id could be
+   * tested offline, so anyone else gets the salted leaf and the proofs only.
+   */
+  versionHash?: string;
+  prevHash?: string;
+  salt?: string;
   imported?: string;
   /**
    * The exact string the version hash is the SHA-256 of, when every person
@@ -113,7 +125,7 @@ export const PENDING_MESSAGE =
   'Not anchored yet. Versions are anchored once a day; download the receipt again after the next anchor.';
 
 const WITHHELD_REASON =
-  "The version hash covers the author's account id, which this site shows only to the author and to administrators, so this receipt cannot let you recompute the hash from the text. The time-stamps still prove the hash existed; the author can download a complete receipt.";
+  "The version's hash is made from its text, its time and its author's account id. With that hash anyone could test a guessed account id offline and so learn who wrote it, which this site shows only to readers allowed to see the author. So this receipt holds no hash, previous hash or salt: it starts at the version's salted leaf, which proves the version was anchored but cannot be tested against a guess. The complete receipt (for the author, an admin, or a reader allowed to see the author) links the text to the leaf.";
 
 function mayShow(id: string | undefined, reader: ReceiptReader) {
   return (
@@ -135,10 +147,10 @@ function versionOf(
   reader: ReceiptReader,
 ): ReceiptVersion {
   const { kind, record, proof } = input;
-  const withheld = [
-    ...(mayShow(record.authorUserId, reader) ? [] : ['authorUserId']),
-    ...(mayShow(record.suggestedBy, reader) ? [] : ['suggestedBy']),
-  ];
+  const disclose =
+    input.disclose ??
+    (mayShow(record.authorUserId, reader) &&
+      mayShow(record.suggestedBy, reader));
   const imported = importNote(record);
   return {
     kind,
@@ -146,13 +158,21 @@ function versionOf(
     text: record.text,
     ...(input.label ? { outlineLabel: input.label } : {}),
     serverTime: record.createdAt.toISOString(),
-    versionHash: record.hash,
-    prevHash: record.prevHash,
+    ...(disclose
+      ? {
+          versionHash: record.hash,
+          prevHash: record.prevHash,
+          ...(proof.anchored ? { salt: proof.salt } : {}),
+        }
+      : {}),
     ...(imported ? { imported } : {}),
-    hashInput:
-      withheld.length === 0
-        ? { included: true, canonical: canonicalOf(kind, record) }
-        : { included: false, withheld, reason: WITHHELD_REASON },
+    hashInput: disclose
+      ? { included: true, canonical: canonicalOf(kind, record) }
+      : {
+          included: false,
+          withheld: ['versionHash', 'prevHash', 'salt', 'hash input'],
+          reason: WITHHELD_REASON,
+        },
     anchor: proof.anchored
       ? {
           state: 'anchored',
@@ -200,7 +220,7 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
     );
   } else {
     lines.push(
-      `1. Version hash: not recomputable from this receipt (${version.hashInput.withheld.join(', ')} held back). The hash itself is ${version.versionHash}.`,
+      `1. This receipt holds no version hash, previous hash or salt (${version.hashInput.withheld.join(', ')} held back): it starts at the version's salted leaf.`,
     );
   }
   if (version.anchor.state !== 'anchored') {
@@ -209,7 +229,9 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
   }
   const a = version.anchor;
   lines.push(
-    `2. Leaf (${a.merkleScheme}): \`printf '00${version.versionHash}' | xxd -r -p | openssl dgst -sha256\` must print ${a.leaf}.`,
+    version.versionHash && version.salt
+      ? `2. Leaf (${a.merkleScheme}, leaf = SHA-256(00 ‖ version hash ‖ salt)): \`printf '00${version.versionHash}${version.salt}' | xxd -r -p | openssl dgst -sha256\` must print ${a.leaf}.`
+      : `2. Leaf (${a.merkleScheme}): ${a.leaf}.`,
   );
   let current = a.leaf;
   a.path.forEach((step, index) => {
