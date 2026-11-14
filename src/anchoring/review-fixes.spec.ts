@@ -273,12 +273,12 @@ describe('M3: a receipt without the hash input says what it can and cannot prove
     });
     const text = partial.notice.join(' ');
     expect(text).toContain(
-      'proves only that this version’s sealed fingerprint (its leaf in the anchor) existed',
+      "proves only that this version's sealed fingerprint (its leaf in the anchor) existed",
     );
-    expect(text).toContain('only with the author’s complete receipt');
+    expect(text).toContain("only with the author's complete receipt");
     expect(text).not.toContain('exactly as written');
     expect(strFromU8(unzipSync(receiptZip(partial))['README.txt'])).toContain(
-      'only with the author’s complete receipt',
+      "only with the author's complete receipt",
     );
     const full = buildReceipt(subject, [{ kind: 'block', record, proof }], {
       userId: 'user_owner',

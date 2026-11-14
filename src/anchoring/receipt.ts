@@ -31,8 +31,8 @@ export const RECEIPT_NOTICE = [
  * time-stamps, not the link from the text to the hash (review M3).
  */
 export const PARTIAL_RECEIPT_NOTICE = [
-  'This receipt proves only that this version’s sealed fingerprint (its leaf in the anchor) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.',
-  'It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the author’s complete receipt, which only the author or an ORG admin can download.',
+  "This receipt proves only that this version's sealed fingerprint (its leaf in the anchor) existed no later than the times the two independent time-stamps give. Anyone can check that part with free public tools; the commands are below.",
+  "It cannot show by itself that the text below is the text behind that fingerprint: that link can be checked only with the author's complete receipt, which only the author or an ORG admin can download.",
   ...LIMITS,
 ];
 
@@ -41,8 +41,8 @@ export const PARTIAL_RECEIPT_NOTICE = [
  * reader allowed to know the author): from the hash on, not the text.
  */
 export const HASHES_RECEIPT_NOTICE = [
-  'This receipt proves that this version’s fingerprint (hash) existed no later than the times the two independent time-stamps give. Anyone can check every step from that hash on with free public tools; the commands are below.',
-  'The step from the text below to that hash needs the author’s complete receipt: the hash also covers the author’s account id, which only the author and ORG admins receive.',
+  "This receipt proves that this version's fingerprint (hash) existed no later than the times the two independent time-stamps give. Anyone can check every step from that hash on with free public tools; the commands are below.",
+  "The step from the text below to that hash needs the author's complete receipt: the hash also covers the author's account id, which only the author and ORG admins receive.",
   ...LIMITS,
 ];
 
@@ -63,15 +63,15 @@ export const RECEIPT_PENDING_NOTICE = [
 /** A leaf-only receipt while anchoring is pending. */
 export const PARTIAL_PENDING_RECEIPT_NOTICE = [
   PENDING,
-  'Even once anchored, it will prove only that this version’s sealed fingerprint (its leaf in the anchor) existed by then; that the text below is the text behind it can be checked only with the author’s complete receipt, which only the author or an ORG admin can download.',
+  "Even once anchored, it will prove only that this version's sealed fingerprint (its leaf in the anchor) existed by then; that the text below is the text behind it can be checked only with the author's complete receipt, which only the author or an ORG admin can download.",
   ...LIMITS,
 ];
 
 /** A hashes receipt while anchoring is pending. */
 export const HASHES_PENDING_RECEIPT_NOTICE = [
-  'This receipt holds this version’s fingerprint (hash).',
+  "This receipt holds this version's fingerprint (hash).",
   PENDING,
-  'The step from the text below to that hash needs the author’s complete receipt: the hash also covers the author’s account id, which only the author and ORG admins receive.',
+  "The step from the text below to that hash needs the author's complete receipt: the hash also covers the author's account id, which only the author and ORG admins receive.",
   ...LIMITS,
 ];
 
@@ -151,12 +151,16 @@ function stampsOf(versions: readonly ReceiptVersion[]): Stamps | undefined {
   return new Set(each).size === 1 ? each[0] : 'mixed';
 }
 
-/** A version whose only proof is an OpenTimestamps one not yet in Bitcoin. */
+/**
+ * A version whose only proof is an OpenTimestamps one not yet in Bitcoin,
+ * and that this server's check did not fail (review round 10, LOW-1).
+ */
 function onlyUnconfirmedOts(version: ReceiptVersion): boolean {
   return (
     version.anchor.state === 'anchored' &&
     versionStamps(version) === undefined &&
-    version.anchor.opentimestamps.proofBase64 !== undefined
+    version.anchor.opentimestamps.proofBase64 !== undefined &&
+    version.anchor.serverChecks.ots.outcome !== 'fail'
   );
 }
 
@@ -415,9 +419,12 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
       : '4. FreeTSA: no token yet (the request will be tried again on the next run).',
     a.opentimestamps.proofBase64
       ? `5. OpenTimestamps, ${
-          a.opentimestamps.bitcoinHeights.length > 0
-            ? `confirmed in Bitcoin block ${a.opentimestamps.bitcoinHeights.join(', ')}`
-            : 'not yet confirmed in Bitcoin; it gives no time yet'
+          // A failed check comes first: it trumps any stored height (round 10).
+          a.serverChecks.ots.outcome === 'fail'
+            ? `this server's check of the proof failed: ${a.serverChecks.ots.detail}`
+            : a.opentimestamps.bitcoinHeights.length > 0
+              ? `confirmed in Bitcoin block ${a.opentimestamps.bitcoinHeights.join(', ')}`
+              : 'not yet confirmed in Bitcoin; it gives no time yet'
         }: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it. Without a Bitcoin node: \`ots info ${folder}/anchor.ots\` prints "BitcoinBlockHeaderAttestation(<height>)" then "# Bitcoin block merkle root <root>"; look the block height up on any public block explorer (e.g. https://blockstream.info/block-height/<height>) and check that its Merkle root is the same.`
       : '5. OpenTimestamps: no proof yet (it will be tried again on the next run).',
   );

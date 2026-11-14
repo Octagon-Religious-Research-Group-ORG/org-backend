@@ -155,7 +155,7 @@ describe('receipts: no hash material for a reader who may not know the author', 
       expect(Buffer.from(bytes).toString('utf8')).not.toContain(U.named);
     }
     expect(receipt.notice.join(' ')).toContain(
-      'needs the author’s complete receipt',
+      "needs the author's complete receipt",
     );
     // The author, and an admin, get the full hash input.
     for (const reader of [U.named, U.admin]) {
