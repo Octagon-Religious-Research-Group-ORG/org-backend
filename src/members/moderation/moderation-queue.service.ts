@@ -53,6 +53,13 @@ export const NOT_MODERATED =
 export const COMMENT_BUSY_NOW =
   'The comment is being saved or changed right now. Please try again in a moment.';
 export const NO_OPEN_REPORTS = 'There are no open reports on that.';
+/**
+ * Hiding an accepted suggestion hides the suggestion only (review L-2): its
+ * wording is already the belief's text, which only the belief's owner can
+ * change.
+ */
+export const ACCEPTED_WORDING_STAYS =
+  "This suggestion was accepted, so its wording is already the belief's text. Hiding the suggestion does not change the belief; only its owner can.";
 
 /** What a moderator can do to a comment. */
 export type CommentAction = 'hide' | 'remove' | 'restore';
@@ -99,6 +106,8 @@ export interface ReportedCommentView {
   /** The current text: always, whatever its state (admins only). */
   body: string;
   proposedText?: string;
+  /** A suggestion's state: an accepted one's wording is the belief's text. */
+  suggestionStatus?: 'pending' | 'accepted' | 'declined';
   stance?: 'agree' | 'disagree';
   postedAt: string;
   place: CommentPlace;
@@ -156,7 +165,7 @@ interface CommentRowForQueue {
   source: 'migrated' | 'native';
   kind?: 'comment' | 'suggestion';
   stance?: 'agree' | 'disagree';
-  suggestion?: { proposedText: string };
+  suggestion?: { proposedText: string; status: string };
   moderation?: ModerationState;
   removedAt?: Date;
   createdAt: Date;
@@ -407,7 +416,16 @@ export class ModerationQueueService {
           ...(imported ? { importedName: row.legacyAuthorName } : {}),
           body: heads.get(row.commentId)?.text ?? row.body,
           ...(row.suggestion
-            ? { proposedText: row.suggestion.proposedText }
+            ? {
+                proposedText: row.suggestion.proposedText,
+                suggestionStatus:
+                  row.suggestion.status === 'accepting'
+                    ? 'pending'
+                    : (row.suggestion.status as
+                        | 'pending'
+                        | 'accepted'
+                        | 'declined'),
+              }
             : {}),
           ...(row.stance ? { stance: row.stance } : {}),
           postedAt: row.createdAt.toISOString(),
@@ -461,6 +479,8 @@ export class ModerationQueueService {
       if (action === 'restore') {
         if (before === null) throw new ConflictException(NOT_MODERATED);
         after = null;
+        // In a transaction a concurrent change would conflict anyway; the
+        // filter states the expectation and costs nothing (review L-4b).
         const done = await this.commentModel
           .updateOne(
             { commentId, moderation: before },
@@ -541,7 +561,13 @@ export class ModerationQueueService {
         },
         session,
       );
-      return { moderation: after, reportsClosed: closed };
+      return {
+        moderation: after,
+        reportsClosed: closed,
+        ...(after !== null && row.suggestion?.status === 'accepted'
+          ? { note: ACCEPTED_WORDING_STAYS }
+          : {}),
+      };
     });
   }
 

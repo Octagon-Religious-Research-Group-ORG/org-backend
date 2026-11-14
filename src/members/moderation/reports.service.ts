@@ -8,9 +8,15 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import type { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import type { ClientSession, Connection, Model, Types } from 'mongoose';
 import { AdminInboxService } from '../../admin-inbox/admin-inbox.service';
+import { inTransaction } from '../../db/transactions';
+import { ReportQuotaStore } from '../../moderation/report-quota.store';
+import {
+  Comment,
+  type CommentDocument,
+} from '../../social/schemas/comment.schema';
 import {
   cleanMemberParagraphs,
   hasVisibleText,
@@ -33,9 +39,11 @@ import { MembersService } from '../members.service';
 import { orgPageIdOfThread } from '../org-pages/org-page-targets';
 import { OrgPagesService } from '../org-pages/org-pages.service';
 
-/** Reports one member may send in 24 hours, on top of the write ration. */
+/**
+ * Reports one member may send per UTC day, on top of the write ration. Held
+ * atomically by {@link ReportQuotaStore} (review M-1).
+ */
 export const REPORTS_PER_DAY = 10;
-const DAY_MS = 24 * 60 * 60_000;
 
 export const REPORT_OWN_CONTENT = 'You cannot report your own words or page.';
 export const ALREADY_REPORTED =
@@ -84,7 +92,13 @@ function isDuplicateKey(error: unknown): boolean {
  * - What: only what the reporter can see now. A comment or page they cannot
  *   read gets the same 404 as one that does not exist.
  * - Never their own words or page; one open report per target; at most
- *   {@link REPORTS_PER_DAY} a day, on top of the member write ration.
+ *   {@link REPORTS_PER_DAY} a day, on top of the member write ration. The
+ *   cap is one atomic counter, so parallel reports cannot pass it.
+ * - A comment report is written in one transaction with a write to the
+ *   comment itself (`lastReportedAt`), only while no moderator decision and
+ *   no author removal stands. A hide or removal also writes the comment, so
+ *   the two always conflict and one retries (review L-4): a report never
+ *   stays open on a comment that was already taken down.
  * - The answer says only that the report was received: never how many
  *   others reported it. The reported member is told nothing.
  */
@@ -100,6 +114,10 @@ export class ReportsService {
     private readonly members: MembersService,
     private readonly orgPages: OrgPagesService,
     private readonly inbox: AdminInboxService,
+    private readonly quota: ReportQuotaStore,
+    @InjectModel(Comment.name)
+    private readonly commentModel: Model<CommentDocument>,
+    @InjectConnection() private readonly connection: Connection,
   ) {}
 
   /**
@@ -120,27 +138,29 @@ export class ReportsService {
         ? await this.commentTarget(writer, input.commentId)
         : await this.pageTarget(writer, input.slug);
 
-    const since = new Date(Date.now() - DAY_MS);
-    const today = await this.reportModel
-      .countDocuments({
-        reporterUserId: writer.userId,
-        createdAt: { $gte: since },
-      })
-      .exec();
-    if (today >= REPORTS_PER_DAY) {
+    const day = await this.quota.take(writer.userId, REPORTS_PER_DAY);
+    if (day === undefined) {
       throw new HttpException(REPORT_LIMIT, HttpStatus.TOO_MANY_REQUESTS);
     }
+    const row = {
+      targetType: input.targetType,
+      targetId: target.targetId,
+      targetProfileId: target.targetProfileId,
+      reporterUserId: writer.userId,
+      reason: input.reason,
+      ...(hasVisibleText(note) ? { note } : {}),
+      status: 'open' as const,
+    };
     try {
-      await this.reportModel.create({
-        targetType: input.targetType,
-        targetId: target.targetId,
-        targetProfileId: target.targetProfileId,
-        reporterUserId: writer.userId,
-        reason: input.reason,
-        ...(hasVisibleText(note) ? { note } : {}),
-        status: 'open',
-      });
+      if (input.targetType === 'comment') {
+        await inTransaction(this.connection, (session) =>
+          this.storeCommentReport(row, session),
+        );
+      } else {
+        await this.reportModel.create(row);
+      }
     } catch (error) {
+      await this.quota.giveBack(writer.userId, day);
       if (isDuplicateKey(error)) throw new ConflictException(ALREADY_REPORTED);
       throw error;
     }
@@ -158,6 +178,33 @@ export class ReportsService {
       );
     }
     return { reported: true };
+  }
+
+  /**
+   * The report and the comment's `lastReportedAt`, together, only while the
+   * comment is still shown (see the class note).
+   *
+   * @throws ConflictException when a decision or removal landed meanwhile
+   */
+  private async storeCommentReport(
+    row: { targetId: string } & Record<string, unknown>,
+    session: ClientSession,
+  ) {
+    const touched = await this.commentModel
+      .updateOne(
+        {
+          commentId: row.targetId,
+          moderation: { $exists: false },
+          removedAt: { $exists: false },
+        },
+        { $set: { lastReportedAt: new Date() } },
+        { session },
+      )
+      .exec();
+    if (touched.modifiedCount !== 1) {
+      throw new ConflictException(NOT_REPORTABLE);
+    }
+    await this.reportModel.create([row], { session });
   }
 
   /** A comment the reporter can read in its thread right now. */

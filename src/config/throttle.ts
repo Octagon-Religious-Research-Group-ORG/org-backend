@@ -41,6 +41,17 @@ export const MEMBER_WRITE_ACCOUNT_THROTTLE = { ttl: hours(24), limit: 100 };
 export const MEMBER_WRITE_DAILY_LIMIT_CODE = 'MEMBER_WRITE_DAILY_LIMIT';
 
 /**
+ * Moderation actions per admin per day (Chunk 13 review L-5): their own
+ * ration, well above the member-write one, so working through a busy queue
+ * does not use up the admin's own commenting and voting. The per-visitor
+ * limit (`@WriteThrottle()`) still applies per minute.
+ */
+export const MODERATION_ACCOUNT_THROTTLE = { ttl: hours(24), limit: 1_000 };
+
+/** Tells the website a refusal is the daily ration of moderation actions. */
+export const MODERATION_DAILY_LIMIT_CODE = 'MODERATION_DAILY_LIMIT';
+
+/**
  * Claim requests (Chunk 11) per account per day, on top of the member-write
  * ration: a member claims one page once, and each request goes to an admin.
  */

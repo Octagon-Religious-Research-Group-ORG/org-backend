@@ -82,6 +82,7 @@ import {
   MyReportWritesController,
 } from './moderation/moderation.controller';
 import { ModerationQueueService } from './moderation/moderation-queue.service';
+import { ModerationThrottleGuard } from './moderation/moderation-throttle.guard';
 import { ReportsService } from './moderation/reports.service';
 import { OrgSettingsService } from './org-settings.service';
 import {
@@ -179,6 +180,7 @@ import { VotesService } from './votes/votes.service';
     EamRequestsService,
     ReportsService,
     ModerationQueueService,
+    ModerationThrottleGuard,
   ],
 })
 export class MembersModule {}

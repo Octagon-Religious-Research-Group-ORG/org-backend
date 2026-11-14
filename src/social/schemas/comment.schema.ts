@@ -224,6 +224,15 @@ export class Comment {
   @Prop({ type: String })
   moderatedBy?: string;
 
+  /**
+   * Server time of the newest report on it (Chunk 13 review L-4). Written in
+   * the report's transaction so a report and a moderator's decision on the
+   * same comment always conflict and one of them retries: a report can never
+   * stay open on a comment that was already hidden. Admins only; never sent.
+   */
+  @Prop({ type: Date })
+  lastReportedAt?: Date;
+
   createdAt?: Date;
   updatedAt?: Date;
 }

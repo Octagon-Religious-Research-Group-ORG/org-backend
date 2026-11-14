@@ -23,6 +23,7 @@ import { ReasonDto } from '../admin/admin.dto';
 import { CommentWritersService } from '../comments/comment-writers';
 import { ID_PATTERN } from '../comments/comments.dto';
 import { MemberWriteThrottleGuard } from '../member-write-throttle.guard';
+import { ModerationThrottleGuard } from './moderation-throttle.guard';
 import { NoStoreWhenSignedInInterceptor } from '../no-store.interceptor';
 import {
   type CommentAction,
@@ -98,10 +99,11 @@ export class AdminModerationController {
 
 /**
  * The moderator's actions: each with a reason, logged in the same
- * transaction, on the member-write ration and the per-visitor limit.
+ * transaction, on the moderators' own daily ration (review L-5) and the
+ * per-visitor limit.
  */
 @Controller('admin/moderation')
-@UseGuards(ClerkAuthGuard, AdminRoleGuard, MemberWriteThrottleGuard)
+@UseGuards(ClerkAuthGuard, AdminRoleGuard, ModerationThrottleGuard)
 @UseInterceptors(NoStoreWhenSignedInInterceptor)
 export class AdminModerationWritesController {
   constructor(private readonly queue: ModerationQueueService) {}

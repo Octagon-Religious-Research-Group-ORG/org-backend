@@ -111,10 +111,12 @@ function isOperatorObject(value: unknown): boolean {
   );
 }
 
-function applyUpdate(doc: Doc, update: Doc) {
+function applyUpdate(doc: Doc, update: Doc, inserting = false) {
   for (const [op, fields] of Object.entries(update)) {
     for (const [path, value] of Object.entries(fields as Doc)) {
-      if (op === '$set') setPath(doc, path, copy(value));
+      if (op === '$setOnInsert') {
+        if (inserting) setPath(doc, path, copy(value));
+      } else if (op === '$set') setPath(doc, path, copy(value));
       else if (op === '$unset') unsetPath(doc, path);
       else if (op === '$inc') {
         setPath(
@@ -149,7 +151,7 @@ export interface FakeModel {
   };
   deleteOne: (filter: Filter) => FakeResult;
   countDocuments: (filter?: Filter) => { exec: () => Promise<number> };
-  create: (doc: Doc) => Promise<Doc>;
+  create: (doc: Doc | Doc[], options?: unknown) => Promise<Doc>;
   updateOne: (
     filter: Filter,
     update: Doc,
@@ -255,7 +257,7 @@ export function fakeModel(
               setPath(doc, key, copy(value));
             }
           }
-          applyUpdate(doc, change);
+          applyUpdate(doc, change, true);
           checkUnique(doc);
           docs.push(doc);
           return Promise.resolve({ matchedCount: 0, modifiedCount: 0 });
@@ -298,6 +300,13 @@ export function fakeModel(
       exec: () => Promise.resolve(matching(filter).length),
     }),
     create: (input) => {
+      // `create([doc], { session })`, as inside a transaction: one by one.
+      if (Array.isArray(input)) {
+        return input.reduce<Promise<Doc[]>>(
+          async (done, doc) => [...(await done), await model.create(doc)],
+          Promise.resolve([]),
+        ) as unknown as Promise<Doc>;
+      }
       options.beforeWrite?.('create', input);
       const now = new Date();
       const doc: Doc = {

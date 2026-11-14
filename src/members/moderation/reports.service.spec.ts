@@ -9,6 +9,8 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { fakeConnection } from '../../db/transactions.mocks-spec';
+import { ReportQuotaStore, utcDay } from '../../moderation/report-quota.store';
 import { fakeModel } from '../../test-support/fake-model.mocks-spec';
 import {
   harness,
@@ -36,6 +38,9 @@ function build(notify: () => Promise<void> = () => Promise.resolve()) {
     timestamps: true,
   });
   const inbox = { notifyReport: jest.fn(notify) };
+  const quotas = fakeModel([], { unique: [['reporterUserId', 'day']] });
+  const quota = new ReportQuotaStore(quotas as never);
+  const { connection } = fakeConnection();
   const service = new ReportsService(
     reports as never,
     h.store,
@@ -43,8 +48,11 @@ function build(notify: () => Promise<void> = () => Promise.resolve()) {
     h.members,
     h.orgPages,
     inbox as never,
+    quota,
+    h.comments as never,
+    connection as never,
   );
-  return { h, reports, inbox, service };
+  return { h, reports, inbox, service, quotas, quota };
 }
 
 async function comment(h: Harness, userId: string, slug = 'open-page') {
@@ -109,7 +117,7 @@ describe('ReportsService (Chunk 13)', () => {
   });
 
   it('allows one open report per reporter per target', async () => {
-    const { h, service } = build();
+    const { h, service, quotas } = build();
     const commentId = await comment(h, U.named);
     const writer = await h.writer(U.anon);
     const input = {
@@ -121,6 +129,10 @@ describe('ReportsService (Chunk 13)', () => {
     await expect(service.report(writer, input)).rejects.toThrow(
       new ConflictException(ALREADY_REPORTED),
     );
+    // The refused report gave its slot back.
+    expect(quotas.docs).toEqual([
+      expect.objectContaining({ reporterUserId: U.anon, n: 1 }),
+    ]);
     // Someone else may report it too.
     await expect(
       service.report(await h.writer(U.owner), input),
@@ -143,19 +155,14 @@ describe('ReportsService (Chunk 13)', () => {
   });
 
   it('caps reports per day', async () => {
-    const { h, reports, service } = build();
+    const { h, quotas, service } = build();
     const commentId = await comment(h, U.named);
-    for (let i = 0; i < REPORTS_PER_DAY; i++) {
-      reports.docs.push({
-        reporterUserId: U.anon,
-        targetType: 'comment',
-        targetId: `cmt_other_${i}`,
-        status: 'open',
-        createdAt: new Date(),
-      });
-    }
-    // One from yesterday does not count.
-    reports.docs[0].createdAt = new Date(Date.now() - 25 * 3_600_000);
+    const today = utcDay(new Date());
+    quotas.docs.push(
+      { reporterUserId: U.anon, day: today, n: REPORTS_PER_DAY - 1 },
+      // Yesterday's counter does not count.
+      { reporterUserId: U.anon, day: '2000-01-01', n: REPORTS_PER_DAY },
+    );
     const writer = await h.writer(U.anon);
     await service.report(writer, {
       targetType: 'comment',
@@ -457,5 +464,38 @@ describe('ReportsService (Chunk 13)', () => {
       expect.stringContaining('synthetic inbox outage'),
     );
     warn.mockRestore();
+  });
+});
+
+describe('ReportsService: a report racing a decision (review L-4)', () => {
+  it('marks the comment it reports, in the same write as the report', async () => {
+    const { h, service } = build();
+    const commentId = await comment(h, U.named);
+    await service.report(await h.writer(U.anon), {
+      targetType: 'comment',
+      commentId,
+      reason: 'spam',
+    });
+    expect(
+      h.comments.docs.find((doc) => doc.commentId === commentId)!
+        .lastReportedAt,
+    ).toBeInstanceOf(Date);
+  });
+
+  it('refuses, and gives the slot back, when the comment was taken down meanwhile', async () => {
+    const { h, reports, quotas, service } = build();
+    const commentId = await comment(h, U.named);
+    jest.spyOn(h.comments, 'updateOne').mockReturnValueOnce({
+      exec: () => Promise.resolve({ matchedCount: 0, modifiedCount: 0 }),
+    });
+    await expect(
+      service.report(await h.writer(U.anon), {
+        targetType: 'comment',
+        commentId,
+        reason: 'spam',
+      }),
+    ).rejects.toThrow(new ConflictException(NOT_REPORTABLE));
+    expect(reports.docs).toHaveLength(0);
+    expect(quotas.docs[0]).toMatchObject({ n: 0 });
   });
 });

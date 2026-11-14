@@ -14,9 +14,14 @@ import { AdminAccessService } from '../src/auth/admin-access.service';
 import { AdminRoleGuard } from '../src/auth/admin-role.guard';
 import { ClerkAuthGuard } from '../src/auth/auth.guard';
 import { configureHttpApp } from '../src/config/http-app';
-import { DEFAULT_THROTTLE, WRITE_THROTTLE } from '../src/config/throttle';
+import {
+  DEFAULT_THROTTLE,
+  MEMBER_WRITE_ACCOUNT_THROTTLE,
+  WRITE_THROTTLE,
+} from '../src/config/throttle';
 import { CommentWritersService } from '../src/members/comments/comment-writers';
 import { MemberWriteThrottleGuard } from '../src/members/member-write-throttle.guard';
+import { ModerationThrottleGuard } from '../src/members/moderation/moderation-throttle.guard';
 import {
   AdminModerationController,
   AdminModerationWritesController,
@@ -88,6 +93,7 @@ describe('moderation API (e2e)', () => {
         Reflector,
         AdminRoleGuard,
         MemberWriteThrottleGuard,
+        ModerationThrottleGuard,
         { provide: ModerationQueueService, useValue: queue },
         { provide: ReportsService, useValue: reports },
         { provide: CommentWritersService, useValue: writers },
@@ -208,6 +214,18 @@ describe('moderation API (e2e)', () => {
       await call('post', path, 'user_admin').send({ reason: 'r' }).expect(404);
     }
     expect(serviceCalls()).toBe(0);
+  });
+
+  it('rations moderation on its own daily cap, not the member-write one (review L-5)', async () => {
+    for (let n = 0; n <= MEMBER_WRITE_ACCOUNT_THROTTLE.limit; n++) {
+      // A new address each time, so only the per-account ration counts.
+      await call('post', '/admin/moderation/comments/cmt_1/hide', 'user_admin')
+        .send({ reason: 'r' })
+        .expect(201);
+    }
+    expect(queue.moderateComment).toHaveBeenCalledTimes(
+      MEMBER_WRITE_ACCOUNT_THROTTLE.limit + 1,
+    );
   });
 
   it('limits reports per visitor like every member write', async () => {

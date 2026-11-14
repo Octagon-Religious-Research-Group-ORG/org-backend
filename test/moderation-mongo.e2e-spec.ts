@@ -34,11 +34,13 @@ import { MembersService } from '../src/members/members.service';
 import { ModerationQueueService } from '../src/members/moderation/moderation-queue.service';
 import {
   ALREADY_REPORTED,
+  REPORTS_PER_DAY,
   ReportsService,
 } from '../src/members/moderation/reports.service';
 import { OrgPagesService } from '../src/members/org-pages/org-pages.service';
 import { VoteTalliesService } from '../src/members/votes/vote-tallies.service';
 import { ModerationLogService } from '../src/moderation/moderation-log.service';
+import { ReportQuotaStore } from '../src/moderation/report-quota.store';
 import { ReportsStore } from '../src/moderation/reports.store';
 import { BlockVersionsService } from '../src/social/block-versions.service';
 import { CommentVersionsService } from '../src/social/comment-versions.service';
@@ -71,11 +73,17 @@ describeWithMongo('moderation on a real MongoDB', () => {
   const viewer = (userId?: string) => members.resolveViewer(request(userId));
   const writer = (userId: string): Promise<CommentWriter> =>
     writers.requireWriter(request(userId));
-  const post = async (userId = U.named, body = 'Synthetic words.') =>
+  // Most tests write on tab_a; the one that reads a whole thread uses tab_b,
+  // so the other tests' comments never push its comment off the first page.
+  const post = async (
+    userId = U.named,
+    body = 'Synthetic words.',
+    tabId = 'tab_a',
+  ) =>
     (
       await comments.create(await writer(userId), {
         slug: 'open-page',
-        tabId: 'tab_a',
+        tabId,
         body,
       })
     ).commentId;
@@ -173,6 +181,9 @@ describeWithMongo('moderation on a real MongoDB', () => {
       members,
       orgPages,
       inbox,
+      new ReportQuotaStore(m.ReportQuota),
+      m.Comment,
+      conn,
     );
     build = (withLog) =>
       new ModerationQueueService(
@@ -221,6 +232,65 @@ describeWithMongo('moderation on a real MongoDB', () => {
     ).toBeDefined();
     expect(byKey.get('{"reporterUserId":1,"createdAt":-1}')).toBeDefined();
     expect(indexes).toHaveLength(4);
+  });
+
+  it('declares the report-quota indexes: one counter per reporter per day, with a TTL', async () => {
+    const indexes = await m.ReportQuota.collection.indexes();
+    const byKey = new Map(indexes.map((i) => [JSON.stringify(i.key), i]));
+    expect(byKey.get('{"reporterUserId":1,"day":1}')).toMatchObject({
+      unique: true,
+    });
+    expect(byKey.get('{"expiresAt":1}')).toMatchObject({
+      expireAfterSeconds: 0,
+    });
+  });
+
+  it('holds the daily cap under 25 reports at once: exactly 10 stored (review M-1)', async () => {
+    const targets: string[] = [];
+    for (let i = 0; i < 25; i++) targets.push(await post());
+    const reporter = await writer(U.membersOwner);
+    const outcomes = await Promise.allSettled(
+      targets.map((commentId) =>
+        reports.report(reporter, {
+          targetType: 'comment',
+          commentId,
+          reason: 'spam',
+        }),
+      ),
+    );
+    expect(
+      await m.Report.countDocuments({ reporterUserId: U.membersOwner }),
+    ).toBe(REPORTS_PER_DAY);
+    const refused = outcomes.filter((o) => o.status === 'rejected');
+    expect(refused).toHaveLength(25 - REPORTS_PER_DAY);
+    for (const outcome of refused) {
+      expect(outcome.reason.getStatus()).toBe(429);
+    }
+    expect(
+      (await m.ReportQuota.findOne({ reporterUserId: U.membersOwner }).lean())
+        .n,
+    ).toBe(REPORTS_PER_DAY);
+  });
+
+  it('never leaves a report open on a comment a moderator hid at the same moment (review L-4)', async () => {
+    for (let round = 0; round < 8; round++) {
+      const commentId = await post();
+      const [reported, hidden] = await Promise.allSettled([
+        reportOn(commentId, U.hiddenOwner),
+        queue.moderateComment(ADMIN, commentId, 'hide', 'Synthetic race'),
+      ]);
+      expect(hidden.status).toBe('fulfilled');
+      expect(
+        await m.Report.countDocuments({ targetId: commentId, status: 'open' }),
+      ).toBe(0);
+      const stored = await m.Report.countDocuments({ targetId: commentId });
+      // Either the report came first and the hide closed it, or the hide
+      // came first and the report was refused.
+      expect(stored).toBe(reported.status === 'fulfilled' ? 1 : 0);
+      if (reported.status === 'rejected') {
+        expect(reported.reason).toBeInstanceOf(ConflictException);
+      }
+    }
   });
 
   it('allows one open report per reporter per target, and a new one once closed', async () => {
@@ -273,7 +343,7 @@ describeWithMongo('moderation on a real MongoDB', () => {
   });
 
   it('hides a comment, closing its reports and notice and logging it, all at once', async () => {
-    const commentId = await post(U.named, SECRET);
+    const commentId = await post(U.named, SECRET, 'tab_b');
     await reportOn(commentId);
     await reportOn(commentId, U.owner);
     await expect(
@@ -297,7 +367,7 @@ describeWithMongo('moderation on a real MongoDB', () => {
       const thread = await comments.thread(
         'open-page',
         reader,
-        'tab_a',
+        'tab_b',
         undefined,
         await writers.writeStatus(reader),
       );
@@ -309,7 +379,7 @@ describeWithMongo('moderation on a real MongoDB', () => {
     const adminThread = await comments.thread(
       'open-page',
       await viewer(ADMIN),
-      'tab_a',
+      'tab_b',
       undefined,
       { mayComment: true },
     );

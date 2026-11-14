@@ -203,7 +203,9 @@
       "moderation/reports.store.ts",
       "members/moderation/reports.service.ts",
       "members/moderation/moderation-queue.service.ts",
-      "members/moderation/moderation.controller.ts"
+      "members/moderation/moderation.controller.ts",
+      "members/moderation/moderation-throttle.guard.ts",
+      "moderation/report-quota.store.ts"
     ],
     "coverageThreshold": {
       "global": {

@@ -6,6 +6,7 @@ import { VisitRecordSchema } from '../membership/schemas/visit-record.schema';
 import { OrgSettingSchema } from '../members/schemas/org-setting.schema';
 import { ModerationLogEntrySchema } from '../moderation/schemas/moderation-log.schema';
 import { ReportSchema } from '../moderation/schemas/report.schema';
+import { ReportQuotaSchema } from '../moderation/schemas/report-quota.schema';
 import { BeliefTabSchema } from '../social/schemas/belief-tab.schema';
 import { BeliefVoteSchema } from '../social/schemas/belief-vote.schema';
 import { BlockVersionSchema } from '../social/schemas/block-version.schema';
@@ -46,4 +47,5 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'Claim', schema: ClaimSchema },
     { name: 'AdminInboxEntry', schema: AdminInboxEntrySchema },
     { name: 'Report', schema: ReportSchema },
+    { name: 'ReportQuota', schema: ReportQuotaSchema },
   ];

@@ -314,3 +314,33 @@ describe('a comment hidden or removed by a moderator (Chunk 13)', () => {
     ).toBeUndefined();
   });
 });
+
+describe('an imported comment hidden by a moderator (review L-1)', () => {
+  it('shows guests and members neither its text nor its highlighted text', async () => {
+    const h = harness();
+    moderate(h, 'cmt_imp1', 'hidden');
+    for (const userId of [undefined, U.anon, U.named]) {
+      const thread = await h.thread(
+        'imported-page',
+        await h.viewer(userId),
+        'tab_i',
+      );
+      const shown = thread.comments.find((c) => c.commentId === 'cmt_imp1')!;
+      expect(shown).toMatchObject({ moderated: 'hidden', source: 'imported' });
+      expect(shown).not.toHaveProperty('body');
+      expect(shown).not.toHaveProperty('anchorText');
+      expect(JSON.stringify(thread)).not.toContain('Second part');
+      expect(JSON.stringify(thread)).not.toContain(
+        'An imported synthetic comment.',
+      );
+    }
+    const admin = await h.thread(
+      'imported-page',
+      await h.viewer(U.admin),
+      'tab_i',
+    );
+    expect(
+      admin.comments.find((c) => c.commentId === 'cmt_imp1'),
+    ).toMatchObject({ anchorText: 'Second part' });
+  });
+});

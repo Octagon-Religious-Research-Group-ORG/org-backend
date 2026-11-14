@@ -25,6 +25,7 @@ import {
   U,
 } from '../comments/comments-harness.mocks-spec';
 import {
+  ACCEPTED_WORDING_STAYS,
   ALREADY_IN_STATE,
   COMMENT_BUSY_NOW,
   ModerationQueueService,
@@ -550,5 +551,57 @@ describe('ModerationQueueService.dismiss', () => {
     await expect(
       b.service.dismiss(ADMIN, 'comment', 'cmt_nope', 'r'),
     ).rejects.toThrow(new NotFoundException(NO_OPEN_REPORTS));
+  });
+});
+
+describe('an accepted suggestion (review L-2)', () => {
+  it('can be hidden, and the queue and the answer say the belief keeps its wording', async () => {
+    const b = build();
+    const { commentId } = await b.h.suggestions.suggest(
+      await b.h.writer(U.anon),
+      {
+        slug: 'open-page',
+        tabId: 'tab_b',
+        text: 'Synthetic accepted.',
+        baseSeq: 1,
+      },
+    );
+    await b.h.suggestions.accept(U.owner, commentId);
+    report(b, 'comment', commentId);
+    const { entries } = await b.service.queue(ADMIN, 'open', 1);
+    expect(entries[0].comment).toMatchObject({
+      kind: 'suggestion',
+      suggestionStatus: 'accepted',
+    });
+    await expect(
+      b.service.moderateComment(ADMIN, commentId, 'hide', 'r'),
+    ).resolves.toEqual({
+      moderation: 'hidden',
+      reportsClosed: 1,
+      note: ACCEPTED_WORDING_STAYS,
+    });
+    // Restoring says nothing more; a pending suggestion has no note either.
+    await expect(
+      b.service.moderateComment(ADMIN, commentId, 'restore', 'r'),
+    ).resolves.toEqual({ moderation: null, reportsClosed: 0 });
+    const pending = await b.h.suggestions.suggest(await b.h.writer(U.named), {
+      slug: 'open-page',
+      tabId: 'tab_a',
+      text: 'Synthetic pending.',
+      baseSeq: 1,
+    });
+    stateOf(b, pending.commentId).suggestion = {
+      ...(stateOf(b, pending.commentId).suggestion as object),
+      status: 'accepting',
+      lockedAt: new Date(0),
+    };
+    report(b, 'comment', pending.commentId);
+    const again = await b.service.queue(ADMIN, 'open', 1);
+    expect(
+      again.entries.find((e) => e.targetId === pending.commentId)!.comment,
+    ).toMatchObject({ suggestionStatus: 'pending' });
+    await expect(
+      b.service.moderateComment(ADMIN, pending.commentId, 'hide', 'r'),
+    ).resolves.not.toHaveProperty('note');
   });
 });

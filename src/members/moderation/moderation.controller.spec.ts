@@ -7,6 +7,7 @@ import { AdminRoleGuard } from '../../auth/admin-role.guard';
 import { ClerkAuthGuard } from '../../auth/auth.guard';
 import type { AuthenticatedRequest } from '../../auth/auth.types';
 import { MemberWriteThrottleGuard } from '../member-write-throttle.guard';
+import { ModerationThrottleGuard } from './moderation-throttle.guard';
 import { NoStoreWhenSignedInInterceptor } from '../no-store.interceptor';
 import {
   AdminModerationController,
@@ -48,7 +49,7 @@ describe('moderation controllers (Chunk 13)', () => {
     ).toEqual([ClerkAuthGuard, AdminRoleGuard]);
     expect(
       Reflect.getMetadata(GUARDS_METADATA, AdminModerationWritesController),
-    ).toEqual([ClerkAuthGuard, AdminRoleGuard, MemberWriteThrottleGuard]);
+    ).toEqual([ClerkAuthGuard, AdminRoleGuard, ModerationThrottleGuard]);
     expect(
       Reflect.getMetadata(GUARDS_METADATA, MyReportWritesController),
     ).toEqual([ClerkAuthGuard, MemberWriteThrottleGuard]);
