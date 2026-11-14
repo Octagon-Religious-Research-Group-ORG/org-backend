@@ -107,7 +107,7 @@ describe('each run sweeps finished anchors for claims outside their tree', () =>
       string,
       any
     >;
-    row.lastCheck = { at: day(2), outcome: 'fail' };
+    row.lastCheck = { at: day(2), outcome: 'fail', claimCountOnly: true };
     const report = await offlineAnchoring(m, tsa).run(
       new Date(day(1).getTime() + 40 * DAY),
     );

@@ -572,6 +572,13 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
       const service = anchoringOn(m, tsa, fresh());
       service.maxLeaves = 3;
       await service.run(new Date(start.getTime() + day * 24 * 3_600_000));
+      if (day === 0) {
+        // Capped: an open resume point, stored (review round 5).
+        const opened = await m.TimestampAnchor.findById(
+          anchorDay(start),
+        ).lean();
+        expect(opened.resumeOpen).toBe(true);
+      }
     }
     expect(await m.AnchorLeaf.countDocuments()).toBe(10);
     const first = await m.TimestampAnchor.findById(anchorDay(start)).lean();
@@ -582,6 +589,8 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
       'comment',
     ]);
     expect(first.resumeFrom).toBeInstanceOf(Date);
+    // Covered by a later batch: closed, the history kept.
+    expect(first.resumeOpen).toBeUndefined();
   });
 
   describe('tampering with real rows is detected', () => {

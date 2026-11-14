@@ -40,6 +40,8 @@ export type Outcome = 'pass' | 'fail' | 'cannot-measure';
 export interface Check {
   outcome: Outcome;
   detail: string;
+  /** Versions check only: it failed on the claim count and nothing else. */
+  claimCountOnly?: true;
 }
 
 export interface AnchorReport {
@@ -125,6 +127,19 @@ function worstOf(report: AnchorReport): Outcome {
   );
   if (outcomes.includes('fail')) return 'fail';
   return outcomes.includes('cannot-measure') ? 'cannot-measure' : 'pass';
+}
+
+/**
+ * Failed on its claim count and on nothing else (review round 5): the only
+ * failure the sweep may repair by releasing claims.
+ */
+function claimCountOnly(report: AnchorReport): boolean {
+  return (
+    report.versions.claimCountOnly === true &&
+    [report.root, report.tsa, report.ots].every(
+      (check) => check.outcome !== 'fail',
+    )
+  );
 }
 
 /** The salted leaf of a claim, or undefined for a malformed one. */
@@ -315,9 +330,16 @@ export class AnchorVerifierService {
         problems.push(`${id}: its fields no longer give its hash`);
       }
     }
-    return problems.length === 0
-      ? pass(`${leaves.length} version(s) rehash to their anchored leaves`)
-      : fail(problems.slice(0, 20).join('; '));
+    if (problems.length === 0) {
+      return pass(
+        `${leaves.length} version(s) rehash to their anchored leaves`,
+      );
+    }
+    const countOnly = problems.length === 1 && claimed.size !== leaves.length;
+    return {
+      ...fail(problems.slice(0, 20).join('; ')),
+      ...(countOnly ? { claimCountOnly: true as const } : {}),
+    };
   }
 
   /** Every check on one anchor row. */
@@ -485,7 +507,15 @@ export class AnchorVerifierService {
       await this.anchorModel
         .updateOne(
           { _id: anchor._id },
-          { $set: { lastCheck: { at: now, outcome: worstOf(report) } } },
+          {
+            $set: {
+              lastCheck: {
+                at: now,
+                outcome: worstOf(report),
+                ...(claimCountOnly(report) ? { claimCountOnly: true } : {}),
+              },
+            },
+          },
         )
         .exec();
     }

@@ -42,6 +42,8 @@ export interface LastCheck {
   at: Date;
   /** The worst outcome of its checks, the Bitcoin block aside. */
   outcome: 'pass' | 'fail' | 'cannot-measure';
+  /** Failed ONLY on its claim count (round 5): the sweep may release. */
+  claimCountOnly?: boolean;
 }
 
 export interface TsaState {
@@ -132,6 +134,17 @@ export class TimestampAnchor {
   @Prop({ type: Date })
   rescanFrom?: Date;
 
+  /** The newest released version's time: the rescan point's end (round 5). */
+  @Prop({ type: Date })
+  rescanTo?: Date;
+
+  /**
+   * True while `resumeFrom` is still to be covered by a later batch; unset
+   * once one has (review round 5). `resumeFrom` itself stays as history.
+   */
+  @Prop({ type: Boolean })
+  resumeOpen?: boolean;
+
   @Prop({ type: String })
   rescanToken?: string;
 
@@ -162,6 +175,7 @@ export class TimestampAnchor {
       _id: false,
       at: Date,
       outcome: { type: String, enum: ['pass', 'fail', 'cannot-measure'] },
+      claimCountOnly: Boolean,
     },
   })
   lastCheck?: LastCheck;
