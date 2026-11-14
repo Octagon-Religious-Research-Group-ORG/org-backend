@@ -89,18 +89,22 @@ export class NotificationPrefsService {
   ): Promise<NotificationSettingsView> {
     const turnOn: Category[] = [];
     const turnOff: Category[] = [];
+    // Only true or false counts (review round 3, HIGH 1): the validated
+    // DTO instance defines every optional field, as undefined, and JSON
+    // null passes `@IsOptional`. Either would otherwise switch things.
     for (const [key, on] of Object.entries(change.categories ?? {})) {
+      if (typeof on !== 'boolean') continue;
       if (!isAdmin && (ADMIN_CATEGORIES as readonly string[]).includes(key)) {
         continue;
       }
       (on ? turnOn : turnOff).push(key as Category);
     }
     const flags: Partial<NotificationPrefs> = {
-      ...(change.digest !== undefined ? { digest: change.digest } : {}),
-      ...(change.immediate !== undefined
+      ...(typeof change.digest === 'boolean' ? { digest: change.digest } : {}),
+      ...(typeof change.immediate === 'boolean'
         ? { immediate: change.immediate }
         : {}),
-      ...(isAdmin && change.adminImmediate !== undefined
+      ...(isAdmin && typeof change.adminImmediate === 'boolean'
         ? { adminImmediate: change.adminImmediate }
         : {}),
     };

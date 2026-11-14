@@ -34,6 +34,7 @@ import {
 import type { StoredEmail } from './schemas/stored-email.schema';
 import {
   afterFailedSend,
+  EXPIRED_UNSENT,
   keyMayHaveExpired,
   sendKey,
   UNKNOWN_GIVE_UP,
@@ -60,7 +61,6 @@ export const PASS_LIMIT = 50;
 export const EXPIRY_MARGIN_MS = 3 * DAY_MS;
 /** How long such a failed row stays to be counted. */
 export const EXPIRED_KEEP_MS = 7 * DAY_MS;
-export const EXPIRED_UNSENT = 'expired unsent';
 export const ADMIN_LIST_INCOMPLETE = 'admin list incomplete';
 
 type QueueRow = NotificationQueueRow & { _id: Types.ObjectId };
@@ -508,7 +508,9 @@ export class NotificationDispatcher
       // A send may already have happened under this key: replay its body
       // byte for byte, but only while every check still allows exactly it
       // (review N6). Otherwise send nothing, and say so.
-      const now_ = delivery ? await build() : undefined;
+      // Still an immediate email under the member's settings now: one that
+      // would now wait for the digest has changed too (review round 3).
+      const now_ = delivery === 'immediate' ? await build() : undefined;
       if (!recipient?.email || !now_ || !sameEmail(now_, row.email)) {
         await this.settle(row, token, {
           status: 'failed',

@@ -8,6 +8,9 @@ const HOUR_MS = 60 * 60_000;
  */
 export const KEY_LIFETIME_MS = 23 * HOUR_MS;
 
+/** Why a row the expiry sweep caught was never sent (review M1). */
+export const EXPIRED_UNSENT = 'expired unsent';
+
 /** Why an email whose send may have happened is never tried again. */
 export const UNKNOWN_GIVE_UP = 'outcome unknown; not resent';
 

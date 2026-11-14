@@ -26,6 +26,7 @@ import {
   UnsubscribeController,
 } from '../src/member-notifications/notifications.controller';
 import { signUnsubscribe } from '../src/member-notifications/unsubscribe-tokens';
+import { fakeModel } from '../src/test-support/fake-model.mocks-spec';
 import { required } from './members-test-app';
 
 const CONFIG: Record<string, string> = {
@@ -37,11 +38,16 @@ describe('notification routes (e2e)', () => {
   let app: INestApplication<App>;
   let address = 0;
   const ok = (value: unknown) => jest.fn(() => Promise.resolve(value));
-  const prefs = {
-    view: ok({ categories: {}, digest: true, immediate: true }),
-    update: ok({ categories: {}, digest: false, immediate: true }),
-    unsubscribe: ok(undefined),
+  // The REAL settings service over an in-memory model, so a test sees
+  // what a save stores, not only what the controller passed on (review
+  // round 3: a DTO instance carries every optional field as undefined).
+  let model: ReturnType<typeof fakeModel>;
+  let prefs: {
+    view: jest.SpyInstance;
+    update: jest.SpyInstance;
+    unsubscribe: jest.SpyInstance;
   };
+  let service: NotificationPrefsService;
   const dispatcher = { status: ok({ enabled: false }) };
   const isAdmin = (req: { auth?: { payload: { sub: string } } }) =>
     Promise.resolve(req.auth?.payload.sub.startsWith('user_admin') === true);
@@ -65,6 +71,13 @@ describe('notification routes (e2e)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    model = fakeModel([], { unique: [['userId']] });
+    service = new NotificationPrefsService(model as never);
+    prefs = {
+      view: jest.spyOn(service, 'view'),
+      update: jest.spyOn(service, 'update'),
+      unsubscribe: jest.spyOn(service, 'unsubscribe'),
+    };
     const moduleRef = await Test.createTestingModule({
       imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
       controllers: [
@@ -76,7 +89,7 @@ describe('notification routes (e2e)', () => {
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         Reflector,
         AdminRoleGuard,
-        { provide: NotificationPrefsService, useValue: prefs },
+        { provide: NotificationPrefsService, useValue: service },
         { provide: NotificationDispatcher, useValue: dispatcher },
         {
           provide: ConfigService,
@@ -125,10 +138,57 @@ describe('notification routes (e2e)', () => {
       })
       .expect(200);
     expect(saved.headers['cache-control']).toBe('private, no-store');
-    expect(prefs.update).toHaveBeenCalledWith('user_admin', true, {
-      categories: { replies: false, adminReports: true },
+    expect(prefs.update).toHaveBeenCalledTimes(1);
+    expect((prefs.update.mock.calls[0] as unknown[]).slice(0, 2)).toEqual([
+      'user_admin',
+      true,
+    ]);
+    // What was STORED: exactly the named changes, nothing else switched.
+    expect(model.docs).toHaveLength(1);
+    expect(model.docs[0].off).toEqual(['replies']);
+    expect(model.docs[0].digest).toBe(false);
+    expect(model.docs[0]).not.toHaveProperty('immediate');
+    expect(model.docs[0]).not.toHaveProperty('adminImmediate');
+    expect(saved.body).toEqual({
+      categories: {
+        comments: true,
+        replies: false,
+        suggestions: true,
+        votes: true,
+        claims: true,
+        moderation: true,
+      },
       digest: false,
+      immediate: true,
+      admin: {
+        categories: {
+          adminPages: true,
+          adminEam: true,
+          adminReports: true,
+          adminClaims: true,
+        },
+        adminImmediate: true,
+      },
     });
+  });
+
+  it('a one-field save through the real validation pipe changes that field only (review round 3, HIGH 1)', async () => {
+    await call('put', '/me/notification-settings', 'user_member')
+      .send({ categories: { votes: false } })
+      .expect(200);
+    expect(model.docs[0].off).toEqual(['votes']);
+    await call('put', '/me/notification-settings', 'user_member')
+      .send({ immediate: false })
+      .expect(200);
+    expect(model.docs[0].off).toEqual(['votes']);
+    expect(model.docs[0]).toMatchObject({ immediate: false });
+    expect(model.docs[0]).not.toHaveProperty('digest');
+    // JSON null is "no value", never a switch either way.
+    await call('put', '/me/notification-settings', 'user_member')
+      .send({ digest: null, categories: { replies: null } })
+      .expect(200);
+    expect(model.docs[0].off).toEqual(['votes']);
+    expect(model.docs[0]).not.toHaveProperty('digest');
   });
 
   it('accepts only known settings, each a true or false', async () => {

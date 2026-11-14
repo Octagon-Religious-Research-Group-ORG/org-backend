@@ -8,7 +8,17 @@
 // reported as SKIPPED, never as passed. No email is sent: the sender is a
 // stub. Synthetic data only.
 import { Logger } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { Test } from '@nestjs/testing';
+import { ThrottlerModule } from '@nestjs/throttler';
 import mongoose, { type Model, Types } from 'mongoose';
+import request from 'supertest';
+import { AdminAccessService } from '../src/auth/admin-access.service';
+import { ClerkAuthGuard } from '../src/auth/auth.guard';
+import { configureHttpApp } from '../src/config/http-app';
+import { DEFAULT_THROTTLE } from '../src/config/throttle';
+import { MyNotificationSettingsController } from '../src/member-notifications/notifications.controller';
+import { required } from './members-test-app';
 import { AdminInboxEntrySchema } from '../src/admin-inbox/schemas/admin-inbox.schema';
 import { WebsitePageSchema } from '../src/content/schemas/website-page.schema';
 import { MANAGED_SCHEMAS } from '../src/db/managed-schemas';
@@ -408,6 +418,46 @@ describeWithMongo('member notifications on a real MongoDB', () => {
     );
     expect(await m.NotificationDigestRow.countDocuments()).toBe(1);
     expect(sent).toHaveLength(0);
+  });
+
+  it('a one-field save through the real route and validation pipe changes that field only (review round 3, HIGH 1)', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [ThrottlerModule.forRoot([DEFAULT_THROTTLE])],
+      controllers: [MyNotificationSettingsController],
+      providers: [
+        { provide: NotificationPrefsService, useValue: prefs },
+        {
+          provide: AdminAccessService,
+          useValue: { isAdminForRead: () => Promise.resolve(false) },
+        },
+      ],
+    })
+      .overrideGuard(ClerkAuthGuard)
+      .useValue(required)
+      .compile();
+    const app = moduleRef.createNestApplication<NestExpressApplication>();
+    configureHttpApp(app, { origins: ['http://localhost'], trustProxyHops: 1 });
+    await app.init();
+    try {
+      await prefs.unsubscribe('user_route', 'claims');
+      await request(app.getHttpServer())
+        .put('/api/v1/me/notification-settings')
+        .set('Origin', 'http://localhost')
+        .set('Authorization', 'Bearer user_route')
+        .send({ categories: { votes: false } })
+        .expect(200);
+      const row = await m.NotificationPrefsRow.findOne({
+        userId: 'user_route',
+      }).lean();
+      expect([...row.off].sort()).toEqual(['claims', 'votes']);
+      expect(await prefs.get('user_route')).toMatchObject({
+        digest: true,
+        immediate: true,
+        adminImmediate: true,
+      });
+    } finally {
+      await app.close();
+    }
   });
 
   it('never goes over the day’s budget, however many sends race', async () => {

@@ -27,6 +27,7 @@ import {
 import type { StoredEmail } from './schemas/stored-email.schema';
 import {
   afterFailedSend,
+  EXPIRED_UNSENT,
   keyMayHaveExpired,
   sendKey,
   UNKNOWN_GIVE_UP,
@@ -329,7 +330,15 @@ export class DigestSender {
         .exec();
       await this.queueModel
         .updateMany(
-          { _id: { $in: shownIds }, status: 'queued' },
+          {
+            _id: { $in: shownIds },
+            // Delivered wins: an item the expiry sweep failed while the
+            // email was out is sent too (review round 3).
+            $or: [
+              { status: 'queued' },
+              { status: 'failed', outcome: EXPIRED_UNSENT },
+            ],
+          },
           { $set: { status: 'sent', sentAt, digestId: row._id } },
           { session },
         )
