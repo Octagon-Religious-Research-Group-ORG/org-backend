@@ -96,7 +96,14 @@ export function engineStages(
  */
 export function phraseStages(phrase: string): PipelineStage[] {
   return [
-    { $match: { folded: { $regex: escapeRegex(` ${phrase} `) } } },
+    {
+      $match: {
+        // Belief text and ORG pages only: a member's name is never a
+        // suggestion (round-2 review M-B), nor is a belief's title.
+        kind: { $in: ['belief-text', 'page'] },
+        folded: { $regex: escapeRegex(` ${phrase} `) },
+      },
+    },
     { $set: { score: 1 } },
   ];
 }
@@ -199,7 +206,7 @@ export function visibilityStages(
       // the same block, in the same order, the page reads first.
       $lookup: {
         from: 'profileblocks',
-        let: { tab: '$tabId' },
+        let: { tab: '$tabId', profile: '$profileId' },
         pipeline: [
           {
             $match: {
@@ -207,7 +214,13 @@ export function visibilityStages(
               section: 'beliefs',
               removedAt: { $exists: false },
               kind: { $ne: 'image' },
-              $expr: { $eq: ['$tabId', '$$tab'] },
+              // The tab's blocks on the entry's own page only (round-2 L5).
+              $expr: {
+                $and: [
+                  { $eq: ['$tabId', '$$tab'] },
+                  { $eq: ['$profileId', '$$profile'] },
+                ],
+              },
             },
           },
           { $sort: { order: 1, _id: 1 } },

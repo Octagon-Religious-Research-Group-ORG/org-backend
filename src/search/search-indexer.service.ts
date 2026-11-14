@@ -104,6 +104,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
   private lastRefreshAt = 0;
   private lastFullAt = 0;
   private running?: Promise<void>;
+  private writes = 0;
   private readonly site: SiteEnv;
 
   constructor(
@@ -122,6 +123,15 @@ export class SearchIndexerService implements OnApplicationBootstrap {
     config: ConfigService,
   ) {
     this.site = readSiteEnv(config);
+  }
+
+  /**
+   * How many times the index has been written to. A cache of answers drawn
+   * from it keys on this (round-2 review L2). Deletions only follow writes
+   * of the same refresh, so counting the writes is enough.
+   */
+  generation(): number {
+    return this.writes;
   }
 
   /** The first full read starts with the server, not with the first search. */
@@ -179,6 +189,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
   ) {
     if (operations.length > 0) {
       await this.entryModel.bulkWrite(operations, { ordered: false });
+      this.writes += 1;
     }
   }
 
@@ -316,7 +327,8 @@ export class SearchIndexerService implements OnApplicationBootstrap {
       await this.write(
         parts.map(({ part, text }) =>
           upsert({
-            _id: `page:${page.pageId}:${part}`,
+            // Each site its own copy, even sharing one database (round-2 L3).
+            _id: `page:${this.site}:${page.pageId}:${part}`,
             kind: 'page',
             pageId: page.pageId,
             part,
@@ -330,6 +342,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
         .deleteMany({
           kind: 'page',
           pageId: page.pageId,
+          variant: this.site,
           part: { $nin: parts.map(({ part }) => part) },
         })
         .exec();

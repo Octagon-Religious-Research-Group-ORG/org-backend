@@ -19,7 +19,10 @@ function build(results: unknown[], engines = ['text', 'regex']) {
     atlasFailed: jest.fn(),
     textIndexMissing: jest.fn(),
   };
-  const indexer = { ensureFresh: jest.fn(() => Promise.resolve()) };
+  const indexer = {
+    ensureFresh: jest.fn(() => Promise.resolve()),
+    generation: jest.fn(() => 4),
+  };
   const members = {
     searchScope: jest.fn(() =>
       Promise.resolve({ listed: [P1, P2], full: [P1] }),
@@ -118,6 +121,10 @@ describe('SearchService', () => {
     expect(pipeline[0]).toEqual({ $match: { $text: { $search: 'lamp' } } });
   });
 
+  it("passes on the indexer's write count", () => {
+    expect(build([]).service.indexGeneration()).toBe(4);
+  });
+
   it('answers an empty aggregation with nothing', async () => {
     const { service } = build([[]]);
     expect((await service.search('lamp', 'all', 1, GUEST_VIEWER)).total).toBe(
@@ -135,7 +142,10 @@ describe('SearchService', () => {
     expect(members.searchScope).toHaveBeenCalledWith(GUEST_VIEWER);
     const pipeline = (aggregate.mock.calls as unknown[][])[0][0] as any[];
     expect(pipeline[0]).toEqual({
-      $match: { folded: { $regex: ' lamp light ' } },
+      $match: {
+        kind: { $in: ['belief-text', 'page'] },
+        folded: { $regex: ' lamp light ' },
+      },
     });
     expect(pipeline.at(-1)).toEqual({ $count: 'n' });
     members.searchScope.mockClear();

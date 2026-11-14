@@ -209,34 +209,63 @@ Atlas UI (JSON editor), on database `<database>`, collection `searchentries`:
 backend; a folding analyzer would only repeat that, and could split words
 differently from the `$text` and regex engines.
 
-**Suggested Fragments.** `GET /api/v1/search/fragments`. Only aggregate counts
-are stored (`searchtermwindows`: term, window number, number of different
-searchers; deleted by TTL once the next window has ended). A window is a
-fixed run of `SEARCH_FRAGMENT_WINDOW_DAYS` days (default 30), and a person
-counts once per window however many days they search. They are told apart in
-memory only, by an HMAC with a random key made when the window starts and
-never written down (`searcher-counter.ts`).
+**Suggested Fragments.** `GET /api/v1/search/fragments`. A window is a fixed
+run of `SEARCH_FRAGMENT_WINDOW_DAYS` days (default 30); a person counts once
+per window, however many days they search and however often the server
+restarts. Two things are stored:
+- `searchtermwindows`: term, window number, number of different searchers.
+  Deleted by TTL once the next window has ended.
+- `searchfragmentpairs`: one row per (searcher, term, window) whose `_id` is
+  `<window>|HMAC(windowKey, searcher + term)`, and an expiry one day after the
+  window ends (the same for every row of a window). No term, no searcher and
+  no other time is stored, and two rows of one person are unrelated hashes.
 
-*Trade-off.* A truly rolling window would need to remember, for 30 days,
-something linkable to each person's searches, on disk or in a sketch whose
-key outlives a day. Fixed windows keep that link only in memory and only
-until the window ends. In exchange:
-- a restart forgets who was already counted (a person searching before and
-  after it counts twice);
-- each server instance counts on its own;
-- up to 50,000 pairs per window are held, after which nobody new is counted.
+**Privacy property.** `windowKey = HMAC(serverSecret, "search-fragments|" +
+window)`, and `serverSecret = HMAC(CLERK_SECRET_KEY, "org-search-fragments-v1")`
+(`fragment-keys.ts`). The secret is in the host's settings, never in the
+database, so the database alone cannot recover a searcher, cannot test whether
+a given address or account searched a term, and cannot even tell which term a
+pair row is about. Nothing outlives its window by more than a day.
+- **No new setting:** `CLERK_SECRET_KEY` is already required on every site. The
+  derivation is domain-separated, so the derived key is useless for anything
+  else.
+- **Rotating the Clerk secret resets the counting:** a new key, so everyone
+  counts as new in the current window. Old pair rows simply expire.
+- **Fragments stay off without it:** if `CLERK_SECRET_KEY` is empty, nothing
+  is counted, the Perforated Index shows its built-in suggestions, and this is
+  logged once.
+- **Residual exposure:** someone holding BOTH the database and the Clerk
+  secret could test a guessed address against a term in the current window.
+  On a replica set, the oplog briefly shows a pair row and a term count being
+  written together; it still names nobody.
 
-A term is suggested while its count in the current window, or in the window
-just before it, reaches `SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5). The two
-counts are never added, so nobody is counted twice. The term must also:
-- have EVERY word of it, as a phrase, in content a signed-out reader can see
-  now, checked on every request (counted only when this held too);
+**Per-searcher limit.** One searcher adds at most 50 different terms per
+window. This limit is kept in memory only (a restart resets it), so the store
+is bounded by roughly 50 rows per searcher per window, on top of the 30
+searches a minute rate limit. A term is checked for public content before
+anything is written, so searches for private or empty terms store nothing.
+
+**When a term is suggested.** Its count in the current window, or in the
+window just before it, reaches `SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5).
+The two counts are never added. The term must also:
+- have EVERY word of it, as a phrase, in belief text or an ORG page a
+  signed-out reader can see now. A member's name or a belief title never
+  counts.
 - pass the shape check (3–40 letters, digits, spaces, hyphens, apostrophes;
   at most four words; no long numbers or `@`);
-- not be hidden.
+- be neither hidden nor contain a hidden word or phrase (whole words).
 
-Admins see and hide terms at `/api/v1/admin/search-fragments` (any
-fragment-shaped term, listed or not); each change is in the moderation log.
+The public list is reused for at most a minute while nothing it depends on
+changed: the candidates, the guest scope (read on every request, so a page
+made private drops its words at once) and the search index.
+
+**Admins** see and hide terms at `/api/v1/admin/search-fragments`: any
+fragment-shaped term, listed or not. Hiding a word also keeps out every term
+containing it. Each change is in the moderation log.
+
+**An earlier collection.** An earlier build of this chunk wrote
+`searchtermdays`. Nothing reads it now; its TTL empties it within 31 days,
+and it can then be dropped by hand.
 
 ## Heroku deployment
 

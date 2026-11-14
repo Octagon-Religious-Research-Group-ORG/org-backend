@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import {
   CANDIDATES_CACHE_MS,
   DEFAULT_HIDE_REASON,
+  ELIGIBLE_CACHE_MS,
   fragmentTerm,
   MAX_FRAGMENTS,
   SearchFragmentsService,
@@ -27,7 +28,7 @@ function build(
   counted: Array<{ _id: string; searchers: number }> = [],
   hidden: string[] = [],
   publicCount = 1,
-  config: Record<string, number> = {},
+  config: Record<string, unknown> = {},
 ) {
   const windows = {
     updateOne: jest.fn(() => exec()),
@@ -42,6 +43,15 @@ function build(
       Promise.resolve(term ? publicCount : 0),
     ),
     guestScope: jest.fn(() => Promise.resolve(SCOPE)),
+    indexGeneration: jest.fn(() => 0),
+  };
+  const seen = new Set<string>();
+  const pairs = {
+    updateOne: jest.fn((filter: { _id: string }) => {
+      const fresh = !seen.has(filter._id);
+      seen.add(filter._id);
+      return exec({ upsertedCount: fresh ? 1 : 0 });
+    }),
   };
   const log = { record: jest.fn(() => Promise.resolve({})) };
   const service = new SearchFragmentsService(
@@ -50,13 +60,15 @@ function build(
     search as never,
     log as never,
     {
-      get: (key: string, fallback: number) => config[key] ?? fallback,
+      get: (key: string, fallback: unknown) =>
+        ({ CLERK_SECRET_KEY: 'synthetic-secret', ...config })[key] ?? fallback,
     } as never,
+    pairs as never,
   );
   const warn = jest
     .spyOn((service as any).logger, 'warn')
     .mockImplementation(() => undefined);
-  return { service, windows, hides, search, log, warn };
+  return { service, windows, hides, search, log, warn, pairs };
 }
 
 describe('fragment helpers', () => {
@@ -78,7 +90,8 @@ describe('SearchFragmentsService.record', () => {
       'ip:1',
       new Date(NOW.getTime() + 86_400_000),
     );
-    expect(search.publicPhraseCount).toHaveBeenCalledTimes(1);
+    // The public check runs first, every time; only the first is counted.
+    expect(search.publicPhraseCount).toHaveBeenCalledTimes(2);
     expect(search.publicPhraseCount).toHaveBeenCalledWith('lamp light');
     expect(windows.updateOne).toHaveBeenCalledTimes(1);
     expect(windows.updateOne).toHaveBeenCalledWith(
@@ -185,11 +198,15 @@ describe('SearchFragmentsService lists', () => {
     const first = await service.fragments(NOW);
     expect(first).toHaveLength(MAX_FRAGMENTS);
     expect(search.publicPhraseCount).toHaveBeenCalledTimes(MAX_FRAGMENTS);
-    // A term that stops matching public content goes at once.
+    // Within a minute and with nothing changed, the answer is reused.
+    expect(await service.fragments(new Date(NOW.getTime() + 1))).toBe(first);
+    // After it, each one is checked again: one that stopped matching goes.
     search.publicPhraseCount.mockImplementation((term: string) =>
       Promise.resolve(term === 'term a' ? 0 : 1),
     );
-    const second = await service.fragments(new Date(NOW.getTime() + 1));
+    const second = await service.fragments(
+      new Date(NOW.getTime() + ELIGIBLE_CACHE_MS),
+    );
     expect(second).not.toContain('term a');
     expect(second).toHaveLength(MAX_FRAGMENTS);
     expect(windows.aggregate).toHaveBeenCalledTimes(1);

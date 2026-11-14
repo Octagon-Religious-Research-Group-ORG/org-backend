@@ -220,7 +220,7 @@
       "member-notifications/send-attempts.ts",
       "search/search-text.ts",
       "search/search-pipeline.ts",
-      "search/searcher-counter.ts",
+      "search/fragment-keys.ts",
       "search/search-engine.service.ts",
       "search/search-indexer.service.ts",
       "search/search.service.ts",

@@ -36,7 +36,6 @@ import { SearchEngineService } from '../src/search/search-engine.service';
 import { SearchFragmentsService } from '../src/search/search-fragments.service';
 import { SearchIndexerService } from '../src/search/search-indexer.service';
 import { SearchService } from '../src/search/search.service';
-import { SearcherCounter } from '../src/search/searcher-counter';
 import { computeVersionHash, GENESIS_HASH } from '../src/social/version-chain';
 import { optional, required } from './members-test-app';
 
@@ -56,6 +55,8 @@ const U = {
 
 /** The word every searchable thing below shares, to count what each reader gets. */
 const WORD = 'zephyrite';
+/** Stands in for the server secret fragments derive their keys from. */
+const SYNTHETIC_SECRET = 'synthetic-server-secret-for-search-tests';
 /** Belief results a guest may get for WORD (see `seed`). */
 const PUBLIC_HITS = 15;
 
@@ -328,6 +329,16 @@ describeWithMongo('search on a real MongoDB', () => {
   let indexer: SearchIndexerService;
   let engines: SearchEngineService;
   let fragments: SearchFragmentsService;
+  let search: SearchService;
+  const config = {
+    get: (key: string, fallback: unknown) =>
+      (
+        ({
+          SEARCH_FRAGMENT_MIN_SEARCHERS: 2,
+          CLERK_SECRET_KEY: SYNTHETIC_SECRET,
+        }) as Record<string, unknown>
+      )[key] ?? fallback,
+  };
 
   let visitor = 0;
   /** Each call from its own address, so the per-visitor limit stays out of the way. */
@@ -357,8 +368,8 @@ describeWithMongo('search on a real MongoDB', () => {
     }
     return { total: first.total, results: [...first.results, ...rest] };
   };
-  /** Term counts, whichever collection holds them (the review renamed it). */
-  const COUNT_COLLECTIONS = ['searchtermdays', 'searchtermwindows'];
+  /** Where Suggested Fragments keep anything at all (counts and pair hashes). */
+  const COUNT_COLLECTIONS = ['searchtermwindows', 'searchfragmentpairs'];
   const clearCounts = async () => {
     for (const name of COUNT_COLLECTIONS) {
       await conn.collection(name).deleteMany({});
@@ -439,10 +450,7 @@ describeWithMongo('search on a real MongoDB', () => {
         { provide: AdminAccessService, useValue: fakeAdmin },
         {
           provide: ConfigService,
-          useValue: {
-            get: (key: string, fallback: unknown) =>
-              key === 'SEARCH_FRAGMENT_MIN_SEARCHERS' ? 2 : fallback,
-          },
+          useValue: config,
         },
         ...[
           'SocialProfile',
@@ -453,6 +461,7 @@ describeWithMongo('search on a real MongoDB', () => {
           'SearchEntry',
           'SearchTermWindow',
           'SearchFragmentHide',
+          'SearchFragmentPair',
           'ModerationLogEntry',
           'WebsitePage',
         ].map((name) => ({ provide: getModelToken(name), useValue: m[name] })),
@@ -476,6 +485,7 @@ describeWithMongo('search on a real MongoDB', () => {
     indexer = moduleRef.get(SearchIndexerService);
     engines = moduleRef.get(SearchEngineService);
     fragments = moduleRef.get(SearchFragmentsService);
+    search = moduleRef.get(SearchService);
     await indexer.refresh({ full: true });
   });
 
@@ -679,7 +689,6 @@ describeWithMongo('search on a real MongoDB', () => {
     // Start from nothing: earlier tests' searches were counted too.
     await new Promise((resolve) => setTimeout(resolve, 300));
     await clearCounts();
-    (fragments as any).counter = new SearcherCounter();
     // Recorded after answering; wait for each count to land.
     const search = async (q: string, userId?: string) => {
       const counted = jest.spyOn(fragments, 'record');
@@ -770,7 +779,7 @@ describeWithMongo('search on a real MongoDB', () => {
     expect((await find('privateterm commonword')).total).toBeGreaterThan(0);
     for (let n = 1; n <= 4; n += 1) {
       await fragments.record('privateterm commonword', 3, `ip:h1a-${n}`);
-      await fragments.record('silver orchard', 1, `ip:h1a-${n}`);
+      await fragments.record('everybody reads', 1, `ip:h1a-${n}`);
     }
     const now = uncached();
     const terms = (await fragments.adminView(now)).map((row) => row.term);
@@ -779,7 +788,7 @@ describeWithMongo('search on a real MongoDB', () => {
       'privateterm commonword',
     );
     // A phrase whose every word is public is suggested.
-    expect(await fragments.fragments(now)).toContain('silver orchard');
+    expect(await fragments.fragments(now)).toContain('everybody reads');
   });
 
   it('counts one visitor once across the whole window, on any number of days (review H1b)', async () => {
@@ -830,6 +839,98 @@ describeWithMongo('search on a real MongoDB', () => {
       }
     } finally {
       fresh.mockRestore();
+    }
+  });
+
+  /** A new service, as after the free server sleeps and wakes. */
+  const restarted = () =>
+    new (SearchFragmentsService as any)(
+      m.SearchTermWindow,
+      m.SearchFragmentHide,
+      search,
+      new ModerationLogService(m.ModerationLogEntry),
+      config,
+      m.SearchFragmentPair,
+    ) as SearchFragmentsService;
+
+  it('counts a visitor once across restarts, and stores nothing that names them (review M-A)', async () => {
+    const at = new Date('2026-11-20T12:00:00Z');
+    for (let wake = 0; wake < 5; wake += 1) {
+      await restarted().record(
+        'commonword everybody',
+        1,
+        'ip:restart-visitor',
+        at,
+      );
+    }
+    const row = async () =>
+      (await restarted().adminView(at)).find(
+        (view) => view.term === 'commonword everybody',
+      );
+    // One person over five wake-ups: below the threshold of two.
+    expect(await row()).toBeUndefined();
+    await restarted().record(
+      'commonword everybody',
+      1,
+      'ip:second-restart',
+      at,
+    );
+    expect(await row()).toEqual(expect.objectContaining({ searchers: 2 }));
+    const stored = JSON.stringify(await storedCounts());
+    expect(stored).not.toMatch(/restart|ip:/);
+    // Without the server secret, fragments are off: nothing is counted.
+    const noSecret = new (SearchFragmentsService as any)(
+      m.SearchTermWindow,
+      m.SearchFragmentHide,
+      search,
+      new ModerationLogService(m.ModerationLogEntry),
+      {
+        get: (key: string, fallback: unknown) =>
+          key === 'CLERK_SECRET_KEY' ? '' : fallback,
+      },
+      m.SearchFragmentPair,
+    ) as SearchFragmentsService;
+    const before = JSON.stringify(await storedCounts());
+    await noSecret.record('commonword everybody', 1, 'ip:third', at);
+    expect(JSON.stringify(await storedCounts())).toBe(before);
+    expect(await noSecret.fragments(at)).toEqual([]);
+  });
+
+  it('never suggests a member name, only belief text and ORG pages (review M-B)', async () => {
+    const at = new Date('2026-11-21T12:00:00Z');
+    // A public page's name: a guest finds it.
+    expect((await find('plain holder')).total).toBeGreaterThan(0);
+    for (let n = 1; n <= 3; n += 1) {
+      await fragments.record('plain holder', 1, `ip:mb-${n}`, at);
+    }
+    expect(
+      (await fragments.adminView(at)).map((view) => view.term),
+    ).not.toContain('plain holder');
+  });
+
+  it("reads the first block of the belief's own page (review L5)", async () => {
+    const fresh = jest.spyOn(indexer, 'ensureFresh').mockResolvedValue();
+    const stray = { profileId: new Types.ObjectId(), blockId: 'blk_stray' };
+    try {
+      expect((await find('commonword')).total).toBe(1);
+      // A row from another page that claims the same tab, edited and first.
+      await m.ProfileBlock.collection.insertOne({
+        ...stray,
+        section: 'beliefs',
+        kind: 'paragraph',
+        tabId: 'tab_common-holder',
+        label: '',
+        order: -1,
+        currentVersionSeq: 2,
+      });
+      await m.BlockVersion.collection.insertMany([
+        versionRow('blk_stray', 1, 'Stray one.', GENESIS_HASH),
+        versionRow('blk_stray', 2, 'Stray two.', GENESIS_HASH),
+      ]);
+      expect((await find('commonword')).total).toBe(1);
+    } finally {
+      fresh.mockRestore();
+      await m.ProfileBlock.collection.deleteOne({ blockId: 'blk_stray' });
     }
   });
 });
@@ -982,6 +1083,11 @@ describeStandalone('search on a standalone mongod with no text index', () => {
       ]).toEqual([q, 0]);
     }
     await testIndexer.refresh({ full: true });
+    // Each site keeps its own copy: the test site never overwrites
+    // production's (review L3).
+    expect((await search.search('paypal', 'all', 1, await guest())).total).toBe(
+      1,
+    );
     for (const q of ['paypal', 'synthorg', 'synthetic org']) {
       expect([
         q,

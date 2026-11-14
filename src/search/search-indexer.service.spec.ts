@@ -188,8 +188,8 @@ describe('SearchIndexerService', () => {
       `member:${String(P)}`,
       'title:tab_1',
       'text:b1',
-      'page:research:title',
-      'page:research:block:r1',
+      'page:production:research:title',
+      'page:production:research:block:r1',
     ]);
     expect(blocks.distinct).toHaveBeenCalledWith('tabId', {
       section: 'beliefs',
@@ -202,6 +202,7 @@ describe('SearchIndexerService', () => {
     expect(entries.deleteMany).toHaveBeenCalledWith({
       kind: 'page',
       pageId: 'research',
+      variant: 'production',
       part: { $nin: ['title', 'block:r1'] },
     });
   });
@@ -381,5 +382,26 @@ describe('SearchIndexerService copies, review L1 and M2', () => {
     const livePages = setOf(live.entries).filter((set) => set.kind === 'page');
     expect(livePages[0].variant).toBe('production');
     expect(JSON.stringify(livePages)).toContain('synthorg');
+  });
+});
+
+describe('SearchIndexerService page ids, round-2 review L3', () => {
+  it('keeps each site its own page entries', async () => {
+    const test = build({ site: 'test' });
+    await test.indexer.refresh({ full: true });
+    expect(ops(test.entries)).toContain('page:test:research:title');
+    expect(test.entries.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'page', variant: 'test' }),
+    );
+    const live = build();
+    await live.indexer.refresh({ full: true });
+    expect(ops(live.entries)).toContain('page:production:research:title');
+  });
+
+  it('counts each change to the index (round-2 review L2)', async () => {
+    const { indexer } = build();
+    const before = indexer.generation();
+    await indexer.refresh({ full: true });
+    expect(indexer.generation()).toBeGreaterThan(before);
   });
 });

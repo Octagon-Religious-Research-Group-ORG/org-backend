@@ -55,7 +55,10 @@ describe('search pipeline', () => {
 
   it('matches a phrase as whole words', () => {
     expect(phraseStages('lamp light')[0]).toEqual({
-      $match: { folded: { $regex: ' lamp light ' } },
+      $match: {
+        kind: { $in: ['belief-text', 'page'] },
+        folded: { $regex: ' lamp light ' },
+      },
     });
   });
 

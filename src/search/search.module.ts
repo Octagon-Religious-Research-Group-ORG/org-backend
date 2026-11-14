@@ -28,6 +28,10 @@ import {
   SearchFragmentHideSchema,
 } from './schemas/search-fragment-hide.schema';
 import {
+  SearchFragmentPair,
+  SearchFragmentPairSchema,
+} from './schemas/search-fragment-pair.schema';
+import {
   SearchTermWindow,
   SearchTermWindowSchema,
 } from './schemas/search-term-window.schema';
@@ -52,6 +56,7 @@ import { SearchService } from './search.service';
       { name: SearchEntry.name, schema: SearchEntrySchema },
       { name: SearchTermWindow.name, schema: SearchTermWindowSchema },
       { name: SearchFragmentHide.name, schema: SearchFragmentHideSchema },
+      { name: SearchFragmentPair.name, schema: SearchFragmentPairSchema },
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },
       { name: ProfileBlock.name, schema: ProfileBlockSchema },

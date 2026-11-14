@@ -123,6 +123,11 @@ export class SearchService {
     };
   }
 
+  /** Changes whenever the indexer writes: a cache of results can key on it. */
+  indexGeneration(): number {
+    return this.indexer.generation();
+  }
+
   /** What a signed-out reader may find; read once and shared by several checks. */
   guestScope(): Promise<SearchScope> {
     return this.members.searchScope(GUEST_VIEWER);

@@ -8,11 +8,15 @@ import {
   type SearchFragmentHideDocument,
 } from './schemas/search-fragment-hide.schema';
 import {
+  SearchFragmentPair,
+  type SearchFragmentPairDocument,
+} from './schemas/search-fragment-pair.schema';
+import {
   SearchTermWindow,
   type SearchTermWindowDocument,
 } from './schemas/search-term-window.schema';
+import { FragmentKeys, fragmentSecret } from './fragment-keys';
 import type { SearchScope } from './search-pipeline';
-import { SearcherCounter } from './searcher-counter';
 import { SearchService } from './search.service';
 import { foldWords, isFragmentShaped, normaliseQuery } from './search-text';
 
@@ -23,16 +27,33 @@ export const MAX_FRAGMENTS = 8;
 /** Candidates read per listing, most-searched first. */
 const MAX_CANDIDATES = 50;
 /**
- * How long the list of CANDIDATES (counts and hidden terms) is kept. Whether
- * each one still matches public content is checked on every request, so a
- * term whose page went private is dropped at once (review L4).
+ * How long the list of CANDIDATES (counts and hidden terms) is kept. A
+ * count or a hide drops it at once.
  */
 export const CANDIDATES_CACHE_MS = 10 * 60_000;
+/**
+ * How long the public list is reused while nothing it depends on changed:
+ * the candidates, what a guest may see (the guest scope, read on every
+ * request) and the search index (`indexGeneration`). A page made private
+ * changes the guest scope, so its words go at once (round-2 review L2).
+ */
+export const ELIGIBLE_CACHE_MS = 60_000;
+/**
+ * Different terms one searcher can add to the counts per window, so one
+ * visitor cannot crowd the store or the candidates (round-2 review L1).
+ * Held in memory only (a restart resets it); the rate limit of 30 searches
+ * a minute bounds it further.
+ */
+export const MAX_TERMS_PER_VISITOR = 50;
+/** Searchers the per-searcher limit remembers per window, at most. */
+const MAX_TRACKED_VISITORS = 100_000;
 const DAY_MS = 86_400_000;
 
 export const FRAGMENT_NOT_SHAPED =
   'That is not a term a fragment can be: 3–40 letters, digits, spaces, hyphens or apostrophes, at most four words.';
 export const DEFAULT_HIDE_REASON = 'No reason given.';
+export const FRAGMENTS_OFF =
+  'Suggested Fragments are off: CLERK_SECRET_KEY is empty, so no key can be derived.';
 
 /** Which fixed window of `days` days `at` falls in (days counted from 1970-01-01 UTC). */
 export function windowIndex(at: Date, days: number): number {
@@ -51,6 +72,13 @@ export function fragmentTerm(raw: string): string | undefined {
   return foldWords(typed).join(' ');
 }
 
+/** The hidden term that keeps `term` out: one of its whole words or phrases. */
+function blockerOf(term: string, hidden: Set<string>): string | undefined {
+  return [...hidden].find(
+    (word) => word !== term && ` ${term} `.includes(` ${word} `),
+  );
+}
+
 export interface AdminFragmentView {
   term: string;
   /**
@@ -58,7 +86,10 @@ export interface AdminFragmentView {
    * that was more: a person counts once per window, whatever the days.
    */
   searchers: number;
+  /** Hidden itself. */
   hidden: boolean;
+  /** Kept out because it contains this hidden word or phrase. */
+  blockedBy?: string;
   /** Shown to readers now: enough searchers, not hidden, matches public content. */
   shown: boolean;
 }
@@ -72,29 +103,33 @@ interface Candidates {
 /**
  * Suggested Fragments that follow what people search (Chunk 15, plan D21),
  * privately:
- * - only aggregate counts are stored: one row per term per fixed window,
- *   never a query with a user, address or session;
- * - a term is counted only when EVERY word of it, as a phrase, is in content
- *   a SIGNED-OUT reader can see (review H1a), and shown only while it still
- *   is, so a private word can never surface, alone or next to public ones;
- * - a person counts once per window, however many days they search
- *   (review H1b);
- * - it must have enough different searchers, pass the shape check, and not
- *   be hidden by an admin.
+ * - stored: one count per term per fixed window, and one row per (searcher,
+ *   term, window) whose id is an HMAC under a key derived from the server
+ *   secret (`fragment-keys.ts`, round-2 review M-A). The secret is not in
+ *   the database, so the database alone names nobody and cannot test
+ *   whether a given person searched a term; a restart does not count anyone
+ *   twice;
+ * - a term is counted only when EVERY word of it, as a phrase, is in belief
+ *   text or an ORG page a SIGNED-OUT reader can see (review H1a; never in a
+ *   member's name, round-2 review M-B), and shown only while it still is;
+ * - a person counts once per window, however many days they search;
+ * - it must have enough different searchers, pass the shape check, and
+ *   neither be hidden nor contain a hidden word.
  *
  * A term is suggested while its count in the current window, or the window
- * just before it, reaches the threshold: so a popular term does not vanish
- * on the first day of a new window, and counts from two windows are never
- * added together (the same person may be in both).
+ * just before it, reaches the threshold; the two counts are never added
+ * (the same person may be in both).
  */
 @Injectable()
 export class SearchFragmentsService {
   private readonly logger = new Logger(SearchFragmentsService.name);
   private readonly minSearchers: number;
   private readonly windowDays: number;
+  private readonly keys?: FragmentKeys;
   private cache?: Candidates;
-  /** In memory only: see searcher-counter.ts. */
-  private readonly counter = new SearcherCounter();
+  private eligible?: { key: string; at: number; fragments: string[] };
+  /** Terms each searcher added this window: memory only, never stored. */
+  private perVisitor = { window: -1, counts: new Map<string, number>() };
 
   constructor(
     @InjectModel(SearchTermWindow.name)
@@ -104,6 +139,8 @@ export class SearchFragmentsService {
     private readonly search: SearchService,
     private readonly log: ModerationLogService,
     config: ConfigService,
+    @InjectModel(SearchFragmentPair.name)
+    private readonly pairModel: Model<SearchFragmentPairDocument>,
   ) {
     this.minSearchers = config.get<number>(
       'SEARCH_FRAGMENT_MIN_SEARCHERS',
@@ -113,6 +150,9 @@ export class SearchFragmentsService {
       'SEARCH_FRAGMENT_WINDOW_DAYS',
       FRAGMENT_DEFAULTS.windowDays,
     );
+    const secret = fragmentSecret(config);
+    if (secret) this.keys = new FragmentKeys(secret);
+    else this.logger.warn(FRAGMENTS_OFF);
   }
 
   /**
@@ -121,7 +161,7 @@ export class SearchFragmentsService {
    *
    * @param total - how many results THIS reader got; the public check is
    *   always a signed-out reader's, whoever searched
-   * @param visitor - who searched, for the in-memory distinct count only
+   * @param visitor - who searched; used only inside HMACs, never stored
    */
   async record(
     query: string,
@@ -131,10 +171,22 @@ export class SearchFragmentsService {
   ): Promise<void> {
     try {
       const term = fragmentTerm(query);
-      if (total === 0 || !term) return;
-      const window = windowIndex(now, this.windowDays);
-      if (!this.counter.firstInWindow(term, visitor, String(window))) return;
+      if (total === 0 || !term || !this.keys) return;
+      // Public first: a term that is not remembers nobody (round-2 review L1).
       if ((await this.search.publicPhraseCount(term)) === 0) return;
+      const window = windowIndex(now, this.windowDays);
+      if (!this.underVisitorLimit(window, visitor)) return;
+      const expiresAt = new Date(((window + 1) * this.windowDays + 1) * DAY_MS);
+      const pair = await this.pairModel
+        .updateOne(
+          { _id: this.keys.pairId(window, visitor, term) },
+          { $setOnInsert: { expiresAt } },
+          { upsert: true },
+        )
+        .exec();
+      // Already counted for this term in this window, before or after a restart.
+      if (pair.upsertedCount !== 1) return;
+      this.countVisitor(window, visitor);
       await this.windowModel
         .updateOne(
           { _id: `${window}|${term}` },
@@ -158,16 +210,54 @@ export class SearchFragmentsService {
     }
   }
 
-  /** The fragments readers see, most searched first; eligibility checked now. */
+  private visitorCounts(window: number) {
+    if (this.perVisitor.window !== window) {
+      this.perVisitor = { window, counts: new Map() };
+    }
+    return this.perVisitor.counts;
+  }
+
+  private underVisitorLimit(window: number, visitor: string) {
+    const counts = this.visitorCounts(window);
+    const id = (this.keys as FragmentKeys).visitorId(window, visitor);
+    if (!counts.has(id) && counts.size >= MAX_TRACKED_VISITORS) return false;
+    return (counts.get(id) ?? 0) < MAX_TERMS_PER_VISITOR;
+  }
+
+  private countVisitor(window: number, visitor: string) {
+    const counts = this.visitorCounts(window);
+    const id = (this.keys as FragmentKeys).visitorId(window, visitor);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+
+  /** The fragments readers see, most searched first; eligibility kept current. */
   async fragments(now = new Date()): Promise<string[]> {
+    if (!this.keys) return [];
     if (
       !this.cache ||
       Math.abs(now.getTime() - this.cache.at) >= CANDIDATES_CACHE_MS
     ) {
       this.cache = await this.candidates(now);
     }
-    const views = await this.check(this.cache, true);
-    return views.filter((view) => view.shown).map((view) => view.term);
+    const scope = await this.search.guestScope();
+    const key = JSON.stringify([
+      this.cache.at,
+      this.search.indexGeneration(),
+      scope.listed.map(String),
+      scope.full.map(String),
+    ]);
+    if (
+      this.eligible?.key === key &&
+      Math.abs(now.getTime() - this.eligible.at) < ELIGIBLE_CACHE_MS
+    ) {
+      return this.eligible.fragments;
+    }
+    const views = await this.check(this.cache, true, scope);
+    const fragments = views
+      .filter((view) => view.shown)
+      .map((view) => view.term);
+    this.eligible = { key, at: now.getTime(), fragments };
+    return fragments;
   }
 
   /** Every term with enough searchers, and every hidden one, for the admins. */
@@ -207,23 +297,28 @@ export class SearchFragmentsService {
   }
 
   /**
-   * Each candidate's state now. One guest scope is read and shared by every
-   * check; checking stops once {@link MAX_FRAGMENTS} are shown.
+   * Each candidate's state now. One guest scope is read (or given) and shared
+   * by every check; checking stops once {@link MAX_FRAGMENTS} are shown.
    *
    * @param stopAtShown - leave out the rest once enough are shown
    */
   private async check(
     { counted, hidden }: Candidates,
     stopAtShown: boolean,
+    given?: SearchScope,
   ): Promise<AdminFragmentView[]> {
-    let scope: SearchScope | undefined;
+    let scope = given;
     const views: AdminFragmentView[] = [];
     let shownCount = 0;
     for (const row of counted) {
       if (stopAtShown && shownCount === MAX_FRAGMENTS) break;
       const isHidden = hidden.has(row._id);
+      const blockedBy = blockerOf(row._id, hidden);
       const eligible =
-        !isHidden && shownCount < MAX_FRAGMENTS && isFragmentShaped(row._id);
+        !isHidden &&
+        !blockedBy &&
+        shownCount < MAX_FRAGMENTS &&
+        isFragmentShaped(row._id);
       if (eligible) scope ??= await this.search.guestScope();
       const shown =
         eligible && (await this.search.publicPhraseCount(row._id, scope)) > 0;
@@ -232,6 +327,7 @@ export class SearchFragmentsService {
         term: row._id,
         searchers: row.searchers,
         hidden: isHidden,
+        ...(blockedBy ? { blockedBy } : {}),
         shown,
       });
     }
@@ -241,7 +337,8 @@ export class SearchFragmentsService {
   /**
    * Hides a fragment or shows it again, and logs it in the moderation log.
    * Any fragment-shaped term can be hidden, including one nobody has
-   * searched yet, so an admin can act ahead.
+   * searched yet; a hidden word or phrase also keeps out every term that
+   * contains it as whole words.
    *
    * @throws BadRequestException for a term that could never be a fragment
    */

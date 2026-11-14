@@ -24,6 +24,7 @@ import { NotificationPrefsRowSchema } from '../member-notifications/schemas/noti
 import { NotificationQueueRowSchema } from '../member-notifications/schemas/notification-queue.schema';
 import { SearchEntrySchema } from '../search/schemas/search-entry.schema';
 import { SearchFragmentHideSchema } from '../search/schemas/search-fragment-hide.schema';
+import { SearchFragmentPairSchema } from '../search/schemas/search-fragment-pair.schema';
 import { SearchTermWindowSchema } from '../search/schemas/search-term-window.schema';
 
 /**
@@ -62,4 +63,5 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'SearchEntry', schema: SearchEntrySchema },
     { name: 'SearchTermWindow', schema: SearchTermWindowSchema },
     { name: 'SearchFragmentHide', schema: SearchFragmentHideSchema },
+    { name: 'SearchFragmentPair', schema: SearchFragmentPairSchema },
   ];
