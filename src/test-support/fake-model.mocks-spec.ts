@@ -7,7 +7,7 @@
 // Supported: find/findOne (sort, skip, limit, select and session ignored,
 // lean), exists,
 // countDocuments, create (unique keys, timestamps), updateOne/updateMany/
-// findOneAndUpdate ($set, $unset, $inc, $push, $pull; updateOne also
+// findOneAndUpdate ($set, $unset, $inc, $push, $addToSet, $pull; updateOne also
 // upserts), and aggregate with
 // $match, $sort, $group ($first, $min, $max, $sum, $push), $skip, $limit
 // and $project (1 and $slice). Not a database: no
@@ -127,6 +127,11 @@ function applyUpdate(doc: Doc, update: Doc, inserting = false) {
       } else if (op === '$push') {
         const list = (getPath(doc, path) as unknown[]) ?? [];
         setPath(doc, path, [...list, copy(value)]);
+      } else if (op === '$addToSet') {
+        const list = (getPath(doc, path) as unknown[]) ?? [];
+        if (!list.some((item) => compare(item, value) === 0)) {
+          setPath(doc, path, [...list, copy(value)]);
+        }
       } else if (op === '$pull') {
         const list = (getPath(doc, path) as Doc[]) ?? [];
         const match = sift(value as Filter);
@@ -320,9 +325,10 @@ export function fakeModel(
     },
     updateOne: update(false),
     updateMany: update(true),
-    findOneAndUpdate: (filter, change, settings) => ({
-      ...query(() => undefined),
-      exec: () => {
+    findOneAndUpdate: (filter, change, settings) => {
+      // Overridden in place, so `.lean().exec()` runs the update too.
+      const q = query(() => undefined);
+      q.exec = () => {
         const [doc] = matching(filter);
         if (!doc) return Promise.resolve(null);
         const before = copy(doc);
@@ -330,8 +336,9 @@ export function fakeModel(
         return Promise.resolve(
           settings?.returnDocument === 'after' ? copy(doc) : before,
         );
-      },
-    }),
+      };
+      return q;
+    },
     aggregate: (pipeline) => ({
       exec: () => {
         let rows: Doc[] = docs.map(copy);

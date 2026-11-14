@@ -3,11 +3,13 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { type ClientSession, type Connection, Model, Types } from 'mongoose';
 import { AdminInboxService } from '../../admin-inbox/admin-inbox.service';
 import { inTransaction } from '../../db/transactions';
+import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import { ModerationLogService } from '../../moderation/moderation-log.service';
 import { ReportsStore } from '../../moderation/reports.store';
 import {
@@ -212,6 +214,8 @@ export class ModerationQueueService {
     private readonly reports: ReportsStore,
     private readonly inbox: AdminInboxService,
     private readonly log: ModerationLogService,
+    /** Tells a comment's author of a decision (Chunk 14). */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   async queue(
@@ -464,7 +468,10 @@ export class ModerationQueueService {
     rawReason: string,
   ) {
     const reason = cleanReason(rawReason);
-    return inTransaction(this.connection, async (session) => {
+    // The author, known once the transaction has read the comment; told
+    // only after it committed.
+    let authorUserId: string | undefined;
+    const result = await inTransaction(this.connection, async (session) => {
       const row = (await this.commentModel
         .findOne({ commentId, ...LISTED })
         .session(session)
@@ -474,6 +481,7 @@ export class ModerationQueueService {
       if (row.authorUserId === adminId || row.linkedUserId === adminId) {
         throw new ForbiddenException(OWN_CONTENT);
       }
+      authorUserId = row.authorUserId ?? row.linkedUserId;
       const before = row.moderation ?? null;
       let after: ModerationState | null;
       if (action === 'restore') {
@@ -569,6 +577,13 @@ export class ModerationQueueService {
           : {}),
       };
     });
+    await this.notifier?.commentModerated({
+      commentId,
+      authorUserId,
+      actorUserId: adminId,
+      state: result.moderation,
+    });
+    return result;
   }
 
   /**

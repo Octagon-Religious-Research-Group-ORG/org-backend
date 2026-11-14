@@ -5,9 +5,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
+import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import { hasVisibleText } from '../../membership/member-text';
 import { CommentVersionsService } from '../../social/comment-versions.service';
 import {
@@ -86,6 +88,8 @@ interface Place {
   profileId: Types.ObjectId;
   /** The reader owns the page (decides suggestions). */
   isOwner: boolean;
+  /** Who owns the page, if anyone: told of new comments (Chunk 14). */
+  ownerUserId?: string;
   orgPage?: OrgPage;
 }
 
@@ -145,6 +149,8 @@ export class CommentsService {
     @InjectModel(BeliefVote.name)
     private readonly voteModel: Model<BeliefVoteDocument>,
     private readonly orgPages: OrgPagesService,
+    /** Tells the page owner and the answered author (Chunk 14). */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   /**
@@ -354,7 +360,11 @@ export class CommentsService {
     const { profile, access } = await this.readablePage(input.slug, writer);
     return this.createIn(
       writer,
-      { profileId: profile._id, isOwner: access.isOwner },
+      {
+        profileId: profile._id,
+        isOwner: access.isOwner,
+        ownerUserId: profile.ownerUserId,
+      },
       input.tabId,
       { ...input, body },
     );
@@ -389,6 +399,7 @@ export class CommentsService {
     const body = input.body;
     let tabId = thread;
     let parentCommentId: string | undefined;
+    let parentAuthorUserId: string | undefined;
     if (input.parentCommentId !== undefined) {
       const root = await this.store.rootOf(
         place.profileId,
@@ -404,6 +415,8 @@ export class CommentsService {
       }
       tabId = root.tabId;
       parentCommentId = root.commentId;
+      // An imported comment counts only once linked to an account (Chunk 11).
+      parentAuthorUserId = root.authorUserId ?? root.linkedUserId;
     }
     if (tabId !== undefined && !place.orgPage) {
       await this.requireLiveTab(place.profileId, tabId);
@@ -441,6 +454,14 @@ export class CommentsService {
           expectedSeq: 0,
         }),
     );
+    await this.notifier?.commentPosted({
+      commentId,
+      actorUserId: writer.userId,
+      profileId: place.profileId,
+      tabId,
+      pageOwnerUserId: place.ownerUserId,
+      parentAuthorUserId,
+    });
     return { commentId, seq };
   }
 

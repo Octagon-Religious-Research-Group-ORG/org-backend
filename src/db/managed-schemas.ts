@@ -18,6 +18,10 @@ import { ProfileBlockSchema } from '../social/schemas/profile-block.schema';
 import { SocialProfileSchema } from '../social/schemas/social-profile.schema';
 import { VoteHistoryEntrySchema } from '../social/schemas/vote-history.schema';
 import { VoteTallySchema } from '../social/schemas/vote-tally.schema';
+import { EmailBudgetDaySchema } from '../member-notifications/schemas/email-budget.schema';
+import { NotificationDigestRowSchema } from '../member-notifications/schemas/notification-digest.schema';
+import { NotificationPrefsRowSchema } from '../member-notifications/schemas/notification-prefs.schema';
+import { NotificationQueueRowSchema } from '../member-notifications/schemas/notification-queue.schema';
 
 /**
  * Every collection whose indexes are created deliberately (`autoIndex: false`).
@@ -48,4 +52,8 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'AdminInboxEntry', schema: AdminInboxEntrySchema },
     { name: 'Report', schema: ReportSchema },
     { name: 'ReportQuota', schema: ReportQuotaSchema },
+    { name: 'NotificationPrefsRow', schema: NotificationPrefsRowSchema },
+    { name: 'NotificationQueueRow', schema: NotificationQueueRowSchema },
+    { name: 'NotificationDigestRow', schema: NotificationDigestRowSchema },
+    { name: 'EmailBudgetDay', schema: EmailBudgetDaySchema },
   ];

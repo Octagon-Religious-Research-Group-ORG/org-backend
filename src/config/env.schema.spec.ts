@@ -70,3 +70,51 @@ describe('environment safety defaults', () => {
     ).toBeDefined();
   });
 });
+
+describe('member notifications (Chunk 14)', () => {
+  it('gives each site its own share of the shared daily email limit', () => {
+    expect(validate(required).value).toMatchObject({
+      EMAIL_DAILY_LIMIT: 70,
+      EMAIL_IMMEDIATE_RESERVE: 20,
+      DIGEST_HOUR_UTC: 14,
+    });
+    expect(validate({ ...required, SITE_ENV: 'test' }).value).toMatchObject({
+      EMAIL_DAILY_LIMIT: 20,
+      EMAIL_IMMEDIATE_RESERVE: 5,
+    });
+    expect(
+      validate({
+        ...required,
+        EMAIL_DAILY_LIMIT: '30',
+        EMAIL_IMMEDIATE_RESERVE: '0',
+        DIGEST_HOUR_UTC: '0',
+        PUBLIC_API_URL: 'https://api.example.test',
+        NOTIFICATION_FROM_EMAIL: 'ORG <notices@example.test>',
+        NOTIFICATION_SIGNING_SECRET: 's'.repeat(32),
+      }).value,
+    ).toMatchObject({
+      EMAIL_DAILY_LIMIT: 30,
+      EMAIL_IMMEDIATE_RESERVE: 0,
+      DIGEST_HOUR_UTC: 0,
+    });
+  });
+
+  it('refuses a limit over the free tier, a reserve that leaves no room, a short secret, an hour that is not one', () => {
+    for (const env of <Record<string, string>[]>[
+      { EMAIL_DAILY_LIMIT: '101' },
+      { EMAIL_DAILY_LIMIT: '10', EMAIL_IMMEDIATE_RESERVE: '10' },
+      { NOTIFICATION_SIGNING_SECRET: 'short' },
+      { DIGEST_HOUR_UTC: '24' },
+      { PUBLIC_API_URL: 'not a url' },
+    ]) {
+      expect(validate({ ...required, ...env }).error).toBeDefined();
+    }
+    expect(
+      validate({
+        ...required,
+        EMAIL_DAILY_LIMIT: '10',
+        EMAIL_IMMEDIATE_RESERVE: '10',
+      }).error?.message,
+    ).toContain('EMAIL_IMMEDIATE_RESERVE must be below EMAIL_DAILY_LIMIT');
+  });
+});

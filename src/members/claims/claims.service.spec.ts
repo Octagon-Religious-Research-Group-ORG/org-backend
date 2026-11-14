@@ -108,7 +108,7 @@ const visiblePage = (overrides: Record<string, unknown> = {}) => ({
   access: { level: 'full', listed: true, isOwner: false },
 });
 
-function build() {
+function build(notifier?: unknown) {
   const session = fakeSession();
   const claimModel = {
     db: { startSession: jest.fn(() => Promise.resolve(session)) },
@@ -149,6 +149,7 @@ function build() {
     writers as never,
     clerk as never,
     log as never,
+    notifier as never,
   );
   return {
     service,
@@ -927,5 +928,92 @@ describe('review round 2', () => {
     expect(isTransactionUnsupported({ code: 11000, message: 1 })).toBe(false);
     expect(isTransactionUnsupported(null)).toBe(false);
     expect(isTransactionUnsupported('odd')).toBe(false);
+  });
+});
+
+describe('ClaimsService: emails (Chunk 14)', () => {
+  const notifier = () => ({
+    adminNotice: jest.fn(() => Promise.resolve()),
+    claimDecided: jest.fn(() => Promise.resolve()),
+  });
+  const decisions = (n: ReturnType<typeof notifier>) =>
+    n.claimDecided.mock.calls.map((call) => {
+      const [event] = call as unknown as [
+        { claimantUserId: string; approved: boolean; actorUserId: string },
+      ];
+      return [event.claimantUserId, event.approved, event.actorUserId];
+    });
+
+  it('tells the admins of a new request, but not of one the site rejected at once', async () => {
+    const n = notifier();
+    const { service, profileModel } = build(n);
+    await service.request(viewer, 'imported-page', 'Mine.');
+    expect(n.adminNotice).toHaveBeenCalledWith({
+      kind: 'admin-claim-requested',
+      subjectUserId: CLAIMANT,
+      actorUserId: CLAIMANT,
+      once: `claim:${String(CLAIM_ID)}`,
+      refs: { claimId: String(CLAIM_ID), profileId: PROFILE_ID },
+    });
+    profileModel.findOne
+      .mockReturnValueOnce(chain(null))
+      .mockReturnValueOnce(chain({ ownerUserId: 'user_b' }));
+    await service.request(viewer, 'imported-page', 'Mine.');
+    expect(n.adminNotice).toHaveBeenCalledTimes(1);
+    expect(n.claimDecided).not.toHaveBeenCalled();
+  });
+
+  it('tells the claimant an approval, and each other claimant the site’s rejection', async () => {
+    const n = notifier();
+    const { service, claimModel } = build(n);
+    claimModel.find.mockReturnValueOnce(
+      chain([
+        claimRow({ _id: OTHER_CLAIM_ID, userId: 'user_b' }),
+        claimRow({ _id: new Types.ObjectId(), userId: 'user_c' }),
+      ]),
+    );
+    claimModel.updateOne
+      .mockReturnValueOnce(modified(1)) // the approval
+      .mockReturnValueOnce(modified(1)) // user_b rejected
+      .mockReturnValueOnce(modified(0)); // user_c decided meanwhile
+    await service.approve(ADMIN, String(CLAIM_ID));
+    expect(decisions(n)).toEqual([
+      [CLAIMANT, true, ADMIN],
+      ['user_b', false, SYSTEM_CLAIMS_ACTOR],
+    ]);
+    expect(n.claimDecided).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claimId: String(CLAIM_ID),
+        profileId: PROFILE_ID,
+      }),
+    );
+  });
+
+  it('tells the claimant when the page was taken meanwhile, only if the site rejected it', async () => {
+    const n = notifier();
+    const { service, profileModel, claimModel } = build(n);
+    profileModel.updateOne.mockReturnValue(modified(0));
+    profileModel.findOne.mockReturnValueOnce(chain({}));
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      PAGE_TAKEN,
+    );
+    expect(decisions(n)).toEqual([[CLAIMANT, false, ADMIN]]);
+    profileModel.findOne.mockReturnValueOnce(chain({}));
+    claimModel.updateOne
+      .mockReturnValueOnce(modified(1))
+      .mockReturnValueOnce(modified(0));
+    await expect(service.approve(ADMIN, String(CLAIM_ID))).rejects.toThrow(
+      PAGE_TAKEN,
+    );
+    expect(n.claimDecided).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the claimant a rejection, and nobody a withdrawal', async () => {
+    const n = notifier();
+    const { service } = build(n);
+    await service.reject(ADMIN, String(CLAIM_ID), 'Synthetic reason');
+    expect(decisions(n)).toEqual([[CLAIMANT, false, ADMIN]]);
+    await service.withdraw(CLAIMANT, String(CLAIM_ID));
+    expect(n.claimDecided).toHaveBeenCalledTimes(1);
   });
 });

@@ -300,6 +300,8 @@ export function harness(
     comments?: FakeModelOptions['beforeWrite'];
     votes?: FakeModelOptions['beforeWrite'];
     voteHistory?: FakeModelOptions['beforeWrite'];
+    /** A MemberNotifier stand-in (Chunk 14). */
+    notifier?: unknown;
   } = {},
 ): Harness {
   const seeded = seedBlocks();
@@ -398,6 +400,7 @@ export function harness(
     authors,
     votes as never,
     orgPages,
+    faults.notifier as never,
   );
   const suggestions = new SuggestionsService(
     comments as never,
@@ -408,6 +411,7 @@ export function harness(
     commentsService,
     editor,
     commentVersionService,
+    faults.notifier as never,
   );
   const writers = new CommentWritersService(members, clerk as never);
   const voters = new VotersService(writers);
@@ -425,6 +429,7 @@ export function harness(
     voteHistoryService,
     settings as never,
     orgPages,
+    faults.notifier as never,
   );
   const history = new MemberHistoryService(
     members,

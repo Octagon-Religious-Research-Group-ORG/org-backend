@@ -4,9 +4,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
+import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import {
   BeliefTab,
   type BeliefTabDocument,
@@ -174,6 +176,8 @@ export class VotesService {
     private readonly history: VoteHistoryService,
     private readonly settings: OrgSettingsService,
     private readonly orgPages: OrgPagesService,
+    /** Tells an owner their belief reached the agreed list (Chunk 14). */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   /**
@@ -221,7 +225,24 @@ export class VotesService {
       );
       await this.tallies.settle(input.tabId, mark);
     }
-    return this.oneBelief(profile, access.isOwner, input.tabId, voter);
+    const result = await this.oneBelief(
+      profile,
+      access.isOwner,
+      input.tabId,
+      voter,
+    );
+    // The vote that puts the current wording on the agreed list (Chunk 14);
+    // once per wording, however many agree after it.
+    if (input.value === 'agree' && result.votes.agree >= AGREED_THRESHOLD) {
+      await this.notifier?.beliefAgreed({
+        profileId: profile._id,
+        tabId: input.tabId,
+        textSeq: result.textSeq,
+        ownerUserId: profile.ownerUserId,
+        actorUserId: voter.userId,
+      });
+    }
+    return result;
   }
 
   /**

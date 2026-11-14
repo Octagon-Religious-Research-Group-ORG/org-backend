@@ -48,7 +48,7 @@ interface Built {
   service: ModerationQueueService;
 }
 
-function build(): Built {
+function build(notifier?: unknown): Built {
   const h = harness();
   const reports = fakeModel([], { timestamps: true });
   const inboxModel = fakeModel([], { timestamps: true });
@@ -71,6 +71,7 @@ function build(): Built {
     new ReportsStore(reports as never),
     inbox,
     log as never,
+    notifier as never,
   );
   return { h, reports, inboxModel, log, service };
 }
@@ -603,5 +604,51 @@ describe('an accepted suggestion (review L-2)', () => {
     await expect(
       b.service.moderateComment(ADMIN, pending.commentId, 'hide', 'r'),
     ).resolves.not.toHaveProperty('note');
+  });
+});
+
+describe('ModerationQueueService: telling the author (Chunk 14)', () => {
+  it('tells the author each decision after it is saved, and nobody when it fails', async () => {
+    const commentModerated = jest.fn(() => Promise.resolve());
+    const b = build({ commentModerated });
+    const commentId = await comment(b.h);
+    await b.service.moderateComment(ADMIN, commentId, 'hide', 'r');
+    await b.service.moderateComment(ADMIN, commentId, 'remove', 'r');
+    await b.service.moderateComment(ADMIN, commentId, 'restore', 'r');
+    await expect(
+      b.service.moderateComment(ADMIN, commentId, 'restore', 'r'),
+    ).rejects.toThrow(NOT_MODERATED);
+    expect(commentModerated.mock.calls).toEqual([
+      [
+        {
+          commentId,
+          authorUserId: U.named,
+          actorUserId: ADMIN,
+          state: 'hidden',
+        },
+      ],
+      [
+        {
+          commentId,
+          authorUserId: U.named,
+          actorUserId: ADMIN,
+          state: 'removed',
+        },
+      ],
+      [{ commentId, authorUserId: U.named, actorUserId: ADMIN, state: null }],
+    ]);
+    // An imported comment: its linked account, or nobody.
+    await b.service.moderateComment(ADMIN, 'cmt_imp4', 'hide', 'r');
+    expect(commentModerated).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        commentId: 'cmt_imp4',
+        authorUserId: undefined,
+      }),
+    );
+    stateOf(b, 'cmt_imp1').linkedUserId = U.owner;
+    await b.service.moderateComment(ADMIN, 'cmt_imp1', 'hide', 'r');
+    expect(commentModerated).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commentId: 'cmt_imp1', authorUserId: U.owner }),
+    );
   });
 });

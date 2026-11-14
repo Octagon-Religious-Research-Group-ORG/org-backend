@@ -6,11 +6,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { type ClientSession, Model, Types } from 'mongoose';
 import { ClerkUserInfoService } from '../../auth/clerk-user-info.service';
+import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import {
   cleanMemberParagraphs,
   cleanMemberTitle,
@@ -164,6 +166,8 @@ export class ClaimsService {
     private readonly writers: CommentWritersService,
     private readonly clerk: ClerkUserInfoService,
     private readonly log: ModerationLogService,
+    /** Emails about requests and decisions (Chunk 14). */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   /** The reader's own requests, and whether they may ask now. */
@@ -267,7 +271,29 @@ export class ClaimsService {
         );
       }
     }
+    await this.notifier?.adminNotice({
+      kind: 'admin-claim-requested',
+      subjectUserId: viewer.userId,
+      actorUserId: viewer.userId,
+      once: `claim:${String(row._id)}`,
+      refs: { claimId: String(row._id), profileId: profile._id },
+    });
     return myClaimView(row, page);
+  }
+
+  /** Tells the claimant the decision, after it committed (Chunk 14). */
+  private async tellClaimant(
+    claim: ClaimRow,
+    actorUserId: string,
+    approved: boolean,
+  ) {
+    await this.notifier?.claimDecided({
+      claimId: String(claim._id),
+      claimantUserId: claim.userId,
+      actorUserId,
+      profileId: claim.profileId,
+      approved,
+    });
   }
 
   private async pageNowOwned(profileId: Types.ObjectId) {
@@ -467,15 +493,18 @@ export class ClaimsService {
 
     if (refusal) {
       const gone = refusal === 'gone';
+      let rejectedAt: Date | undefined;
       await this.inTransaction(async (session) => {
-        await this.rejectBySite(
+        rejectedAt = await this.rejectBySite(
           claim,
           gone ? SITE_REASON_GONE : SITE_REASON_TAKEN,
           session,
         );
       });
+      if (rejectedAt) await this.tellClaimant(claim, adminId, false);
       throw new ConflictException(gone ? PAGE_GONE : PAGE_TAKEN);
     }
+    await this.tellClaimant(claim, adminId, true);
     await this.rejectOthers(claim);
     return { approved: true };
   }
@@ -507,7 +536,9 @@ export class ClaimsService {
       return;
     }
     for (const other of others) {
-      await this.rejectBySiteSafely(other, SITE_REASON_TAKEN);
+      if (await this.rejectBySiteSafely(other, SITE_REASON_TAKEN)) {
+        await this.tellClaimant(other, SYSTEM_CLAIMS_ACTOR, false);
+      }
     }
   }
 
@@ -535,6 +566,7 @@ export class ClaimsService {
       'claim.rejected',
       given ? reason : 'Rejected without a reason.',
     );
+    await this.tellClaimant(claim, adminId, false);
     return { rejected: true };
   }
 

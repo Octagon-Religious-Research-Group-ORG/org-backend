@@ -5,9 +5,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, type Types } from 'mongoose';
+import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import { hasVisibleText } from '../../membership/member-text';
 import { STALE_EDIT_REFUSAL } from '../../social/block-versions.service';
 import { CommentVersionsService } from '../../social/comment-versions.service';
@@ -127,6 +129,8 @@ export class SuggestionsService {
     private readonly comments: CommentsService,
     private readonly editor: MemberPageEditorService,
     private readonly versions: CommentVersionsService,
+    /** Tells the owner of a suggestion, and its author of a decision. */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   /**
@@ -199,6 +203,11 @@ export class SuggestionsService {
           expectedSeq: 0,
         }),
     );
+    await this.notifier?.suggestionPosted({
+      commentId,
+      actorUserId: writer.userId,
+      ownerUserId: profile.ownerUserId,
+    });
     return { commentId };
   }
 
@@ -251,6 +260,29 @@ export class SuggestionsService {
    */
   async accept(userId: string, commentId: string) {
     const row = await this.ownersSuggestion(userId, commentId);
+    const result = await this.applyAccept(userId, commentId, row);
+    await this.tellSuggester(userId, commentId, row.authorUserId);
+    return result;
+  }
+
+  /** Its author hears that it was decided, after the decision (Chunk 14). */
+  private async tellSuggester(
+    userId: string,
+    commentId: string,
+    suggesterUserId: string | undefined,
+  ) {
+    await this.notifier?.suggestionDecided({
+      commentId,
+      actorUserId: userId,
+      suggesterUserId,
+    });
+  }
+
+  private async applyAccept(
+    userId: string,
+    commentId: string,
+    row: Awaited<ReturnType<SuggestionsService['ownersSuggestion']>>,
+  ) {
     // First: a version naming it makes it accepted, whatever its status says.
     const before = await this.landedVersion(row, commentId);
     if (before !== undefined) {
@@ -467,6 +499,7 @@ export class SuggestionsService {
       await this.finishAccept(commentId, userId, after);
       throw new ConflictException(SUGGESTION_ALREADY_ACCEPTED);
     }
+    await this.tellSuggester(userId, commentId, row.authorUserId);
     return { declined: true };
   }
 }

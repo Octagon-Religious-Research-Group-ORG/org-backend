@@ -170,6 +170,7 @@ export class ReportsService {
         targetId: target.targetId,
         subjectUserId: target.subjectUserId,
         profileId: target.targetProfileId,
+        reporterUserId: writer.userId,
       });
     } catch (error) {
       // Best effort: the report is in the queue whatever happens here.

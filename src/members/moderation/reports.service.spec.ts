@@ -92,6 +92,7 @@ describe('ReportsService (Chunk 13)', () => {
       targetId: commentId,
       subjectUserId: U.named,
       profileId: ids.open,
+      reporterUserId: U.anon,
     });
   });
 
@@ -399,6 +400,7 @@ describe('ReportsService (Chunk 13)', () => {
       targetId: String(ids.named),
       subjectUserId: U.named,
       profileId: ids.named,
+      reporterUserId: writer.userId,
     });
     // An imported page with no owner yet.
     await service.report(writer, {

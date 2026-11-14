@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
+import { Logger } from '@nestjs/common';
 import { Resend } from 'resend';
 import {
   TEST_SITE_EMAIL_NOTICE,
@@ -260,5 +261,83 @@ describe('NotificationsService', () => {
     ];
     expect(message.subject).toBe('ORG-20260723-ABC123 is preparing');
     expect(message.text).not.toContain(TEST_SITE_EMAIL_NOTICE);
+  });
+
+  describe('member notifications (Chunk 14)', () => {
+    const notice = {
+      to: 'member@example.test',
+      subject: 'Your ORG activity summary',
+      lines: ['Line one', 'Line two'],
+      headers: { 'List-Unsubscribe': '<https://org.example.test/u>' },
+      idempotencyKey: 'org-digest-1-0',
+    };
+
+    it('needs only a key and a sender, and sends with headers and the key', async () => {
+      mockSend.mockResolvedValue({ data: { id: 'email-1' }, error: null });
+      const service = new NotificationsService(
+        config({
+          RESEND_API_KEY: 'api-key',
+          NOTIFICATION_FROM_EMAIL: 'ORG <notices@example.test>',
+        }) as never,
+      );
+      expect(service.noticesEnabled()).toBe(true);
+      expect(await service.sendNotice(notice)).toBe('sent');
+      expect(mockSend).toHaveBeenCalledWith(
+        {
+          from: 'ORG <notices@example.test>',
+          to: 'member@example.test',
+          subject: 'Your ORG activity summary',
+          text: ['Line one', 'Line two'].join('\n'),
+          headers: { 'List-Unsubscribe': '<https://org.example.test/u>' },
+        },
+        { idempotencyKey: 'org-digest-1-0' },
+      );
+      // Orders still need their host address.
+      expect(await service.sendOrderCreated(order() as never)).toBe('skipped');
+    });
+
+    it('falls back to the order sender, shares its client, and marks the test site', async () => {
+      mockSend.mockResolvedValue({ data: { id: 'email-1' }, error: null });
+      const service = testSiteService();
+      expect(jest.mocked(Resend)).toHaveBeenCalledTimes(1);
+      await service.sendNotice(notice);
+      const [[message]] = mockSend.mock.calls as [
+        [{ from: string; subject: string; text: string }],
+      ];
+      expect(message.from).toBe('orders@example.test');
+      expect(message.subject).toBe(TEST_SITE_SUBJECT_PREFIX + notice.subject);
+      expect(message.text.startsWith(TEST_SITE_EMAIL_NOTICE)).toBe(true);
+    });
+
+    it('skips without a key or a sender, and reports a failure without the address', async () => {
+      const off = new NotificationsService(
+        config({ NOTIFICATION_FROM_EMAIL: 'notices@example.test' }) as never,
+      );
+      expect(off.noticesEnabled()).toBe(false);
+      expect(await off.sendNotice(notice)).toBe('skipped');
+      expect(
+        new NotificationsService(
+          config({ RESEND_API_KEY: 'api-key' }) as never,
+        ).noticesEnabled(),
+      ).toBe(false);
+      expect(mockSend).not.toHaveBeenCalled();
+
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      const service = configuredService();
+      mockSend.mockResolvedValueOnce({ data: null, error: { message: 'bad' } });
+      expect(await service.sendNotice(notice)).toBe('failed');
+      mockSend.mockRejectedValueOnce('odd');
+      expect(await service.sendNotice(notice)).toBe('failed');
+      expect(logged).toHaveBeenCalledWith(
+        'Notification email failed (org-digest-1-0): bad',
+      );
+      expect(logged).toHaveBeenCalledWith(
+        'Notification email failed (org-digest-1-0): Unknown email error',
+      );
+      expect(JSON.stringify(logged.mock.calls)).not.toContain(
+        'member@example.test',
+      );
+      logged.mockRestore();
+    });
   });
 });

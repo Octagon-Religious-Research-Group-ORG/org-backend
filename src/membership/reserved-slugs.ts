@@ -53,6 +53,7 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   'signup',
   'static',
   'terms',
+  'unsubscribe',
   // The two admins' own names: a look-alike address here would pass for them.
   'tripp',
   'tripp-org',

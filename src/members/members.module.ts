@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AdminInboxModule } from '../admin-inbox/admin-inbox.module';
+import { MemberNotificationsModule } from '../member-notifications/member-notifications.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import {
   ModerationLogEntry,
@@ -107,13 +108,14 @@ import { VotesService } from './votes/votes.service';
  * and comments on ORG's own pages (Chunk 10b), and claims on imported pages
  * with the linking of imported comments (Chunk 11), and the admin dashboard
  * with the "Request EaM" button (Chunk 12), and reports with the moderation
- * queue (Chunk 13).
+ * queue (Chunk 13), each telling the people concerned by email (Chunk 14).
  */
 @Module({
   imports: [
     SocialModule,
     ModerationModule,
     AdminInboxModule,
+    MemberNotificationsModule,
     MongooseModule.forFeature([
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },

@@ -99,6 +99,27 @@ Mongoose schema declarations, and static seed data are verified by builds,
 validation tests, schema tests, and the API E2E suite rather than counted in the
 unit coverage denominator.
 
+## Member email notifications
+
+Members get a **daily digest** of new activity (comments and replies, suggested
+rewordings, beliefs reaching the agreed list) and **immediate** emails for claim
+decisions and moderation of their comments; admins get the admin inbox's
+notices (immediate for claims and reports, in the digest otherwise). Emails say
+only that there is something new, with a link: never a member's text, name or
+reason. Every email has a signed one-click unsubscribe link
+(`POST /api/v1/notifications/unsubscribe`) and a link to the settings page.
+
+There is no external scheduler. The server sends on start (so a sleeping free
+instance catches up when it wakes), every hour while awake, and right after an
+event that wants an immediate email. A digest is claimed by a unique
+(member, UTC day) row in `notificationdigests`, so two instances never send the
+same day twice. `emailbudget` counts sends per UTC day against
+`EMAIL_DAILY_LIMIT`, digests stopping `EMAIL_IMMEDIATE_RESERVE` short; what
+does not fit waits for the next day. Admins see the day's count in the
+dashboard's Settings. Addresses are read from Clerk when an email is sent and
+never stored. Sending is off until `RESEND_API_KEY` and a sender are set; until
+then notifications are only queued (and expire after 30 days).
+
 ## Heroku deployment
 
 The repository includes a `Procfile` that starts the compiled application with

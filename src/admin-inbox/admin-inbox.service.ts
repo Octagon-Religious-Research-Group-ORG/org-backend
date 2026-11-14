@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { type ClientSession, type Connection, Model, Types } from 'mongoose';
@@ -12,6 +13,7 @@ import {
   cleanMemberParagraphs,
   hasVisibleText,
 } from '../membership/member-text';
+import { MemberNotifier } from '../member-notifications/member-notifier.service';
 import { ModerationLogService } from '../moderation/moderation-log.service';
 import {
   SocialProfile,
@@ -109,6 +111,8 @@ export class AdminInboxService {
     private readonly profileModel: Model<SocialProfileDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly log: ModerationLogService,
+    /** Emails the admins about new notices (Chunk 14). */
+    @Optional() private readonly notifier?: MemberNotifier,
   ) {}
 
   /**
@@ -126,7 +130,15 @@ export class AdminInboxService {
       });
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
+      return;
     }
+    await this.notifier?.adminNotice({
+      kind: 'admin-page-submitted',
+      subjectUserId: userId,
+      actorUserId: userId,
+      once: pageSubmittedKey(profileId),
+      refs: { profileId, inboxKey: pageSubmittedKey(profileId) },
+    });
   }
 
   /**
@@ -194,6 +206,8 @@ export class AdminInboxService {
     targetId: string;
     subjectUserId: string;
     profileId?: Types.ObjectId;
+    /** Who reported it: never emailed about their own report (Chunk 14). */
+    reporterUserId?: string;
   }) {
     const now = new Date();
     // Through the driver, not Mongoose: Mongoose always moves `createdAt`
@@ -224,6 +238,17 @@ export class AdminInboxService {
       if (!isDuplicateKey(error)) throw error;
       await write();
     }
+    await this.notifier?.adminNotice({
+      kind: 'admin-report',
+      subjectUserId: target.subjectUserId,
+      actorUserId: target.reporterUserId ?? target.subjectUserId,
+      // At most one email per reported target per day; the queue has them all.
+      once: MemberNotifier.reportOnce(target.targetType, target.targetId),
+      refs: {
+        ...(target.profileId ? { profileId: target.profileId } : {}),
+        inboxKey: reportKey(target.targetType, target.targetId),
+      },
+    });
   }
 
   /**
@@ -286,6 +311,13 @@ export class AdminInboxService {
         profileId,
         ...(hasVisibleText(cleaned) ? { note: cleaned } : {}),
         dedupeKey: eamKey(userId),
+      });
+      await this.notifier?.adminNotice({
+        kind: 'admin-eam-request',
+        subjectUserId: userId,
+        actorUserId: userId,
+        once: `eam:${String(row._id)}`,
+        refs: { profileId, inboxKey: eamKey(userId) },
       });
       return {
         requested: true,

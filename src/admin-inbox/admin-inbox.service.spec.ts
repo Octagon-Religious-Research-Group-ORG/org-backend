@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect matchers */
 import {
   BadRequestException,
   ConflictException,
@@ -45,7 +46,7 @@ function chain(value: unknown) {
   return query;
 }
 
-function build(options: { failure?: unknown } = {}) {
+function build(options: { failure?: unknown; notifier?: unknown } = {}) {
   const entryModel = {
     create: jest.fn((row: Record<string, unknown>) =>
       Promise.resolve({ ...row, createdAt: CREATED }),
@@ -62,6 +63,7 @@ function build(options: { failure?: unknown } = {}) {
     profileModel as never,
     connection as never,
     log as never,
+    options.notifier as never,
   );
   return { service, entryModel, profileModel, log, session };
 }
@@ -560,5 +562,86 @@ describe('AdminInboxService: report notices (Chunk 13)', () => {
     });
     expect(entries[0]).not.toHaveProperty('blocksNewRequest');
     expect(entries[1]).not.toHaveProperty('target');
+  });
+});
+
+describe('AdminInboxService: emails the admins (Chunk 14)', () => {
+  const notifier = () => ({ adminNotice: jest.fn(() => Promise.resolve()) });
+
+  it('asks for an admin email for a new page, once, and for an EaM request', async () => {
+    const n = notifier();
+    const { service, entryModel } = build({ notifier: n });
+    await service.notifyPageSubmitted(MEMBER, PROFILE_ID);
+    entryModel.create.mockRejectedValueOnce(duplicate);
+    await service.notifyPageSubmitted(MEMBER, PROFILE_ID);
+    const made = await service.requestEam(MEMBER, PROFILE_ID, '');
+    expect(made.requested).toBe(true);
+    expect(n.adminNotice.mock.calls).toEqual([
+      [
+        {
+          kind: 'admin-page-submitted',
+          subjectUserId: MEMBER,
+          actorUserId: MEMBER,
+          once: pageSubmittedKey(PROFILE_ID),
+          refs: {
+            profileId: PROFILE_ID,
+            inboxKey: pageSubmittedKey(PROFILE_ID),
+          },
+        },
+      ],
+      [
+        expect.objectContaining({
+          kind: 'admin-eam-request',
+          subjectUserId: MEMBER,
+          refs: { profileId: PROFILE_ID, inboxKey: eamKey(MEMBER) },
+        }),
+      ],
+    ]);
+    // A refused second request asks nothing.
+    entryModel.create.mockRejectedValueOnce(duplicate);
+    await expect(service.requestEam(MEMBER, PROFILE_ID, '')).rejects.toThrow();
+    expect(n.adminNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks once a day per reported target, never naming the reporter as a reader', async () => {
+    const n = notifier();
+    const built = build({ notifier: n });
+    Object.assign(built.entryModel, {
+      collection: { updateOne: jest.fn(() => Promise.resolve({})) },
+    });
+    await built.service.notifyReport({
+      targetType: 'comment',
+      targetId: 'cmt_1',
+      subjectUserId: MEMBER,
+      profileId: PROFILE_ID,
+      reporterUserId: 'user_reporter',
+    });
+    await built.service.notifyReport({
+      targetType: 'member-page',
+      targetId: 'p1',
+      subjectUserId: MEMBER,
+    });
+    expect(n.adminNotice.mock.calls).toEqual([
+      [
+        {
+          kind: 'admin-report',
+          subjectUserId: MEMBER,
+          actorUserId: 'user_reporter',
+          once: expect.stringMatching(
+            /^report:comment:cmt_1:[0-9]{4}-[0-9]{2}-[0-9]{2}$/,
+          ),
+          refs: {
+            profileId: PROFILE_ID,
+            inboxKey: reportKey('comment', 'cmt_1'),
+          },
+        },
+      ],
+      [
+        expect.objectContaining({
+          actorUserId: MEMBER,
+          refs: { inboxKey: reportKey('member-page', 'p1') },
+        }),
+      ],
+    ]);
   });
 });

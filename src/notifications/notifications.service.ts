@@ -16,6 +16,9 @@ export class NotificationsService {
   private readonly hostEmail?: string;
   private readonly publicAppUrl: string;
   private readonly testSite: boolean;
+  /** Member notifications (Chunk 14): need only a key and a sender. */
+  private readonly noticeClient?: Resend;
+  private readonly noticeFrom?: string;
 
   constructor(config: ConfigService) {
     const apiKey = config.get<string>('RESEND_API_KEY');
@@ -26,6 +29,54 @@ export class NotificationsService {
     this.testSite = readSiteEnv(config) === 'test';
     if (apiKey && this.from && this.hostEmail) {
       this.resend = new Resend(apiKey);
+    }
+    this.noticeFrom =
+      config.get<string>('NOTIFICATION_FROM_EMAIL') || this.from;
+    if (apiKey && this.noticeFrom) {
+      this.noticeClient = this.resend ?? new Resend(apiKey);
+    }
+  }
+
+  /** Whether member notifications can be sent at all (Chunk 14). */
+  noticesEnabled(): boolean {
+    return this.noticeClient !== undefined;
+  }
+
+  /**
+   * Sends one member notification (Chunk 14), marked like every other email
+   * on the test site. The address comes from the caller, read from Clerk at
+   * send time; it is never logged.
+   *
+   * @returns 'skipped' when sending is not configured
+   */
+  async sendNotice(message: {
+    to: string;
+    subject: string;
+    lines: string[];
+    headers: Record<string, string>;
+    idempotencyKey: string;
+  }): Promise<'sent' | 'failed' | 'skipped'> {
+    if (!this.noticeClient || !this.noticeFrom) return 'skipped';
+    try {
+      const result = await this.noticeClient.emails.send(
+        {
+          from: this.noticeFrom,
+          to: message.to,
+          subject: this.subject(message.subject),
+          text: this.body(message.lines),
+          headers: message.headers,
+        },
+        { idempotencyKey: message.idempotencyKey },
+      );
+      if (result.error) throw new Error(result.error.message);
+      return 'sent';
+    } catch (error) {
+      this.logger.error(
+        `Notification email failed (${message.idempotencyKey}): ${
+          error instanceof Error ? error.message : 'Unknown email error'
+        }`,
+      );
+      return 'failed';
     }
   }
 

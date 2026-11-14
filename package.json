@@ -205,7 +205,18 @@
       "members/moderation/moderation-queue.service.ts",
       "members/moderation/moderation.controller.ts",
       "members/moderation/moderation-throttle.guard.ts",
-      "moderation/report-quota.store.ts"
+      "moderation/report-quota.store.ts",
+      "member-notifications/notification-kinds.ts",
+      "member-notifications/notification-config.ts",
+      "member-notifications/email-budget.store.ts",
+      "member-notifications/unsubscribe-tokens.ts",
+      "member-notifications/notification-prefs.service.ts",
+      "member-notifications/notification-targets.service.ts",
+      "member-notifications/notification-mail.ts",
+      "member-notifications/member-notifier.service.ts",
+      "member-notifications/notification-dispatcher.service.ts",
+      "member-notifications/digest-sender.ts",
+      "member-notifications/notifications.controller.ts"
     ],
     "coverageThreshold": {
       "global": {
