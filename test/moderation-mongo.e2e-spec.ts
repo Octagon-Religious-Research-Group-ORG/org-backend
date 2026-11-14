@@ -234,15 +234,88 @@ describeWithMongo('moderation on a real MongoDB', () => {
     expect(indexes).toHaveLength(4);
   });
 
-  it('declares the report-quota indexes: one counter per reporter per day, with a TTL', async () => {
+  it('declares the report-quota indexes: the TTL only; _id makes one row a day', async () => {
     const indexes = await m.ReportQuota.collection.indexes();
-    const byKey = new Map(indexes.map((i) => [JSON.stringify(i.key), i]));
-    expect(byKey.get('{"reporterUserId":1,"day":1}')).toMatchObject({
-      unique: true,
+    expect(indexes.map((i) => JSON.stringify(i.key)).sort()).toEqual([
+      '{"_id":1}',
+      '{"expiresAt":1}',
+    ]);
+    expect(
+      indexes.find((i) => JSON.stringify(i.key) === '{"expiresAt":1}'),
+    ).toMatchObject({ expireAfterSeconds: 0 });
+  });
+
+  it('lets 5 concurrent first reports of the day all through (review F2)', async () => {
+    const quota = new ReportQuotaStore(m.ReportQuota);
+    for (let trial = 0; trial < 20; trial++) {
+      const user = `user_fresh_${trial}`;
+      const taken = await Promise.all(
+        Array.from({ length: 5 }, () => quota.take(user, REPORTS_PER_DAY)),
+      );
+      expect(taken.filter((day) => day !== undefined)).toHaveLength(5);
+      const rows = await m.ReportQuota.find({ reporterUserId: user }).lean();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].n).toBe(5);
+    }
+  });
+
+  it('holds the cap with no index but _id, as before db:indexes runs (review F1)', async () => {
+    await m.ReportQuota.collection.dropIndexes();
+    try {
+      const quota = new ReportQuotaStore(m.ReportQuota);
+      const allowed: string[] = [];
+      for (let n = 0; n < 25; n++) {
+        const day = await quota.take('user_no_index', REPORTS_PER_DAY);
+        if (day) allowed.push(day);
+      }
+      expect(allowed).toHaveLength(REPORTS_PER_DAY);
+      expect(
+        await m.ReportQuota.countDocuments({ reporterUserId: 'user_no_index' }),
+      ).toBe(1);
+      // In parallel too.
+      const parallel = await Promise.all(
+        Array.from({ length: 25 }, () =>
+          quota.take('user_no_index_2', REPORTS_PER_DAY),
+        ),
+      );
+      expect(parallel.filter(Boolean)).toHaveLength(REPORTS_PER_DAY);
+    } finally {
+      await m.ReportQuota.createIndexes();
+    }
+  });
+
+  it('gives back exactly one slot for a report not stored, and never below zero', async () => {
+    const commentId = await post();
+    const reporter = await writer(U.adminWithPage);
+    const quotaOf = async () =>
+      (
+        await m.ReportQuota.findOne({
+          reporterUserId: U.adminWithPage,
+        }).lean()
+      )?.n;
+    await reports.report(reporter, {
+      targetType: 'comment',
+      commentId,
+      reason: 'spam',
     });
-    expect(byKey.get('{"expiresAt":1}')).toMatchObject({
-      expireAfterSeconds: 0,
-    });
+    expect(await quotaOf()).toBe(1);
+    // The same report again is refused (one open report per target) and
+    // gives its slot back: one, not zero (no double refund), not two.
+    await expect(
+      reports.report(reporter, {
+        targetType: 'comment',
+        commentId,
+        reason: 'spam',
+      }),
+    ).rejects.toThrow(new ConflictException(ALREADY_REPORTED));
+    expect(await quotaOf()).toBe(1);
+    const quota = new ReportQuotaStore(m.ReportQuota);
+    const day = (await m.ReportQuota.findOne({
+      reporterUserId: U.adminWithPage,
+    }).lean())!.day as string;
+    await quota.giveBack(U.adminWithPage, day);
+    await quota.giveBack(U.adminWithPage, day);
+    expect(await quotaOf()).toBe(0);
   });
 
   it('holds the daily cap under 25 reports at once: exactly 10 stored (review M-1)', async () => {

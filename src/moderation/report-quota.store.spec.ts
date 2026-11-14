@@ -19,6 +19,7 @@ describe('ReportQuotaStore (Chunk 13 review M-1)', () => {
     await expect(store.take('user_a', 3, NOW)).resolves.toBeUndefined();
     expect(quotas.docs).toEqual([
       expect.objectContaining({
+        _id: 'user_a|2026-11-13',
         reporterUserId: 'user_a',
         day: '2026-11-13',
         n: 3,
@@ -35,6 +36,17 @@ describe('ReportQuotaStore (Chunk 13 review M-1)', () => {
   it('uses the current time by default', async () => {
     const { store } = build();
     await expect(store.take('user_a', 1)).resolves.toBe(utcDay(new Date()));
+  });
+
+  it('ignores a lost race to create the day’s row (review F2)', async () => {
+    const { quotas, store } = build();
+    await store.take('user_a', 3, NOW);
+    jest.spyOn(quotas, 'updateOne').mockReturnValueOnce({
+      exec: () =>
+        Promise.reject(Object.assign(new Error('E11000'), { code: 11000 })),
+    });
+    await expect(store.take('user_a', 3, NOW)).resolves.toBe('2026-11-13');
+    expect(quotas.docs[0]).toMatchObject({ n: 2 });
   });
 
   it('passes on a failure that is not the cap', async () => {

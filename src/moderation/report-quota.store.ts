@@ -4,6 +4,7 @@ import type { Model } from 'mongoose';
 import {
   ReportQuota,
   type ReportQuotaDocument,
+  reportQuotaId,
 } from './schemas/report-quota.schema';
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -22,12 +23,17 @@ function isDuplicateKey(error: unknown): boolean {
 }
 
 /**
- * The per-day report cap (Chunk 13 review M-1), atomic: taking a slot is ONE
- * conditional upsert on `{reporterUserId, day}`. Below the cap it increments
- * the day's counter (or creates it); at the cap the filter matches nothing,
- * so the upsert tries to insert a second counter for the same day, and the
- * unique index refuses it. Concurrent reports can therefore never take more
- * than `limit` slots.
+ * The per-day report cap (Chunk 13 review M-1, F1, F2), atomic, in two
+ * steps on the day's row, whose `_id` is `<reporterUserId>|<day>`:
+ *
+ * 1. make sure the row exists: an upsert on `_id` equality only, which the
+ *    server retries itself when two first reports of the day race (F2);
+ * 2. take a slot: `$inc` only while `n < limit`. One document update is
+ *    atomic, so concurrent reports can never take more than `limit` slots;
+ *    no match means the cap is reached.
+ *
+ * The `_id` index exists on every collection, so the cap does not depend on
+ * `db:indexes` having run (F1).
  */
 @Injectable()
 export class ReportQuotaStore {
@@ -47,35 +53,45 @@ export class ReportQuotaStore {
     now = new Date(),
   ): Promise<string | undefined> {
     const day = utcDay(now);
+    const _id = reportQuotaId(reporterUserId, day);
     try {
       await this.quotaModel
         .updateOne(
-          { reporterUserId, day, n: { $lt: limit } },
+          { _id },
           {
-            $inc: { n: 1 },
             $setOnInsert: {
+              reporterUserId,
+              day,
+              n: 0,
               expiresAt: new Date(Date.parse(day) + 2 * DAY_MS),
             },
           },
           { upsert: true },
         )
         .exec();
-      return day;
     } catch (error) {
-      if (isDuplicateKey(error)) return undefined;
-      throw error;
+      // A server that did not retry the race: the row exists, which is all
+      // this step needs.
+      if (!isDuplicateKey(error)) throw error;
     }
+    const taken = await this.quotaModel
+      .updateOne({ _id, n: { $lt: limit } }, { $inc: { n: 1 } })
+      .exec();
+    return taken.matchedCount === 1 ? day : undefined;
   }
 
   /**
    * Gives a slot back when the report it was taken for was not stored (a
-   * duplicate, or a failure). Best effort: a lost give-back only makes the
-   * cap stricter that day.
+   * duplicate, or a failure). Never below zero. Best effort: a lost
+   * give-back only makes the cap stricter that day.
    */
   async giveBack(reporterUserId: string, day: string) {
     try {
       await this.quotaModel
-        .updateOne({ reporterUserId, day, n: { $gt: 0 } }, { $inc: { n: -1 } })
+        .updateOne(
+          { _id: reportQuotaId(reporterUserId, day), n: { $gt: 0 } },
+          { $inc: { n: -1 } },
+        )
         .exec();
     } catch (error) {
       this.logger.warn(

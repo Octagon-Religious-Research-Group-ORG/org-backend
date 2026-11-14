@@ -59,7 +59,7 @@ export const NO_OPEN_REPORTS = 'There are no open reports on that.';
  * change.
  */
 export const ACCEPTED_WORDING_STAYS =
-  "This suggestion was accepted, so its wording is already the belief's text. Hiding the suggestion does not change the belief; only its owner can.";
+  "This suggestion was accepted, so its wording is already the belief's text. Hiding or removing the suggestion does not change the belief; only its owner can.";
 
 /** What a moderator can do to a comment. */
 export type CommentAction = 'hide' | 'remove' | 'restore';

@@ -159,9 +159,19 @@ describe('ReportsService (Chunk 13)', () => {
     const commentId = await comment(h, U.named);
     const today = utcDay(new Date());
     quotas.docs.push(
-      { reporterUserId: U.anon, day: today, n: REPORTS_PER_DAY - 1 },
+      {
+        _id: `${U.anon}|${today}`,
+        reporterUserId: U.anon,
+        day: today,
+        n: REPORTS_PER_DAY - 1,
+      },
       // Yesterday's counter does not count.
-      { reporterUserId: U.anon, day: '2000-01-01', n: REPORTS_PER_DAY },
+      {
+        _id: `${U.anon}|2000-01-01`,
+        reporterUserId: U.anon,
+        day: '2000-01-01',
+        n: REPORTS_PER_DAY,
+      },
     );
     const writer = await h.writer(U.anon);
     await service.report(writer, {
