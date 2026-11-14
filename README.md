@@ -160,26 +160,36 @@ every listable page: a page the directory lists can be found by its name (a
 reader with name-only access gets the name and nothing else, as on its
 directory card); a page the reader may read in full can be found by its
 beliefs. Unlisted, pending, removed and deleted pages are found by nobody,
-admins included. This filter, plus a check that each indexed copy is exactly
-what the site shows now (current name, live tab and its current title, the
-newest version of a live block, the published CMS revision), runs INSIDE the
-aggregation before grouping, counting and paging (`search-pipeline.ts`), so
-neither page 2 nor the total can reveal anything else. Snippets are cut only
-from text that passed it.
+admins included. This filter runs INSIDE the aggregation, before grouping,
+counting and paging (`search-pipeline.ts`), so neither page 2 nor the total
+can reveal anything else. With it, each indexed copy must be exactly what the
+site shows now: the current name; a live tab and its current title; the
+newest version of a live block of that tab, and only a block the page shows
+(once the tab's first text block has been edited, the others are leftovers
+and are never returned: the page's own `visibleFieldBlocks` rule); the
+published revision of a CMS page, in this site's copy. Snippets are cut only
+from text that passed it. On the test site (`SITE_ENV=test`) CMS pages are
+indexed with real payment accounts removed, exactly as the test site serves
+them, and a copy made for the other site is never shown.
 
 **Engines.** The copies live in `searchentries`, refreshed from the source
-collections (at most every 15 s while searched, everything every 6 h). Atlas
-Search (`$search`) is used when its index exists and is queryable; otherwise
-`$text`; otherwise, if even the text index is missing, a regex. All three run
-behind the same filter. A missing or building index is logged once and never
-fails a search.
+collections (at most every 15 s while searched; everything every 6 h, in the
+background). Each copy keeps `folded`: lower case, accents folded, split into
+words. Every engine searches that field with the query folded the same way,
+so "café" and "cafe" find each other everywhere and a quote or a leading `-`
+is never an operator. Atlas Search (`$search`) is used when its index exists
+and is queryable; otherwise `$text`; otherwise, if even the text index is
+missing, a regex. All three run behind the same filter. A missing or building
+index is logged once and never fails a search.
 
 **Indexes to create before production.** `npm run db:indexes -- --confirm
 <database>` creates the managed indexes, including the `$text` fallback
-`search_text_fallback` on `searchentries`, and tries to create the Atlas Search
-index too (it reports `unsupported` where the server refuses). The Atlas
-Search index, if made by hand in the Atlas UI (JSON editor), on database
-`<database>`, collection `searchentries`:
+`search_text_fallback` on `searchentries.folded`, and tries to create the Atlas
+Search index too: it creates the collection first if needed, and reports
+`unsupported` where the server refuses. With `MANAGE_INDEXES=create` the
+server also tries at start-up and at every 5-minute check while the index is
+missing (it never drops one). The Atlas Search index, if made by hand in the
+Atlas UI (JSON editor), on database `<database>`, collection `searchentries`:
 
 ```json
 {
@@ -187,23 +197,46 @@ Search index, if made by hand in the Atlas UI (JSON editor), on database
   "definition": {
     "mappings": {
       "dynamic": false,
-      "fields": { "text": { "type": "string", "analyzer": "lucene.standard" } }
+      "fields": {
+        "folded": { "type": "string", "analyzer": "lucene.whitespace" }
+      }
     }
   }
 }
 ```
 
+`lucene.whitespace` because the text is already folded and split by the
+backend; a folding analyzer would only repeat that, and could split words
+differently from the `$text` and regex engines.
+
 **Suggested Fragments.** `GET /api/v1/search/fragments`. Only aggregate counts
-are stored (`searchtermdays`: term, UTC day, number of different searchers;
-deleted by TTL after the window). Different searchers are told apart in
-memory only, by an HMAC with a random key made each day and never written
-down (`searcher-counter.ts`). A term is counted only when it matched content a
-signed-out reader can see, and shown only while it still does, has at least
-`SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5) different searchers in
-`SEARCH_FRAGMENT_WINDOW_DAYS` (default 30), passes the shape check (3–40
-letters, digits, spaces, hyphens, apostrophes; at most four words; no long
-numbers or `@`) and is not hidden. Admins see and hide them at
-`/api/v1/admin/search-fragments`; each change is in the moderation log.
+are stored (`searchtermwindows`: term, window number, number of different
+searchers; deleted by TTL once the next window has ended). A window is a
+fixed run of `SEARCH_FRAGMENT_WINDOW_DAYS` days (default 30), and a person
+counts once per window however many days they search. They are told apart in
+memory only, by an HMAC with a random key made when the window starts and
+never written down (`searcher-counter.ts`).
+
+*Trade-off.* A truly rolling window would need to remember, for 30 days,
+something linkable to each person's searches, on disk or in a sketch whose
+key outlives a day. Fixed windows keep that link only in memory and only
+until the window ends. In exchange:
+- a restart forgets who was already counted (a person searching before and
+  after it counts twice);
+- each server instance counts on its own;
+- up to 50,000 pairs per window are held, after which nobody new is counted.
+
+A term is suggested while its count in the current window, or in the window
+just before it, reaches `SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5). The two
+counts are never added, so nobody is counted twice. The term must also:
+- have EVERY word of it, as a phrase, in content a signed-out reader can see
+  now, checked on every request (counted only when this held too);
+- pass the shape check (3–40 letters, digits, spaces, hyphens, apostrophes;
+  at most four words; no long numbers or `@`);
+- not be hidden.
+
+Admins see and hide terms at `/api/v1/admin/search-fragments` (any
+fragment-shaped term, listed or not); each change is in the moderation log.
 
 ## Heroku deployment
 

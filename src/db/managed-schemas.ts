@@ -24,7 +24,7 @@ import { NotificationPrefsRowSchema } from '../member-notifications/schemas/noti
 import { NotificationQueueRowSchema } from '../member-notifications/schemas/notification-queue.schema';
 import { SearchEntrySchema } from '../search/schemas/search-entry.schema';
 import { SearchFragmentHideSchema } from '../search/schemas/search-fragment-hide.schema';
-import { SearchTermDaySchema } from '../search/schemas/search-term-day.schema';
+import { SearchTermWindowSchema } from '../search/schemas/search-term-window.schema';
 
 /**
  * Every collection whose indexes are created deliberately (`autoIndex: false`).
@@ -60,6 +60,6 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'NotificationDigestRow', schema: NotificationDigestRowSchema },
     { name: 'EmailBudgetDay', schema: EmailBudgetDaySchema },
     { name: 'SearchEntry', schema: SearchEntrySchema },
-    { name: 'SearchTermDay', schema: SearchTermDaySchema },
+    { name: 'SearchTermWindow', schema: SearchTermWindowSchema },
     { name: 'SearchFragmentHide', schema: SearchFragmentHideSchema },
   ];

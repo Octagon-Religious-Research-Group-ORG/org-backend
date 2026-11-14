@@ -28,9 +28,9 @@ import {
   SearchFragmentHideSchema,
 } from './schemas/search-fragment-hide.schema';
 import {
-  SearchTermDay,
-  SearchTermDaySchema,
-} from './schemas/search-term-day.schema';
+  SearchTermWindow,
+  SearchTermWindowSchema,
+} from './schemas/search-term-window.schema';
 import {
   AdminSearchFragmentsController,
   SearchController,
@@ -50,7 +50,7 @@ import { SearchService } from './search.service';
     ModerationModule,
     MongooseModule.forFeature([
       { name: SearchEntry.name, schema: SearchEntrySchema },
-      { name: SearchTermDay.name, schema: SearchTermDaySchema },
+      { name: SearchTermWindow.name, schema: SearchTermWindowSchema },
       { name: SearchFragmentHide.name, schema: SearchFragmentHideSchema },
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },

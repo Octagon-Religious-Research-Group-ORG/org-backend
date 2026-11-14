@@ -33,13 +33,34 @@ export function normaliseQuery(raw: string): string {
     .trim();
 }
 
-/** The words of a normalised query, without repeats, at most {@link MAX_QUERY_TERMS}. */
-export function queryTerms(normalised: string): string[] {
-  const words = normalised
+/**
+ * The words of any text in the ONE form every engine searches: normalised
+ * (accents folded, lower case), split on anything but letters, digits,
+ * apostrophes and hyphens, with apostrophes and hyphens trimmed from each
+ * word's ends. A query and the text it should find go through the same
+ * function, so a quote or a leading `-` can never act as an operator and
+ * "café" matches "cafe" on every engine (review L1, L2).
+ */
+export function foldWords(raw: string): string[] {
+  return normaliseQuery(raw)
+    .replace(/[^\p{L}\p{N}'-]+/gu, ' ')
     .split(' ')
-    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .map((word) => word.replace(/^['-]+|['-]+$/g, ''))
     .filter((word) => word.length > 0);
-  return [...new Set(words)].slice(0, MAX_QUERY_TERMS);
+}
+
+/**
+ * The searchable copy of a text: its folded words, space-separated and
+ * padded with a space at each end, so ` <phrase> ` is a whole-word phrase
+ * match (`search-pipeline.ts` `phraseStages`).
+ */
+export function foldedText(raw: string): string {
+  return ` ${foldWords(raw).join(' ')} `;
+}
+
+/** The words of a query, without repeats, at most {@link MAX_QUERY_TERMS}. */
+export function queryTerms(query: string): string[] {
+  return [...new Set(foldWords(query))].slice(0, MAX_QUERY_TERMS);
 }
 
 /** Lower case with accents folded, keeping one character per character. */

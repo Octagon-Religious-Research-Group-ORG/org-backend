@@ -4,6 +4,7 @@ import {
   ATLAS_SEARCH_INDEX_NAME,
   engineStages,
   groupAndPageStages,
+  phraseStages,
   RESULTS_PER_PAGE,
   visibilityStages,
 } from './search-pipeline';
@@ -14,7 +15,7 @@ describe('search pipeline', () => {
       {
         $search: {
           index: ATLAS_SEARCH_INDEX_NAME,
-          text: { query: 'lamp', path: 'text' },
+          text: { query: 'lamp', path: 'folded' },
         },
       },
       { $set: { score: { $meta: 'searchScore' } } },
@@ -24,10 +25,7 @@ describe('search pipeline', () => {
     });
     expect(engineStages('regex', 'a.b c', ['a.b', 'c'])[0]).toEqual({
       $match: {
-        $and: [
-          { text: { $regex: 'a\\.b', $options: 'i' } },
-          { text: { $regex: 'c', $options: 'i' } },
-        ],
+        $and: [{ folded: { $regex: 'a\\.b' } }, { folded: { $regex: 'c' } }],
       },
     });
   });
@@ -35,7 +33,11 @@ describe('search pipeline', () => {
   it('scopes names to listed pages and beliefs to fully readable ones', () => {
     const listed = [new Types.ObjectId()];
     const full = [new Types.ObjectId()];
-    const [first] = visibilityStages({ listed, full }, 'beliefs') as Array<{
+    const [first] = visibilityStages(
+      { listed, full },
+      'beliefs',
+      'production',
+    ) as Array<{
       $match: Record<string, unknown>;
     }>;
     expect(first.$match).toEqual({
@@ -48,6 +50,12 @@ describe('search pipeline', () => {
         },
         { kind: 'page' },
       ],
+    });
+  });
+
+  it('matches a phrase as whole words', () => {
+    expect(phraseStages('lamp light')[0]).toEqual({
+      $match: { folded: { $regex: ' lamp light ' } },
     });
   });
 

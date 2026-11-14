@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/only-throw-error */
 import { BadRequestException } from '@nestjs/common';
-import { GUEST_VIEWER, type Viewer } from '../members/profile-access';
 import {
+  CANDIDATES_CACHE_MS,
   DEFAULT_HIDE_REASON,
-  FRAGMENTS_CACHE_MS,
+  fragmentTerm,
   MAX_FRAGMENTS,
   SearchFragmentsService,
+  windowIndex,
 } from './search-fragments.service';
 
 const chain = (value: unknown) => {
@@ -18,20 +19,17 @@ const chain = (value: unknown) => {
 };
 const exec = (value: unknown = {}) => ({ exec: () => Promise.resolve(value) });
 
-const MEMBER: Viewer = {
-  kind: 'named-member',
-  userId: 'user_x',
-  isAdmin: false,
-};
 const NOW = new Date('2026-11-13T12:00:00Z');
+const WINDOW = windowIndex(NOW, 30);
+const SCOPE = { listed: [], full: [] };
 
 function build(
   counted: Array<{ _id: string; searchers: number }> = [],
   hidden: string[] = [],
-  publicTotal = 1,
+  publicCount = 1,
   config: Record<string, number> = {},
 ) {
-  const days = {
+  const windows = {
     updateOne: jest.fn(() => exec()),
     aggregate: jest.fn(() => exec(counted)),
   };
@@ -40,11 +38,14 @@ function build(
     find: jest.fn(() => chain(hidden.map((term) => ({ _id: term })))),
   };
   const search = {
-    count: jest.fn((term: string) => Promise.resolve(term ? publicTotal : 0)),
+    publicPhraseCount: jest.fn((term: string) =>
+      Promise.resolve(term ? publicCount : 0),
+    ),
+    guestScope: jest.fn(() => Promise.resolve(SCOPE)),
   };
   const log = { record: jest.fn(() => Promise.resolve({})) };
   const service = new SearchFragmentsService(
-    days as never,
+    windows as never,
     hides as never,
     search as never,
     log as never,
@@ -55,81 +56,89 @@ function build(
   const warn = jest
     .spyOn((service as any).logger, 'warn')
     .mockImplementation(() => undefined);
-  return { service, days, hides, search, log, warn };
+  return { service, windows, hides, search, log, warn };
 }
 
+describe('fragment helpers', () => {
+  it('puts a date in a fixed window and a term in one form', () => {
+    expect(windowIndex(new Date('1970-01-30T23:59:59Z'), 30)).toBe(0);
+    expect(windowIndex(new Date('1970-01-31T00:00:00Z'), 30)).toBe(1);
+    expect(fragmentTerm(' Lamp  Light ')).toBe('lamp light');
+    expect(fragmentTerm('a@b.test')).toBeUndefined();
+  });
+});
+
 describe('SearchFragmentsService.record', () => {
-  it('counts a guest search that found something, once per searcher per day', async () => {
-    const { service, days, search } = build();
-    await service.record('lamp', 3, GUEST_VIEWER, 'ip:1', NOW);
-    await service.record('lamp', 3, GUEST_VIEWER, 'ip:1', NOW);
-    expect(search.count).not.toHaveBeenCalled();
-    expect(days.updateOne).toHaveBeenCalledTimes(1);
-    expect(days.updateOne).toHaveBeenCalledWith(
-      { _id: '2026-11-13|lamp' },
+  it('counts a search once per searcher per window, only when every word is public', async () => {
+    const { service, windows, search } = build();
+    await service.record('Lamp Light', 3, 'ip:1', NOW);
+    await service.record(
+      'lamp light',
+      3,
+      'ip:1',
+      new Date(NOW.getTime() + 86_400_000),
+    );
+    expect(search.publicPhraseCount).toHaveBeenCalledTimes(1);
+    expect(search.publicPhraseCount).toHaveBeenCalledWith('lamp light');
+    expect(windows.updateOne).toHaveBeenCalledTimes(1);
+    expect(windows.updateOne).toHaveBeenCalledWith(
+      { _id: `${WINDOW}|lamp light` },
       {
         $inc: { searchers: 1 },
         $setOnInsert: {
-          term: 'lamp',
-          day: '2026-11-13',
-          expiresAt: new Date('2026-12-14T00:00:00Z'),
+          term: 'lamp light',
+          window: WINDOW,
+          expiresAt: new Date((WINDOW + 2) * 30 * 86_400_000),
         },
       },
       { upsert: true },
     );
   });
 
-  it('checks a member search against what a guest could find', async () => {
-    const yes = build([], [], 2);
-    await yes.service.record('lamp', 5, MEMBER, 'user:x', NOW);
-    expect(yes.search.count).toHaveBeenCalledWith('lamp', GUEST_VIEWER);
-    expect(yes.days.updateOne).toHaveBeenCalled();
-    const no = build([], [], 0);
-    await no.service.record('velvet', 5, MEMBER, 'user:x', NOW);
-    expect(no.days.updateOne).not.toHaveBeenCalled();
+  it('never counts a term with a word only members can read', async () => {
+    const { service, windows } = build([], [], 0);
+    await service.record('privateword commonword', 5, 'ip:1', NOW);
+    expect(windows.updateOne).not.toHaveBeenCalled();
   });
 
   it('ignores searches that found nothing or are not fragment-shaped', async () => {
-    const { service, days } = build();
-    await service.record('lamp', 0, GUEST_VIEWER, 'ip:1', NOW);
-    await service.record('a@b.test', 2, GUEST_VIEWER, 'ip:1', NOW);
-    expect(days.updateOne).not.toHaveBeenCalled();
+    const { service, windows } = build();
+    await service.record('lamp', 0, 'ip:1', NOW);
+    await service.record('a@b.test', 2, 'ip:1', NOW);
+    expect(windows.updateOne).not.toHaveBeenCalled();
   });
 
   it('never throws', async () => {
-    const { service, days, warn } = build();
-    days.updateOne.mockImplementationOnce(() => {
+    const { service, windows, warn } = build();
+    windows.updateOne.mockImplementationOnce(() => {
       throw new Error('down');
     });
     await expect(
-      service.record('lamp', 1, GUEST_VIEWER, 'ip:1', NOW),
+      service.record('lamp', 1, 'ip:1', NOW),
     ).resolves.toBeUndefined();
-    days.updateOne.mockImplementationOnce(() => {
+    windows.updateOne.mockImplementationOnce(() => {
       throw 'plain';
     });
-    await service.record('lamp', 1, GUEST_VIEWER, 'ip:2', NOW);
+    await service.record('lamp', 1, 'ip:2', NOW);
     expect(warn).toHaveBeenCalledWith('A search could not be counted: down');
     expect(warn).toHaveBeenCalledWith('A search could not be counted: plain');
   });
 
   it('uses the configured window', async () => {
-    const { service, days } = build([], [], 1, {
+    const { service, windows } = build([], [], 1, {
       SEARCH_FRAGMENT_WINDOW_DAYS: 7,
     });
-    await service.record('lamp', 1, GUEST_VIEWER, 'ip:1', NOW);
-    expect((days.updateOne.mock.calls as unknown[][])[0][1]).toEqual(
-      expect.objectContaining({
-        $setOnInsert: expect.objectContaining({
-          expiresAt: new Date('2026-11-21T00:00:00Z'),
-        }),
-      }),
-    );
+    await service.record('lamp', 1, 'ip:1', NOW);
+    const window = windowIndex(NOW, 7);
+    expect((windows.updateOne.mock.calls as unknown[][])[0][0]).toEqual({
+      _id: `${window}|lamp`,
+    });
   });
 });
 
 describe('SearchFragmentsService lists', () => {
   it('shows terms with enough searchers that still match public content, not hidden ones', async () => {
-    const { service, days, search } = build(
+    const { service, windows, search } = build(
       [
         { _id: 'lamp', searchers: 9 },
         { _id: 'gone', searchers: 8 },
@@ -138,7 +147,7 @@ describe('SearchFragmentsService lists', () => {
       ],
       ['hidden word', 'old hide'],
     );
-    search.count.mockImplementation((term: string) =>
+    search.publicPhraseCount.mockImplementation((term: string) =>
       Promise.resolve(term === 'gone' ? 0 : 1),
     );
     expect(await service.adminView(NOW)).toEqual([
@@ -148,29 +157,58 @@ describe('SearchFragmentsService lists', () => {
       { term: 'a@b', searchers: 6, hidden: false, shown: false },
       { term: 'old hide', searchers: 0, hidden: true, shown: false },
     ]);
-    const pipeline = (days.aggregate.mock.calls as unknown[][])[0][0] as any[];
-    expect(pipeline[0]).toEqual({ $match: { day: { $gte: '2026-10-15' } } });
+    // One guest scope for every check.
+    expect(search.guestScope).toHaveBeenCalledTimes(1);
+    expect(search.publicPhraseCount).toHaveBeenCalledWith('lamp', SCOPE);
+    const pipeline = (
+      windows.aggregate.mock.calls as unknown[][]
+    )[0][0] as any[];
+    expect(pipeline[0]).toEqual({
+      $match: { window: { $in: [WINDOW - 1, WINDOW] } },
+    });
+    expect(pipeline[1].$group.searchers).toEqual({ $max: '$searchers' });
     expect(pipeline[2]).toEqual({ $match: { searchers: { $gte: 5 } } });
   });
 
-  it('caches the public list and checks no more than it can show', async () => {
+  it('reads no scope when nothing is eligible', async () => {
+    const { service, search } = build([{ _id: 'a@b', searchers: 9 }]);
+    await service.adminView(NOW);
+    expect(search.guestScope).not.toHaveBeenCalled();
+  });
+
+  it('caches candidates, but checks each one on every request', async () => {
     const many = Array.from({ length: MAX_FRAGMENTS + 3 }, (_, n) => ({
       _id: `term ${String.fromCharCode(97 + n)}`,
       searchers: 20 - n,
     }));
-    const { service, search, days } = build(many);
+    const { service, search, windows } = build(many);
     const first = await service.fragments(NOW);
     expect(first).toHaveLength(MAX_FRAGMENTS);
-    expect(search.count).toHaveBeenCalledTimes(MAX_FRAGMENTS);
-    expect(await service.fragments(new Date(NOW.getTime() + 1))).toBe(first);
-    await service.fragments(new Date(NOW.getTime() + FRAGMENTS_CACHE_MS));
-    expect(days.aggregate).toHaveBeenCalledTimes(2);
+    expect(search.publicPhraseCount).toHaveBeenCalledTimes(MAX_FRAGMENTS);
+    // A term that stops matching public content goes at once.
+    search.publicPhraseCount.mockImplementation((term: string) =>
+      Promise.resolve(term === 'term a' ? 0 : 1),
+    );
+    const second = await service.fragments(new Date(NOW.getTime() + 1));
+    expect(second).not.toContain('term a');
+    expect(second).toHaveLength(MAX_FRAGMENTS);
+    expect(windows.aggregate).toHaveBeenCalledTimes(1);
+    await service.fragments(new Date(NOW.getTime() + CANDIDATES_CACHE_MS));
+    expect(windows.aggregate).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the candidates again after a count changes', async () => {
+    const { service, windows } = build();
+    await service.fragments(NOW);
+    await service.record('lamp', 1, 'ip:1', NOW);
+    await service.fragments(NOW);
+    expect(windows.aggregate).toHaveBeenCalledTimes(2);
   });
 });
 
 describe('SearchFragmentsService.setHidden', () => {
   it('stores the decision, logs it and drops the cache', async () => {
-    const { service, hides, log, days } = build();
+    const { service, hides, log, windows } = build();
     await service.fragments(NOW);
     expect(
       await service.setHidden(' Lamp ', true, 'user_admin', ' why '),
@@ -198,7 +236,7 @@ describe('SearchFragmentsService.setHidden', () => {
       }),
     );
     await service.fragments(NOW);
-    expect(days.aggregate).toHaveBeenCalledTimes(2);
+    expect(windows.aggregate).toHaveBeenCalledTimes(2);
   });
 
   it('refuses a term that could never be a fragment', async () => {
@@ -211,9 +249,9 @@ describe('SearchFragmentsService.setHidden', () => {
 
 describe('SearchFragmentsService clock', () => {
   it('uses the current time by default', async () => {
-    const { service, days } = build();
-    await service.record('lamp', 1, GUEST_VIEWER, 'ip:1');
-    expect(days.updateOne).toHaveBeenCalled();
+    const { service, windows } = build();
+    await service.record('lamp', 1, 'ip:1');
+    expect(windows.updateOne).toHaveBeenCalled();
     expect(await service.fragments()).toEqual([]);
     expect(await service.adminView()).toEqual([]);
   });

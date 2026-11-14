@@ -57,7 +57,6 @@ export class SearchController {
       void this.fragments.record(
         q,
         response.total,
-        viewer,
         viewer.userId ? `user:${viewer.userId}` : `ip:${request.ip}`,
       );
     }

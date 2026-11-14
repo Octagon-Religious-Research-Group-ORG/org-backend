@@ -66,18 +66,30 @@ export async function readAtlasIndexState(
   }
 }
 
+/** MongoDB's code for "collection already exists". */
+const NAMESPACE_EXISTS = 48;
+
 /**
  * Creates the Atlas Search index when it is missing. Never drops or changes
- * one. Where the server refuses (a local mongod, a tier without the command)
- * the outcome is `unsupported` with the reason, and search keeps using `$text`.
+ * one. The collection is created first when it does not exist yet: it has
+ * `autoCreate: false`, so a fresh database has none, and a search index
+ * needs one (review L3). Where the server refuses (a local mongod, a tier
+ * without the command) the outcome is `unsupported` with the reason, and
+ * search keeps using `$text`.
+ *
+ * @param createCollection - creates the collection; "already exists" is fine
  */
 export async function ensureAtlasIndex(
   collection: SearchIndexCollection,
   dryRun: boolean,
+  createCollection: () => Promise<unknown>,
 ): Promise<{ outcome: AtlasIndexOutcome; reason?: string }> {
   const { state, reason } = await readAtlasIndexState(collection);
   if (state !== 'missing' || dryRun) return { outcome: state, reason };
   try {
+    await createCollection().catch((error: { code?: unknown }) => {
+      if (error?.code !== NAMESPACE_EXISTS) throw error;
+    });
     await collection.createSearchIndex({
       name: ATLAS_SEARCH_INDEX_NAME,
       definition: ATLAS_SEARCH_INDEX_DEFINITION,
@@ -94,8 +106,9 @@ export async function ensureAtlasIndex(
  * still-building index is NOT an error for the reader: it is logged once and
  * search carries on with the next engine.
  *
- * At start-up, with `MANAGE_INDEXES=create`, it creates the Atlas Search
- * index if the server allows it; with `check` it only reports.
+ * With `MANAGE_INDEXES=create` it creates the Atlas Search index if the
+ * server allows it, at start-up and again at each periodic check while the
+ * index is missing (review L3); with `check` it only reports.
  */
 @Injectable()
 export class SearchEngineService implements OnApplicationBootstrap {
@@ -116,10 +129,7 @@ export class SearchEngineService implements OnApplicationBootstrap {
 
   async onApplicationBootstrap() {
     const dryRun = this.manage !== 'create';
-    const { outcome, reason } = await ensureAtlasIndex(
-      this.collection(),
-      dryRun,
-    );
+    const { outcome, reason } = await this.ensure(dryRun);
     this.note(
       `Atlas Search index ${ATLAS_SEARCH_INDEX_NAME} (${this.manage}): ${outcome}${reason ? ` (${reason})` : ''}.`,
     );
@@ -129,7 +139,13 @@ export class SearchEngineService implements OnApplicationBootstrap {
   async engines(now = Date.now()): Promise<SearchEngine[]> {
     if (now - this.atlasCheckedAt >= ENGINE_RECHECK_MS) {
       this.atlasCheckedAt = now;
-      const { state, reason } = await readAtlasIndexState(this.collection());
+      const { state, reason } =
+        this.manage === 'create'
+          ? await this.ensure(false).then(({ outcome, reason }) => ({
+              state: outcome,
+              reason,
+            }))
+          : await readAtlasIndexState(this.collection());
       this.atlasReady = state === 'ready';
       if (!this.atlasReady) {
         this.note(
@@ -154,6 +170,12 @@ export class SearchEngineService implements OnApplicationBootstrap {
     this.textMissingUntil = now + ENGINE_RECHECK_MS;
     this.note(
       'The $text fallback index is missing (run db:indexes); search uses a regex.',
+    );
+  }
+
+  private ensure(dryRun: boolean) {
+    return ensureAtlasIndex(this.collection(), dryRun, () =>
+      this.entryModel.createCollection(),
     );
   }
 

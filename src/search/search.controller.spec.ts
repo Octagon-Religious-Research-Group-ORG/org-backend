@@ -41,23 +41,13 @@ describe('SearchController', () => {
     const { controller, search, fragments, response } = build();
     expect(await controller.find(req(), { q: '  LAMP  ' })).toBe(response);
     expect(search.search).toHaveBeenCalledWith('lamp', 'all', 1, GUEST_VIEWER);
-    expect(fragments.record).toHaveBeenCalledWith(
-      'lamp',
-      4,
-      GUEST_VIEWER,
-      'ip:10.0.0.1',
-    );
+    expect(fragments.record).toHaveBeenCalledWith('lamp', 4, 'ip:10.0.0.1');
   });
 
   it('counts a member by account, and never a later page', async () => {
     const { controller, fragments } = build(MEMBER);
     await controller.find(req(), { q: 'lamp', type: 'beliefs' });
-    expect(fragments.record).toHaveBeenCalledWith(
-      'lamp',
-      4,
-      MEMBER,
-      'user:user_x',
-    );
+    expect(fragments.record).toHaveBeenCalledWith('lamp', 4, 'user:user_x');
     fragments.record.mockClear();
     await controller.find(req(), { q: 'lamp', page: 2 });
     expect(fragments.record).not.toHaveBeenCalled();

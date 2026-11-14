@@ -29,6 +29,7 @@ function build(
     blocks?: unknown[];
     heads?: unknown[];
     pages?: unknown[];
+    site?: string;
   } = {},
 ) {
   const entries = {
@@ -95,6 +96,9 @@ function build(
     blocks as never,
     versions as never,
     pages as never,
+    {
+      get: (key: string) => (key === 'SITE_ENV' ? overrides.site : undefined),
+    } as never,
   );
   const warn = jest
     .spyOn((indexer as any).logger, 'warn')
@@ -259,6 +263,8 @@ describe('SearchIndexerService', () => {
   it('refreshes at most every few seconds and fully every few hours', async () => {
     const { indexer, profiles } = build();
     await indexer.ensureFresh(FULL_REBUILD_EVERY_MS);
+    // The full rebuild runs in the background: let it finish.
+    await new Promise((resolve) => setImmediate(resolve));
     await indexer.ensureFresh(FULL_REBUILD_EVERY_MS + 1);
     expect(profiles.find).toHaveBeenCalledTimes(1);
     expect(profiles.find).toHaveBeenLastCalledWith({});
@@ -309,5 +315,71 @@ describe('SearchIndexerService defaults', () => {
     const { indexer, entries } = build({ heads: [] });
     await indexer.ensureFresh();
     expect(ops(entries)).not.toContain('text:b1');
+  });
+});
+
+describe('SearchIndexerService full rebuild, review L5', () => {
+  it('never makes a reader wait for a full rebuild', async () => {
+    const { indexer, profiles } = build();
+    profiles.find.mockReturnValue({
+      select: () => ({
+        lean: () => ({ exec: () => new Promise(() => undefined) }),
+      }),
+    } as never);
+    const outcome = await Promise.race([
+      indexer.ensureFresh(FULL_REBUILD_EVERY_MS).then(() => 'returned'),
+      new Promise((resolve) => setTimeout(() => resolve('waited'), 200)),
+    ]);
+    expect(outcome).toBe('returned');
+    // Nor behind it later: a refresh already running is not joined.
+    await indexer.ensureFresh(FULL_REBUILD_EVERY_MS + 2 * REFRESH_EVERY_MS);
+    expect(profiles.find).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SearchIndexerService copies, review L1 and M2', () => {
+  const setOf = (entries: { bulkWrite: jest.Mock }) =>
+    (entries.bulkWrite.mock.calls as unknown as Array<[Array<any>]>).flatMap(
+      ([batch]) => batch.map((op) => op.updateOne.update.$set),
+    );
+
+  it('stores a folded copy of every text', async () => {
+    const { indexer, entries } = build();
+    await indexer.refresh({ full: true });
+    expect(setOf(entries)[0]).toEqual(
+      expect.objectContaining({
+        text: 'Synthetic Name',
+        folded: ' synthetic name ',
+      }),
+    );
+  });
+
+  it('indexes the test site pages as the test site serves them', async () => {
+    const page = {
+      pageId: 'donations',
+      published: {
+        revision: 3,
+        content: {
+          kind: 'reference',
+          id: 'donations',
+          title: 'Gifts',
+          subtitle: '',
+          blocks: [{ id: 'd1', kind: 'paragraph', text: 'Pay $synthorg now.' }],
+        },
+      },
+    };
+    const test = build({ pages: [page], site: 'test' });
+    await test.indexer.refresh({ full: true });
+    const pages = setOf(test.entries).filter((set) => set.kind === 'page');
+    expect(pages.map((set) => [set.variant, set.revision])).toEqual([
+      ['test', 3],
+      ['test', 3],
+    ]);
+    expect(JSON.stringify(pages)).not.toContain('synthorg');
+    const live = build({ pages: [page] });
+    await live.indexer.refresh({ full: true });
+    const livePages = setOf(live.entries).filter((set) => set.kind === 'page');
+    expect(livePages[0].variant).toBe('production');
+    expect(JSON.stringify(livePages)).toContain('synthorg');
   });
 });

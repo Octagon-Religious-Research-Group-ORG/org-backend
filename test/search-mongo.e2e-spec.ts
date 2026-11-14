@@ -212,6 +212,59 @@ function seed() {
     [`Deleted ${WORD} door text.`],
     { deletedAt: new Date(0), ownerUserId: 'user_deleted_owner' },
   );
+  // Review fixes (H1, M1, L1): words only members can read next to words
+  // anyone can; public multi-word titles; a public accented word; an imported
+  // two-block belief whose first block is about to be edited.
+  addPage(
+    s,
+    'secret-holder',
+    'Velour Holder',
+    'Hush notes',
+    ['A privateterm only members read.'],
+    { visibility: 'members', ownerUserId: 'user_secret_owner' },
+  );
+  addPage(
+    s,
+    'common-holder',
+    'Plain Holder',
+    'Silver orchard',
+    ['A commonword everybody reads. Copper bell rings.'],
+    { ownerUserId: 'user_common_owner' },
+  );
+  addPage(
+    s,
+    'cafe-holder',
+    'Dawn Holder',
+    'Morning rite',
+    ['Morning café gathering.'],
+    { ownerUserId: 'user_cafe_owner' },
+  );
+  const multi = addPage(
+    s,
+    'multi-holder',
+    'Twin Holder',
+    'Two parts',
+    ['First imported part.'],
+    { ownerUserId: 'user_multi_owner' },
+  );
+  s.blocks.push({
+    profileId: multi._id,
+    blockId: 'blk_multi-holder-2',
+    section: 'beliefs',
+    kind: 'paragraph',
+    tabId: multi.tabId,
+    label: '',
+    order: 1,
+    currentVersionSeq: 1,
+  });
+  s.versions.push(
+    versionRow(
+      'blk_multi-holder-2',
+      1,
+      'Leftoverword second part.',
+      GENESIS_HASH,
+    ),
+  );
   // A removed tab on a public page.
   s.tabs.push({
     profileId: open._id,
@@ -304,6 +357,20 @@ describeWithMongo('search on a real MongoDB', () => {
     }
     return { total: first.total, results: [...first.results, ...rest] };
   };
+  /** Term counts, whichever collection holds them (the review renamed it). */
+  const COUNT_COLLECTIONS = ['searchtermdays', 'searchtermwindows'];
+  const clearCounts = async () => {
+    for (const name of COUNT_COLLECTIONS) {
+      await conn.collection(name).deleteMany({});
+    }
+  };
+  const storedCounts = async () => {
+    const rows: any[] = [];
+    for (const name of COUNT_COLLECTIONS) {
+      rows.push(...(await conn.collection(name).find({}).toArray()));
+    }
+    return rows;
+  };
   const slugsOf = (results: any[]) =>
     results.map((result) => result.slug ?? `page:${result.pageId}`).sort();
 
@@ -384,7 +451,7 @@ describeWithMongo('search on a real MongoDB', () => {
           'BlockVersion',
           'Comment',
           'SearchEntry',
-          'SearchTermDay',
+          'SearchTermWindow',
           'SearchFragmentHide',
           'ModerationLogEntry',
           'WebsitePage',
@@ -611,7 +678,7 @@ describeWithMongo('search on a real MongoDB', () => {
   it('suggests a term only once enough different searchers used it, and only while it matches public content', async () => {
     // Start from nothing: earlier tests' searches were counted too.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    await m.SearchTermDay.deleteMany({});
+    await clearCounts();
     (fragments as any).counter = new SearcherCounter();
     // Recorded after answering; wait for each count to land.
     const search = async (q: string, userId?: string) => {
@@ -630,12 +697,14 @@ describeWithMongo('search on a real MongoDB', () => {
     await search('velvet', U.named);
     await search('velvet', U.anon);
     await search('velvet', U.admin);
-    const rows = await m.SearchTermDay.find({}).lean();
+    const rows = await storedCounts();
     expect(rows.map((row: any) => row.term)).toEqual(['lantern']);
-    expect(Object.keys(rows[0]).sort()).toEqual(
-      ['_id', 'day', 'expiresAt', 'searchers', 'term'].sort(),
+    // Aggregates only: nothing that could say who searched.
+    expect(Object.keys(rows[0])).not.toEqual(
+      expect.arrayContaining(['userId']),
     );
-    (fragments as any).cache = undefined;
+    expect(JSON.stringify(rows)).not.toMatch(/user_|ip:|10\.0\./);
+    // No cache clearing anywhere below: each answer must be fresh by itself.
     expect((await get('/search/fragments').expect(200)).body.fragments).toEqual(
       ['lantern'],
     );
@@ -679,7 +748,6 @@ describeWithMongo('search on a real MongoDB', () => {
       { slug: 'open-seeker' },
       { $set: { visibility: 'members' } },
     );
-    (fragments as any).cache = undefined;
     expect((await get('/search/fragments').expect(200)).body.fragments).toEqual(
       [],
     );
@@ -688,9 +756,86 @@ describeWithMongo('search on a real MongoDB', () => {
       { $set: { visibility: 'public' } },
     );
   });
+
+  /** A date in the same 30-day window as `base`, `days` later. */
+  const later = (base: Date, days: number) =>
+    new Date(base.getTime() + days * 86_400_000);
+  /** Past the public list's cache, so only eligibility decides. */
+  const uncached = () => new Date(Date.now() + 11 * 60_000);
+
+  it('never suggests a phrase unless every word of it is public (review H1a)', async () => {
+    // A guest finds nothing for the members-only word alone...
+    expect((await find('privateterm')).total).toBe(0);
+    // ...but a search with a public word next to it does find something.
+    expect((await find('privateterm commonword')).total).toBeGreaterThan(0);
+    for (let n = 1; n <= 4; n += 1) {
+      await fragments.record('privateterm commonword', 3, `ip:h1a-${n}`);
+      await fragments.record('silver orchard', 1, `ip:h1a-${n}`);
+    }
+    const now = uncached();
+    const terms = (await fragments.adminView(now)).map((row) => row.term);
+    expect(terms).not.toContain('privateterm commonword');
+    expect(await fragments.fragments(now)).not.toContain(
+      'privateterm commonword',
+    );
+    // A phrase whose every word is public is suggested.
+    expect(await fragments.fragments(now)).toContain('silver orchard');
+  });
+
+  it('counts one visitor once across the whole window, on any number of days (review H1b)', async () => {
+    const day = new Date('2026-11-14T12:00:00Z');
+    for (let n = 0; n < 5; n += 1) {
+      await fragments.record(
+        'copper bell',
+        1,
+        'ip:same-visitor',
+        later(day, n),
+      );
+    }
+    const view = async (at: Date) =>
+      (await fragments.adminView(at)).find((row) => row.term === 'copper bell');
+    // Five days, one person: below the threshold of two.
+    expect(await view(later(day, 4))).toBeUndefined();
+    await fragments.record(
+      'copper bell',
+      1,
+      'ip:second-visitor',
+      later(day, 5),
+    );
+    expect(await view(later(day, 5))).toEqual(
+      expect.objectContaining({ searchers: 2 }),
+    );
+  });
+
+  it('never returns a block the page no longer shows after an edit (review M1)', async () => {
+    const fresh = jest.spyOn(indexer, 'ensureFresh').mockResolvedValue();
+    try {
+      expect((await find('leftoverword')).total).toBe(1);
+      // An edit writes the whole text into the first block (version 2); the
+      // tidy-up that takes block 2 off the page has not run, nor a refresh.
+      const first = (await m.BlockVersion.findOne({
+        blockId: 'blk_multi-holder',
+        seq: 1,
+      }).lean()) as { hash: string };
+      await m.BlockVersion.collection.insertOne(
+        versionRow(
+          'blk_multi-holder',
+          2,
+          'Rewritten whole belief.',
+          first.hash,
+        ),
+      );
+      for (const reader of [undefined, U.named]) {
+        expect((await find('leftoverword', reader)).total).toBe(0);
+      }
+    } finally {
+      fresh.mockRestore();
+    }
+  });
 });
 
 describeStandalone('search on a standalone mongod with no text index', () => {
+  const production = { get: () => undefined };
   jest.setTimeout(60_000);
   let conn: mongoose.Connection;
   const m = {} as Record<string, Model<any>>;
@@ -714,6 +859,29 @@ describeStandalone('search on a standalone mongod with no text index', () => {
     await m.BeliefTab.collection.insertMany(s.tabs);
     await m.ProfileBlock.collection.insertMany(s.blocks);
     await m.BlockVersion.collection.insertMany(s.versions);
+    // ORG's donations page with (synthetic) payment accounts (review M2).
+    await m.WebsitePage.collection.insertOne({
+      pageId: 'donations',
+      published: {
+        revision: 1,
+        content: {
+          kind: 'reference',
+          id: 'donations',
+          title: 'Gifts',
+          subtitle: 'Synthetic gifts page',
+          blocks: [
+            {
+              id: 'd1',
+              kind: 'paragraph',
+              text: 'Give at paypal.me/synthetic-org or $synthorg today.',
+            },
+          ],
+        },
+        publishedAt: new Date('2026-11-01T09:00:00.000Z'),
+        publishedBy: 'system:test',
+      },
+      history: [],
+    });
     members = new MembersService(
       m.SocialProfile,
       m.BeliefTab,
@@ -734,8 +902,15 @@ describeStandalone('search on a standalone mongod with no text index', () => {
       m.ProfileBlock,
       m.BlockVersion,
       m.WebsitePage,
+      production as never,
     );
-    search = new SearchService(m.SearchEntry, members, engines, indexer);
+    search = new SearchService(
+      m.SearchEntry,
+      members,
+      engines,
+      indexer,
+      production as never,
+    );
     await indexer.refresh({ full: true });
   });
 
@@ -761,5 +936,67 @@ describeStandalone('search on a standalone mongod with no text index', () => {
     expect(guest.total).toBe(PUBLIC_HITS - 1);
     expect(JSON.stringify(guest)).not.toMatch(/velvet|lattice|cellar|spire/);
     expect(await engines.engines()).toEqual(['regex']);
+  });
+
+  const guest = () => members.resolveViewer({ headers: {} } as never);
+
+  it('finds a word whatever its accents, on the regex too (review L1)', async () => {
+    for (const q of ['cafe', 'café', 'CAFÉ']) {
+      const found = await search.search(q, 'all', 1, await guest());
+      expect([q, found.results.map((r: any) => r.slug)]).toEqual([
+        q,
+        ['cafe-holder'],
+      ]);
+    }
+  });
+
+  it('never shows the test site real payment accounts (review M2)', async () => {
+    const testSite = {
+      get: (key: string) => (key === 'SITE_ENV' ? 'test' : undefined),
+    };
+    const testIndexer = new (SearchIndexerService as any)(
+      m.SearchEntry,
+      m.SocialProfile,
+      m.BeliefTab,
+      m.ProfileBlock,
+      m.BlockVersion,
+      m.WebsitePage,
+      testSite,
+    ) as SearchIndexerService;
+    const testSearch = new (SearchService as any)(
+      m.SearchEntry,
+      members,
+      engines,
+      testIndexer,
+      testSite,
+    ) as SearchService;
+    const fresh = jest.spyOn(testIndexer, 'ensureFresh').mockResolvedValue();
+    // The production copy of the page is in the index: never on the test site.
+    expect((await search.search('paypal', 'all', 1, await guest())).total).toBe(
+      1,
+    );
+    for (const q of ['paypal', 'synthorg', 'synthetic org']) {
+      expect([
+        q,
+        (await testSearch.search(q, 'all', 1, await guest())).total,
+      ]).toEqual([q, 0]);
+    }
+    await testIndexer.refresh({ full: true });
+    for (const q of ['paypal', 'synthorg', 'synthetic org']) {
+      expect([
+        q,
+        (await testSearch.search(q, 'all', 1, await guest())).total,
+      ]).toEqual([q, 0]);
+    }
+    const placeholder = await testSearch.search(
+      'give today',
+      'all',
+      1,
+      await guest(),
+    );
+    expect(placeholder.results[0]?.snippet).toContain(
+      '(test site: no real payment)',
+    );
+    fresh.mockRestore();
   });
 });

@@ -110,7 +110,7 @@ export const envValidationSchema = Joi.object({
     .max(23)
     .default(DEFAULT_DIGEST_HOUR_UTC),
   // Suggested Fragments (Chunk 15): how many different searchers a term needs
-  // within how many days before it is suggested.
+  // in one fixed window, and how many days a window lasts.
   SEARCH_FRAGMENT_MIN_SEARCHERS: Joi.number()
     .integer()
     .min(2)

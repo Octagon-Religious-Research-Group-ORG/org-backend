@@ -71,3 +71,15 @@ describe('search text', () => {
     expect(utcDay(new Date('2026-11-13T23:59:59Z'))).toBe('2026-11-13');
   });
 });
+
+describe('queryTerms, review L2', () => {
+  it('drops quotes and operator dashes from every word, not just the edges', () => {
+    expect(queryTerms('"lamp"light -dark x"y')).toEqual([
+      'lamp',
+      'light',
+      'dark',
+      'x',
+      'y',
+    ]);
+  });
+});

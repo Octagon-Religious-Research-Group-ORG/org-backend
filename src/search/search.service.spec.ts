@@ -30,6 +30,7 @@ function build(results: unknown[], engines = ['text', 'regex']) {
     members as never,
     engine as never,
     indexer as never,
+    { get: () => undefined } as never,
   );
   return { service, aggregate, engine, indexer, members };
 }
@@ -123,7 +124,25 @@ describe('SearchService', () => {
       0,
     );
     const words = build([[{ total: [], rows: [] }]]);
-    expect(await words.service.count('lamp', GUEST_VIEWER)).toBe(0);
+    expect(
+      (await words.service.search('lamp', 'all', 1, GUEST_VIEWER)).total,
+    ).toBe(0);
+  });
+
+  it('counts a phrase in what a guest may see, sharing a scope when given one', async () => {
+    const { service, aggregate, members } = build([[{ n: 3 }], []]);
+    expect(await service.publicPhraseCount('lamp light')).toBe(3);
+    expect(members.searchScope).toHaveBeenCalledWith(GUEST_VIEWER);
+    const pipeline = (aggregate.mock.calls as unknown[][])[0][0] as any[];
+    expect(pipeline[0]).toEqual({
+      $match: { folded: { $regex: ' lamp light ' } },
+    });
+    expect(pipeline.at(-1)).toEqual({ $count: 'n' });
+    members.searchScope.mockClear();
+    expect(
+      await service.publicPhraseCount('lamp', { listed: [], full: [] }),
+    ).toBe(0);
+    expect(members.searchScope).not.toHaveBeenCalled();
   });
 
   it('runs nothing for a query with no words', async () => {

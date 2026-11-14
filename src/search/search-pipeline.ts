@@ -15,7 +15,10 @@ export const ATLAS_SEARCH_INDEX_NAME = 'search_entries';
 export const ATLAS_SEARCH_INDEX_DEFINITION = {
   mappings: {
     dynamic: false,
-    fields: { text: { type: 'string', analyzer: 'lucene.standard' } },
+    // `folded` is already lower case with accents folded and words split
+    // (`foldedText`), so whitespace tokens are exactly the words the other
+    // engines match.
+    fields: { folded: { type: 'string', analyzer: 'lucene.whitespace' } },
   },
 };
 
@@ -57,7 +60,7 @@ export function engineStages(
       {
         $search: {
           index: ATLAS_SEARCH_INDEX_NAME,
-          text: { query, path: 'text' },
+          text: { query, path: 'folded' },
         },
       },
       { $set: { score: { $meta: 'searchScore' } } },
@@ -69,16 +72,31 @@ export function engineStages(
       { $set: { score: { $meta: 'textScore' } } },
     ];
   }
-  // Last resort when no text index exists: every word must appear. The
-  // collection holds a small community's text, so a scan stays bounded.
+  // Last resort when no text index exists: every word must appear, in the
+  // folded copy (already lower case, accents folded). The collection holds a
+  // small community's text, so a scan stays bounded.
   return [
     {
       $match: {
         $and: terms.map((term) => ({
-          text: { $regex: escapeRegex(term), $options: 'i' },
+          folded: { $regex: escapeRegex(term) },
         })),
       },
     },
+    { $set: { score: 1 } },
+  ];
+}
+
+/**
+ * Entries holding `phrase` as whole words in this order (review H1a): the
+ * check that a Suggested Fragment, every word of it, is in text the reader
+ * may see. Runs before {@link visibilityStages} like any engine stage.
+ *
+ * @param phrase - folded words joined by single spaces (`foldWords`)
+ */
+export function phraseStages(phrase: string): PipelineStage[] {
+  return [
+    { $match: { folded: { $regex: escapeRegex(` ${phrase} `) } } },
     { $set: { score: 1 } },
   ];
 }
@@ -95,7 +113,12 @@ const first = (field: string) => ({ $arrayElemAt: [field, 0] });
  *   needs `listed`, belief text and titles need `full`);
  * - it is exactly what the site shows NOW: the page's current name, a live
  *   tab's current title, the newest version of a live block of that tab,
- *   the published revision of a CMS page.
+ *   the published revision of a CMS page, in this site's copy;
+ * - for belief text, the page would show this block: the page's own
+ *   `visibleFieldBlocks` rule (editable-fields.ts) is that once the tab's
+ *   first live text block has an edited version (seq > 1), that block alone
+ *   is the field and any other live block is a leftover of an unfinished
+ *   tidy-up (review M1).
  *
  * Runs before grouping, counting and paging, so neither a later page nor the
  * total can reveal an entry the reader may not see.
@@ -103,6 +126,7 @@ const first = (field: string) => ({ $arrayElemAt: [field, 0] });
 export function visibilityStages(
   scope: SearchScope,
   type: SearchType,
+  site: 'production' | 'test',
 ): PipelineStage[] {
   return [
     {
@@ -171,6 +195,48 @@ export function visibilityStages(
       },
     },
     {
+      // The tab's first live text block, and its newest version number:
+      // the same block, in the same order, the page reads first.
+      $lookup: {
+        from: 'profileblocks',
+        let: { tab: '$tabId' },
+        pipeline: [
+          {
+            $match: {
+              tabId: { $type: 'string' },
+              section: 'beliefs',
+              removedAt: { $exists: false },
+              kind: { $ne: 'image' },
+              $expr: { $eq: ['$tabId', '$$tab'] },
+            },
+          },
+          { $sort: { order: 1, _id: 1 } },
+          { $limit: 1 },
+          {
+            $lookup: {
+              from: 'blockversions',
+              localField: 'blockId',
+              foreignField: 'blockId',
+              pipeline: [
+                { $sort: { seq: -1 } },
+                { $limit: 1 },
+                { $project: { _id: 0, seq: 1 } },
+              ],
+              as: 'head',
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              blockId: 1,
+              seq: { $ifNull: [first('$head.seq'), 0] },
+            },
+          },
+        ],
+        as: 'firstBlock',
+      },
+    },
+    {
       $lookup: {
         from: 'websitepages',
         localField: 'pageId',
@@ -215,12 +281,23 @@ export function visibilityStages(
                     { $eq: [first('$block.profileId'), '$profileId'] },
                     { $eq: [first('$head.seq'), '$seq'] },
                     { $gt: [{ $size: '$profile' }, 0] },
+                    {
+                      $or: [
+                        { $eq: [first('$firstBlock.blockId'), '$blockId'] },
+                        { $lte: [first('$firstBlock.seq'), 1] },
+                      ],
+                    },
                   ],
                 },
               },
               {
                 case: { $eq: ['$kind', 'page'] },
-                then: { $eq: [first('$cms.revision'), '$revision'] },
+                then: {
+                  $and: [
+                    { $eq: [first('$cms.revision'), '$revision'] },
+                    { $eq: ['$variant', site] },
+                  ],
+                },
               },
             ],
             default: false,

@@ -1,8 +1,10 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import { MembersService } from '../members/members.service';
-import type { Viewer } from '../members/profile-access';
+import { GUEST_VIEWER, type Viewer } from '../members/profile-access';
+import { readSiteEnv, type SiteEnv } from '../config/site-env';
 import {
   SearchEntry,
   type SearchEntryDocument,
@@ -15,9 +17,11 @@ import { SearchIndexerService } from './search-indexer.service';
 import {
   engineStages,
   groupAndPageStages,
+  phraseStages,
   RESULTS_PER_PAGE,
   type SearchEngine,
   type SearchRow,
+  type SearchScope,
   type SearchType,
   visibilityStages,
 } from './search-pipeline';
@@ -78,7 +82,12 @@ export class SearchService {
     private readonly members: MembersService,
     private readonly engines: SearchEngineService,
     private readonly indexer: SearchIndexerService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.site = readSiteEnv(config);
+  }
+
+  private readonly site: SiteEnv;
 
   /**
    * @param query - already normalised (`normaliseQuery`) and checked for length
@@ -101,7 +110,7 @@ export class SearchService {
     ]);
     const full = new Set(scope.full.map(String));
     const { total, rows } = await this.run(engines, terms.join(' '), terms, [
-      ...visibilityStages(scope, type),
+      ...visibilityStages(scope, type, this.site),
       ...groupAndPageStages(page),
     ]);
     return {
@@ -114,9 +123,38 @@ export class SearchService {
     };
   }
 
-  /** How many results a reader would get: the fragments' public-match check. */
-  async count(query: string, viewer: Viewer): Promise<number> {
-    return (await this.search(query, 'all', 1, viewer)).total;
+  /** What a signed-out reader may find; read once and shared by several checks. */
+  guestScope(): Promise<SearchScope> {
+    return this.members.searchScope(GUEST_VIEWER);
+  }
+
+  /**
+   * How many entries a signed-out reader may see that hold `phrase`, every
+   * word of it, as whole words in this order (review H1a): the Suggested
+   * Fragments' public-match check. Behind the same visibility filter as a
+   * search, on the same folded copy every engine searches.
+   *
+   * @param phrase - folded words joined by single spaces (`foldWords`)
+   * @param scope - a guest scope already read, to share it across checks
+   */
+  async publicPhraseCount(
+    phrase: string,
+    scope?: SearchScope,
+  ): Promise<number> {
+    const [result] = await this.entryModel
+      .aggregate<{
+        n: number;
+      }>([
+        ...phraseStages(phrase),
+        ...visibilityStages(
+          scope ?? (await this.guestScope()),
+          'all',
+          this.site,
+        ),
+        { $count: 'n' },
+      ] as never[])
+      .exec();
+    return result?.n ?? 0;
   }
 
   empty(query: string, type: SearchType, page: number): SearchResponse {

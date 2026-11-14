@@ -43,6 +43,14 @@ export class SearchEntry {
   @Prop({ type: String, required: true, maxlength: 20_000 })
   text: string;
 
+  /**
+   * What every engine searches: `foldedText(text)` (accents folded, lower
+   * case, words space-separated, a space at each end). Folding here, not in
+   * an analyzer, gives Atlas, `$text` and the regex the same matching.
+   */
+  @Prop({ type: String, required: true })
+  folded: string;
+
   /** The member page, for `member` and belief entries. */
   @Prop({ type: Types.ObjectId })
   profileId?: Types.ObjectId;
@@ -67,6 +75,14 @@ export class SearchEntry {
   @Prop({ type: Number, min: 1 })
   revision?: number;
 
+  /**
+   * For `page`: which site's copy this is. The test site indexes pages with
+   * real payment accounts removed, as it serves them (review M2), and never
+   * shows a copy made for the other site.
+   */
+  @Prop({ type: String, enum: ['production', 'test'] })
+  variant?: 'production' | 'test';
+
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -77,7 +93,7 @@ export const SearchEntrySchema = SchemaFactory.createForClass(SearchEntry);
 /** The `$text` fallback: no stemming and no stop words, like Atlas's standard analyzer. */
 export const TEXT_INDEX_NAME = 'search_text_fallback';
 SearchEntrySchema.index(
-  { text: 'text' },
+  { folded: 'text' },
   { name: TEXT_INDEX_NAME, default_language: 'none' },
 );
 // The indexer replaces one tab's or one CMS page's entries at a time.

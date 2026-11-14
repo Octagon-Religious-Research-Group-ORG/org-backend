@@ -51,6 +51,7 @@ async function main(): Promise<number> {
     const atlas = await ensureAtlasIndex(
       connection.collection('searchentries'),
       dryRun,
+      () => connection.createCollection('searchentries'),
     );
     console.warn(
       `Atlas Search index ${ATLAS_SEARCH_INDEX_NAME}: ${atlas.outcome}${atlas.reason ? ` (${atlas.reason})` : ''}`,

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import type { AnyBulkWriteOperation, Model, Types } from 'mongoose';
 import {
@@ -27,6 +28,9 @@ import {
   type SocialProfileDocument,
 } from '../social/schemas/social-profile.schema';
 import { readHeads } from '../social/version-heads';
+import { readSiteEnv, type SiteEnv } from '../config/site-env';
+import { withoutRealPayments } from '../content/test-site-content';
+import { foldedText } from './search-text';
 import {
   SearchEntry,
   type SearchEntryDocument,
@@ -39,14 +43,14 @@ export const FULL_REBUILD_EVERY_MS = 6 * 60 * 60_000;
 /** Each refresh re-reads this far back, for writes whose clock ran behind. */
 export const REFRESH_OVERLAP_MS = 2 * 60_000;
 
-type Entry = Omit<SearchEntry, 'createdAt' | 'updatedAt'>;
+type Entry = Omit<SearchEntry, 'createdAt' | 'updatedAt' | 'folded'>;
 
 function upsert(entry: Entry): AnyBulkWriteOperation<SearchEntryDocument> {
   const { _id, ...fields } = entry;
   return {
     updateOne: {
       filter: { _id },
-      update: { $set: fields },
+      update: { $set: { ...fields, folded: foldedText(fields.text) } },
       upsert: true,
     },
   };
@@ -83,8 +87,12 @@ export function pageParts(
 /**
  * Keeps `searchentries` in step with the site (Chunk 15) by reading the
  * source collections, rather than by a hook in every write path: no write
- * can forget it. A copy that falls behind is only MISSING from results,
- * never shown, because every search checks each entry against its live rows.
+ * can forget it. A copy that falls behind is never shown: every search
+ * checks each entry against its live rows (`visibilityStages`), which drops
+ * an old name or title, a removed tab or block, an old version, a block the
+ * page no longer shows after an edit (the `visibleFieldBlocks` rule), an old
+ * CMS revision and the other site's copy of a page. Such a copy is only
+ * MISSING from results until the next refresh rewrites it.
  *
  * Each refresh reads what changed since the last one (by `updatedAt`, and
  * `createdAt` for the append-only versions); every six hours everything.
@@ -96,6 +104,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
   private lastRefreshAt = 0;
   private lastFullAt = 0;
   private running?: Promise<void>;
+  private readonly site: SiteEnv;
 
   constructor(
     @InjectModel(SearchEntry.name)
@@ -110,7 +119,10 @@ export class SearchIndexerService implements OnApplicationBootstrap {
     private readonly versionModel: Model<BlockVersionDocument>,
     @InjectModel(WebsitePage.name)
     private readonly pageModel: Model<WebsitePageDocument>,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.site = readSiteEnv(config);
+  }
 
   /** The first full read starts with the server, not with the first search. */
   onApplicationBootstrap() {
@@ -122,18 +134,19 @@ export class SearchIndexerService implements OnApplicationBootstrap {
    * A failure is logged and search goes on with the entries it has.
    */
   async ensureFresh(now = Date.now()): Promise<void> {
+    // A reader never queues behind a refresh already running (review L5).
+    if (this.running) return;
     if (now - this.lastRefreshAt < REFRESH_EVERY_MS) return;
     // A failing database is not asked again on every search.
     this.lastRefreshAt = now;
-    try {
-      await this.refresh({
-        full: now - this.lastFullAt >= FULL_REBUILD_EVERY_MS,
-      });
-    } catch (error) {
+    const full = now - this.lastFullAt >= FULL_REBUILD_EVERY_MS;
+    const job = this.refresh({ full }).catch((error: unknown) => {
       this.logger.warn(
         `Search refresh failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
+    // The full rebuild reads everything: it runs in the background.
+    if (!full) await job;
   }
 
   /** One refresh at a time; a caller during one waits for it. */
@@ -299,7 +312,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
       .exec();
     for (const page of pages) {
       const revision = page.published?.revision;
-      const parts = pageParts(page.published?.content);
+      const parts = pageParts(this.forThisSite(page.pageId, page.published));
       await this.write(
         parts.map(({ part, text }) =>
           upsert({
@@ -308,6 +321,7 @@ export class SearchIndexerService implements OnApplicationBootstrap {
             pageId: page.pageId,
             part,
             revision,
+            variant: this.site,
             text,
           }),
         ),
@@ -320,5 +334,23 @@ export class SearchIndexerService implements OnApplicationBootstrap {
         })
         .exec();
     }
+  }
+
+  /**
+   * A page's published content as THIS site serves it: the test site removes
+   * real payment accounts (`withoutRealPayments`, the content controller's
+   * rule), so its index never holds them (review M2).
+   */
+  private forThisSite(
+    pageId: WebsitePage['pageId'],
+    published: WebsitePage['published'] | undefined,
+  ): WebsitePageContent | undefined {
+    if (!published?.content || this.site !== 'test') return published?.content;
+    return withoutRealPayments({
+      pageId,
+      revision: published.revision,
+      content: published.content,
+      publishedAt: '',
+    }).content;
   }
 }
