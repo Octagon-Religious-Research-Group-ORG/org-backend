@@ -52,3 +52,20 @@ export const STEP0_OTS_FILE = Buffer.from(
 
 export const PENDING_UPGRADE_BODY =
   'Pending confirmation in Bitcoin blockchain';
+
+/**
+ * REAL upgrade answer, fetched 2026-11-14 07:53 UTC: GET
+ * https://alice.btc.calendar.opentimestamps.org/timestamp/<commitment> for the
+ * Step 0 commitment below (HTTP 200, 1001 bytes). It reaches Bitcoin block
+ * 975755, whose Merkle root (blockstream.info/api/block/<hash>) is
+ * c484ebc9efc5042d810aa847b06f377d035a79e3b1eb2bb518fcc737de0500d9, block time
+ * 2026-11-14T07:06:55Z; the reference client's `ots verify` on the merged
+ * proof printed "Success! Bitcoin block 975755 attests existence".
+ */
+export const ALICE_COMMITMENT =
+  '6af7fef7a242f31a619a1f27ff0bac64023ad1d87adb81fd307501f884b982be2845d9a61dc3a61121d9366a';
+
+export const ALICE_UPGRADE = Buffer.from(
+  'CPEgZYlPPyTpVKmMGVhbcvzkSlj+4rqDFA1jwXXcRmISXAAI8CC6WQPluRK5R1m/7zAnQHSIWWP92I5RMoMKZe2kaBYHbQjwIEInfZF8xuOTRcMLHWeLNvK47X4ffwBBNLCSkQ9az2omCPEgEsWJNldUv3gIDS64DWT7GiC1nLgkwPOzAJEhApxOmBAI8SADaYcUxvZPyKLDrqAfrUumKj3oDMh1bLXYjwc0vppDGAjwIA3tvAcE8/pOGXdtxxuZnNExRklQ9pMxpl1YELzQ6fOpCPEgbyAFCOU/0HafYPaMspn78sFU6pKJpyBKpPB7qP9d+VgI8SB6QIutaFQIExm/DcLFxQ8ECiuJVXPeedrFY5bwx0vx6gjxIN3FbLobGsfj7Wpivex4pXp9kSY3TeK4hR7nSCYnsZkfCPAgd2K6p7r5nODasfaSbpp+MRzO+kGh1SXdweWeMg5HjXEI8CD8fhWXS9+ih7YGyRQbCveMih5VxeTfTr3SuduGL4EBxAjwID49xbmMKEXuQILW31eiJLZsJLTmwdU/pkYWcadL+QXtCPFZAQAAAAEPi8k0VJrJi4C4lz1DMqo9tjzFQeCeFTaGbc3U3bunvQAAAAAA/v///wKkoQAAAAAAABYAFLIjhGpUl/bRwhaKtKiNpCqV+pxBAAAAAAAAAAAiaiDwBIrjDgAICPEgtOTVjq8ZD0tycjiY16Cwa9FnuKuvludfiYgmdBoV3rAICPEgKYFIv3gsAVMqC5mRZll0gPtWUcvNaBC0+ZJEMT8yY0UICPAgKO0EjQCJxhVJSBSzMHrYVDZ92RK+Awl0HU1DmfW40ocICPEgLxKxpmwQlAHbN/ayssIwJH8n4y9wH1uljpWugDe41ngICPAgCPvaIi0zaAc6DckQqx/bUCGOvW3zg6gPOFJtp/2AHjUICPAgHXSyrVtIRGaYtx1Vra5KenwaPZV+2/1LrhbFchXj4WEICPAgOiL4uFkp0nnP8Fmm60NKvUKIbkVj6lh7FVJiYT3Nvh8ICPAgJf+ruux75rhYCRbrov9SgM9otfeEMTti5TlfYD1G52wICPEgemrK9vPgjTzgjLgMhHTc+3MwX1bCoWiSsJ4Q5nTPccoICPAgNZv4Nex1NbsGMCZ/iEQQ+lP79rcoOz1biUvh1EPXopAICPAgrqVh9e46LYLgrUamrlBjfx/9xEs87sIEgUVcgnKmkHEICPAgjMZjWSuybmk3sexjETuFP9lPJ1gYUagVGQ0/pxhCbvkICPAgWp/Rc2H/6BlGmxvY6gA47LKecPZxvLVz7x2P6SMPPOwICAAFiJYNc9cZAQOLxzs=',
+  'base64',
+);

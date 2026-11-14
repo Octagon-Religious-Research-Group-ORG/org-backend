@@ -12,6 +12,8 @@ import {
   type TimestampNode,
 } from './ots';
 import {
+  ALICE_COMMITMENT,
+  ALICE_UPGRADE,
   CALENDAR_RESPONSES,
   STEP0_DIGEST,
   STEP0_OTS_FILE,
@@ -103,6 +105,22 @@ describe('OpenTimestamps proofs, with the REAL Step 0 calendar answers', () => {
       },
     ]);
     expect(nodeFor(tree, 'ab')).toBeUndefined();
+  });
+
+  it('reads the REAL upgrade into Bitcoin block 975755, with that block’s Merkle root', () => {
+    const { tree } = parseDetached(STEP0_OTS_FILE);
+    const node = nodeFor(tree, ALICE_COMMITMENT) as TimestampNode;
+    mergeInto(node, parseTimestamp(ALICE_UPGRADE, node.msg));
+    const reread = parseDetached(serializeDetached(DIGEST, tree));
+    expect(reread.digest.toString('hex')).toBe(STEP0_DIGEST);
+    // As blockstream.info shows block 975755's header.
+    expect(summarize(reread.tree).bitcoin).toEqual([
+      {
+        height: 975_755,
+        merkleRoot:
+          'c484ebc9efc5042d810aa847b06f377d035a79e3b1eb2bb518fcc737de0500d9',
+      },
+    ]);
   });
 
   it('keeps an attestation it does not know, unchanged', () => {
