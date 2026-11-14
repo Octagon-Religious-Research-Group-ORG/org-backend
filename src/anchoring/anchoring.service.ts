@@ -21,6 +21,7 @@ import {
   type TimestampNode,
 } from './ots';
 import { OtsProvider, TsaProvider } from './providers';
+import { parseTimestampResponse, tokenImprint } from './rfc3161';
 import {
   AnchorLeaf,
   type AnchorLeafDocument,
@@ -90,16 +91,37 @@ export function retryDelay(attempts: number): number {
  * rebuild (review round 5, LOW-B).
  */
 function intactTree(
-  row: Pick<TimestampAnchor, 'status' | 'leaves' | 'leafCount' | 'merkleRoot'>,
+  row: Pick<
+    TimestampAnchor,
+    'status' | 'leaves' | 'leafCount' | 'merkleRoot' | 'tsa' | 'ots'
+  >,
 ): boolean {
   if (row.status === 'empty') {
     return row.leaves === undefined && row.merkleRoot === undefined;
   }
   if (!row.leaves || row.leaves.length !== row.leafCount) return false;
   try {
-    return (
-      buildTree(row.leaves.map((leaf) => leaf.leaf)).root === row.merkleRoot
-    );
+    if (
+      buildTree(row.leaves.map((leaf) => leaf.leaf)).root !== row.merkleRoot
+    ) {
+      return false;
+    }
+    // A tree rewritten consistently (leaves, count and root together) still
+    // differs from what was stamped: each stored proof must commit to this
+    // root (review round 6, L2). Signatures are the verifier's job.
+    const response = asBytes(row.tsa?.response);
+    if (response) {
+      const token = parseTimestampResponse(response).token;
+      if (!token || tokenImprint(token) !== row.merkleRoot) return false;
+    }
+    const proof = asBytes(row.ots?.proof);
+    if (
+      proof &&
+      parseDetached(proof).digest.toString('hex') !== row.merkleRoot
+    ) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -464,10 +486,24 @@ export class AnchoringService {
           { 'lastCheck.outcome': { $in: ['fail', 'cannot-measure'] } },
         ],
       } as AnchorFilter)
-      .select({ status: 1, leafCount: 1, lastCheck: 1 })
+      .select({
+        status: 1,
+        leafCount: 1,
+        lastCheck: 1,
+        rescanFrom: 1,
+        rescanToken: 1,
+      })
       .lean()
       .exec()) as Array<
-      Pick<TimestampAnchor, '_id' | 'status' | 'leafCount' | 'lastCheck'>
+      Pick<
+        TimestampAnchor,
+        | '_id'
+        | 'status'
+        | 'leafCount'
+        | 'lastCheck'
+        | 'rescanFrom'
+        | 'rescanToken'
+      >
     >;
     const released: string[] = [];
     for (const row of rows) {
@@ -487,7 +523,8 @@ export class AnchoringService {
           .countDocuments({ anchorId: row._id })
           .exec();
         const expected = row.status === 'built' ? row.leafCount : 0;
-        if (claims === expected) continue;
+        const unfinished = row.rescanFrom !== undefined && !row.rescanToken;
+        if (claims === expected && !unfinished) continue;
         if ((await this.releaseStray(row._id)) > 0) released.push(row._id);
       } catch (error) {
         this.logger.error(
@@ -603,7 +640,13 @@ export class AnchoringService {
         .lean()
         .exec();
       if (!stillOursAfter) {
-        await this.releaseStray(day);
+        try {
+          await this.releaseStray(day);
+        } catch (error) {
+          this.logger.error(
+            `Anchor ${day}: releasing claims after losing the lease failed (${describe(error)}); the next run's sweep retries it.`,
+          );
+        }
         return { state: 'busy' };
       }
     }
@@ -613,8 +656,16 @@ export class AnchoringService {
       .lean()
       .exec()) as Array<Omit<AnchoredLeaf, 'leaf'> & { salt: string }>;
     if (claims.length === 0) {
+      // Capped but every insert lost to another batch: the versions left
+      // over still need a reach-back point (review round 6, L1).
       const done = await this.anchorModel
-        .updateOne(owned, { $set: { status: 'empty' }, $unset: { lease: 1 } })
+        .updateOne(owned, {
+          $set: {
+            status: 'empty',
+            ...(left ? { resumeFrom: left.createdAt, resumeOpen: true } : {}),
+          },
+          $unset: { lease: 1 },
+        })
         .exec();
       if (done.modifiedCount !== 1) return { state: 'busy' };
       await this.afterFinish(day, rescans, row.cutoff);
@@ -677,11 +728,27 @@ export class AnchoringService {
   private async releaseStray(day: string): Promise<number> {
     const row = (await this.anchorModel
       .findById(day)
-      .select({ status: 1, leaves: 1, leafCount: 1, merkleRoot: 1 })
+      .select({
+        status: 1,
+        leaves: 1,
+        leafCount: 1,
+        merkleRoot: 1,
+        'tsa.response': 1,
+        'ots.proof': 1,
+        rescanFrom: 1,
+        rescanToken: 1,
+      })
       .lean()
       .exec()) as Pick<
       TimestampAnchor,
-      'status' | 'leaves' | 'leafCount' | 'merkleRoot'
+      | 'status'
+      | 'leaves'
+      | 'leafCount'
+      | 'merkleRoot'
+      | 'tsa'
+      | 'ots'
+      | 'rescanFrom'
+      | 'rescanToken'
     >;
     if (row.status === 'building') return 0;
     // Its tree must be intact before a claim is judged outside it: on a
@@ -689,7 +756,7 @@ export class AnchoringService {
     // all stay (review round 5, LOW-B).
     if (!intactTree(row)) {
       this.logger.error(
-        `Anchor ${day}: cannot measure which claims are outside its tree (its stored tree does not rebuild); nothing released.`,
+        `Anchor ${day}: cannot measure which claims are outside its tree (its stored tree does not rebuild, or does not match its time-stamps); nothing released.`,
       );
       return 0;
     }
@@ -703,23 +770,44 @@ export class AnchoringService {
       .select({ versionCreatedAt: 1 })
       .lean()
       .exec()) as { versionCreatedAt: Date } | null;
-    if (!oldest) return 0;
+    if (!oldest) {
+      // A release that died after its delete left a point with no token:
+      // finish it, so a covering build can close the point (round 6, L3).
+      if (row.rescanFrom && !row.rescanToken) {
+        await this.anchorModel
+          .updateOne(
+            { _id: day, rescanToken: { $exists: false } } as AnchorFilter,
+            {
+              $set: { rescanToken: randomUUID() },
+            },
+          )
+          .exec();
+      }
+      return 0;
+    }
     const newest = (await this.leafModel
       .findOne(stray)
       .sort({ versionCreatedAt: -1 })
       .select({ versionCreatedAt: 1 })
       .lean()
       .exec()) as { versionCreatedAt: Date };
-    const { deletedCount } = await this.leafModel
-      .deleteMany(stray)
-      .setOptions({ [RELEASE_STRAY_CLAIMS]: true })
-      .exec();
-    // Recorded AFTER the delete, so a build that reads this point also
-    // finds the versions unclaimed; the next build reaches back to them.
+    // The point is written BEFORE the delete, so a crash after the delete
+    // still leaves one that reaches the released versions (round 6, L3).
+    // Its token is set only AFTER the delete: a build that read the point
+    // earlier holds the old token (or none), so it cannot close the point
+    // while these versions were still claimed during its scan.
     await this.anchorModel
       .updateOne({ _id: day } as AnchorFilter, {
         $min: { rescanFrom: oldest.versionCreatedAt },
         $max: { rescanTo: newest.versionCreatedAt },
+      })
+      .exec();
+    const { deletedCount } = await this.leafModel
+      .deleteMany(stray)
+      .setOptions({ [RELEASE_STRAY_CLAIMS]: true })
+      .exec();
+    await this.anchorModel
+      .updateOne({ _id: day } as AnchorFilter, {
         $set: { rescanToken: randomUUID() },
       })
       .exec();

@@ -312,6 +312,19 @@ function issuerAndSerial(certDer: Buffer) {
  * @param roots - pinned trust anchors (FreeTSA's root certificate)
  * @param nonce - the request's nonce, hex, when it must be echoed
  */
+/**
+ * The message imprint a time-stamp token commits to, lowercase hex, read
+ * WITHOUT checking its signature (review round 6, L2: only to tell whether
+ * a stored tree still matches the token it was stamped with).
+ *
+ * @throws when the token cannot be read
+ */
+export function tokenImprint(token: Uint8Array): string {
+  const signed = kids(kids(kids(parse(token))[1])[0]);
+  const eContentWrap = kids(signed[2])[1];
+  return readTstInfo(octets(kids(eContentWrap)[0])).imprint;
+}
+
 export function verifyTimestampToken(
   token: Uint8Array,
   digest: string,
