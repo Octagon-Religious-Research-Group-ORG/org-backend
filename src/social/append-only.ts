@@ -48,10 +48,28 @@ export const BLOCKED_QUERY_OPERATIONS = [
  *
  * @param schema - the schema to protect; must be called before the model is compiled
  * @param collection - a readable name used in the error message
+ * @param releaseOption - when set, a query-level `deleteMany` carrying this
+ *   option set to `true` is let through: one named, deliberate exception
+ *   for a collection whose rows may be released (anchor claims that are in
+ *   no tree, Chunk 16 round 4). Every other operation stays blocked.
  */
-export function makeAppendOnly(schema: Schema, collection: string): void {
+export function makeAppendOnly(
+  schema: Schema,
+  collection: string,
+  releaseOption?: string,
+): void {
   for (const operation of BLOCKED_QUERY_OPERATIONS) {
     schema.pre(operation, { document: true, query: true }, function () {
+      const query = this as unknown as {
+        getOptions?: () => Record<string, unknown>;
+      };
+      if (
+        operation === 'deleteMany' &&
+        releaseOption !== undefined &&
+        query.getOptions?.()[releaseOption] === true
+      ) {
+        return;
+      }
       throw new AppendOnlyViolationError(collection, operation);
     });
   }

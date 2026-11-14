@@ -334,6 +334,64 @@ describeWithMongo('timestamp anchoring on a real MongoDB', () => {
     expect(claims).toHaveLength(40);
   });
 
+  it('round 4, LOW-1: a claim that lands after the recount is released and anchored the next day', async () => {
+    const today = soon();
+    await blockVersion(m, new Date(today.getTime() - 3 * 3_600_000));
+    const late = await blockVersion(
+      m,
+      new Date(today.getTime() - 2 * 3_600_000),
+    );
+    const anchors = m.TimestampAnchor;
+    const original = anchors.updateOne.bind(anchors);
+    let injected = false;
+    const spy = jest.spyOn(anchors, 'updateOne').mockImplementation(((
+      filter: object,
+      change: any,
+    ) => {
+      const query = original(filter, change);
+      if (!injected && change?.$set?.status === 'built') {
+        injected = true;
+        const exec = query.exec.bind(query);
+        // A builder whose lease ran out claims `late` right now.
+        query.exec = async () => {
+          await m.AnchorLeaf.create({
+            _id: `b:${String(late._id)}`,
+            anchorId: anchorDay(today),
+            kind: 'block',
+            versionId: late._id,
+            versionHash: late.hash,
+            versionCreatedAt: late.createdAt,
+            salt: 'a'.repeat(64),
+            leaseId: 'a-builder-that-lost-its-lease',
+          });
+          return exec();
+        };
+      }
+      return query;
+    }) as never);
+    const service = anchoringOn(m, tsa, fresh());
+    service.maxLeaves = 1;
+    const report = await service.run(today);
+    spy.mockRestore();
+    expect(injected).toBe(true);
+    expect(report.build).toMatchObject({ state: 'built', leaves: 1 });
+    expect(
+      await m.AnchorLeaf.findById(`b:${String(late._id)}`).lean(),
+    ).toBeNull();
+    const tomorrow = new Date(today.getTime() + 24 * 3_600_000);
+    expect(
+      (await anchoringOn(m, tsa, fresh()).run(tomorrow)).build,
+    ).toMatchObject({ state: 'built', leaves: 1 });
+    const claim = await m.AnchorLeaf.findById(`b:${String(late._id)}`).lean();
+    expect(claim.anchorId).toBe(anchorDay(tomorrow));
+    const anchor = await m.TimestampAnchor.findById(anchorDay(tomorrow)).lean();
+    expect(
+      anchor.leaves.map((leaf: { versionId: unknown }) =>
+        String(leaf.versionId),
+      ),
+    ).toEqual([String(late._id)]);
+  });
+
   it('a version anchored the next day is never in today’s batch', async () => {
     await blockVersion(m);
     const p = fresh();

@@ -85,4 +85,11 @@ export const AnchorLeafSchema = SchemaFactory.createForClass(AnchorLeaf);
 AnchorLeafSchema.index({ anchorId: 1 });
 AnchorLeafSchema.index({ versionId: 1 });
 
-makeAppendOnly(AnchorLeafSchema, 'anchorleaves');
+/**
+ * The query option that lets ONE `deleteMany` through the append-only guard:
+ * releasing claims of a finished anchor that are in no tree (Chunk 16
+ * round 4, LOW-1). Claims inside a tree are never released.
+ */
+export const RELEASE_STRAY_CLAIMS = 'releaseStrayClaims';
+
+makeAppendOnly(AnchorLeafSchema, 'anchorleaves', RELEASE_STRAY_CLAIMS);

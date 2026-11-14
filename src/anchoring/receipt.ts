@@ -46,6 +46,35 @@ export const HASHES_RECEIPT_NOTICE = [
   ...LIMITS,
 ];
 
+/*
+ * The same three while anchoring is pending (review round 4, LOW-2): a
+ * version with no anchor yet has no time-stamp, so none may be claimed.
+ */
+const PENDING =
+  'It has no time-stamp yet: until the next daily anchor it proves nothing about when this version existed. Download it again after that.';
+
+/** A complete receipt while anchoring is pending. */
+export const RECEIPT_PENDING_NOTICE = [
+  'This receipt holds the text below, exactly as written, and every step from it to its fingerprint. Anyone can check those steps with free public tools; the commands are below.',
+  PENDING,
+  ...LIMITS,
+];
+
+/** A leaf-only receipt while anchoring is pending. */
+export const PARTIAL_PENDING_RECEIPT_NOTICE = [
+  PENDING,
+  'Even once anchored, it will prove only that this version’s sealed fingerprint (its leaf in the anchor) existed by then; that the text below is the text behind it can be checked only with the author’s complete receipt, which only the author or an ORG admin can download.',
+  ...LIMITS,
+];
+
+/** A hashes receipt while anchoring is pending. */
+export const HASHES_PENDING_RECEIPT_NOTICE = [
+  'This receipt holds this version’s fingerprint (hash).',
+  PENDING,
+  'The step from the text below to that hash needs the author’s complete receipt: the hash also covers the author’s account id, which only the author and ORG admins receive.',
+  ...LIMITS,
+];
+
 /** How much of the hash material a reader gets (Chunk 16 rounds 2 and 3). */
 export type Disclosure = 'full' | 'hashes' | 'none';
 
@@ -304,15 +333,25 @@ export function buildReceipt(
   now = new Date(),
 ): Receipt {
   const versions = inputs.map((input) => versionOf(input, reader));
+  // Chosen the way the receipt panel chooses its wording (round 4, LOW-2).
+  const anchored = versions.every(
+    (version) => version.anchor.state === 'anchored',
+  );
   return {
     format: RECEIPT_FORMAT,
     generatedAt: now.toISOString(),
     subject,
     notice: versions.some((version) => version.disclosure === 'none')
-      ? PARTIAL_RECEIPT_NOTICE
+      ? anchored
+        ? PARTIAL_RECEIPT_NOTICE
+        : PARTIAL_PENDING_RECEIPT_NOTICE
       : versions.some((version) => version.disclosure === 'hashes')
-        ? HASHES_RECEIPT_NOTICE
-        : RECEIPT_NOTICE,
+        ? anchored
+          ? HASHES_RECEIPT_NOTICE
+          : HASHES_PENDING_RECEIPT_NOTICE
+        : anchored
+          ? RECEIPT_NOTICE
+          : RECEIPT_PENDING_NOTICE,
     versions,
     howToVerify: versions.flatMap((version, index) => [
       `Version ${index + 1} (folder version-${index + 1}):`,

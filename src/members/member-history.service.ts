@@ -402,11 +402,6 @@ export class MemberHistoryService {
   }
 
   /**
-   * The paragraphs as first saved, in reading order with their outline labels,
-   * as one entry. Imported if any of them was imported.
-   */
-  /** Which of these rows' authors (and suggesters) this reader may know. */
-  /**
    * For each row, whether every person on its block's chain up to it may
    * be known to this reader (review round 3, MEDIUM-1): a hash prefix of
    * version m lets a reader who knows every other input chain a guess about
@@ -445,6 +440,10 @@ export class MemberHistoryService {
         );
   }
 
+  /**
+   * The paragraphs as first saved, in reading order with their outline labels,
+   * as one entry. Imported if any of them was imported.
+   */
   private async earlierText(
     blocks: FieldBlock[],
     edited: boolean,

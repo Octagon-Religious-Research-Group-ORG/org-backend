@@ -26,6 +26,7 @@ import {
   type AnchorLeafDocument,
   type AnchoredKind,
   leafId,
+  RELEASE_STRAY_CLAIMS,
 } from './schemas/anchor-leaf.schema';
 import {
   type AnchoredLeaf,
@@ -408,6 +409,20 @@ export class AnchoringService {
         // Claimed meanwhile by another day's batch: not ours, and not lost.
         if (!onlyDuplicates(error)) throw error;
       }
+      // Our lease may have run out during the insert (review round 4,
+      // LOW-1): then a takeover may already have built or emptied this
+      // anchor without our claims. Whoever holds the lease now handles
+      // claims that land while it builds; one that lands after it finished
+      // is released here, so the version can be claimed again.
+      const stillOursAfter = await this.anchorModel
+        .findOne(owned)
+        .select({ _id: 1 })
+        .lean()
+        .exec();
+      if (!stillOursAfter) {
+        await this.releaseStray(day);
+        return { state: 'busy' };
+      }
     }
     const claims = (await this.leafModel
       .find({ anchorId: day })
@@ -418,9 +433,9 @@ export class AnchoringService {
       const done = await this.anchorModel
         .updateOne(owned, { $set: { status: 'empty' }, $unset: { lease: 1 } })
         .exec();
-      return done.modifiedCount === 1
-        ? { state: 'empty', anchorId: day }
-        : { state: 'busy' };
+      if (done.modifiedCount !== 1) return { state: 'busy' };
+      await this.releaseStray(day);
+      return { state: 'empty', anchorId: day };
     }
     const leaves = claims
       .map((claim) => ({
@@ -459,10 +474,42 @@ export class AnchoringService {
       })
       .exec();
     if (done.modifiedCount !== 1) return { state: 'busy' };
+    // A claim that landed between the recount and the update slipped past
+    // the guard: release it (review round 4, LOW-1).
+    await this.releaseStray(day);
     this.logger.log(
       `Anchor ${day}: ${leaves.length} versions, root ${tree.root}`,
     );
     return { state: 'built', anchorId: day, leaves: leaves.length };
+  }
+
+  /**
+   * Deletes the claims of a FINISHED anchor that are not in its tree, so
+   * no version stays claimed but outside every tree (review round 4,
+   * LOW-1). Such a claim can only come from a builder whose lease ran out
+   * mid-insert. While the anchor is still building nothing is touched: its
+   * lease holder reads every claim before building, and its recount turns
+   * any later one into a takeover.
+   */
+  private async releaseStray(day: string): Promise<void> {
+    const row = (await this.anchorModel
+      .findById(day)
+      .select({ status: 1, leaves: 1 })
+      .lean()
+      .exec()) as Pick<TimestampAnchor, 'status' | 'leaves'>;
+    if (row.status === 'building') return;
+    const kept = (row.leaves ?? []).map((entry) =>
+      leafId(entry.kind, entry.versionId),
+    );
+    const { deletedCount } = await this.leafModel
+      .deleteMany({ anchorId: day, _id: { $nin: kept } })
+      .setOptions({ [RELEASE_STRAY_CLAIMS]: true })
+      .exec();
+    if (deletedCount > 0) {
+      this.logger.warn(
+        `Anchor ${day}: released ${deletedCount} claim(s) that a builder made after the tree was built; they will be anchored in a later batch.`,
+      );
+    }
   }
 
   /** Built anchors whose provider step is waiting or due to retry. */

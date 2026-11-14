@@ -6,7 +6,7 @@
 //
 // Supported: find/findOne (sort, skip, limit, select and session ignored,
 // lean), exists,
-// countDocuments, create (unique keys, timestamps), updateOne/updateMany/
+// countDocuments, deleteOne/deleteMany, create (unique keys, timestamps), updateOne/updateMany/
 // findOneAndUpdate ($set, $unset, $inc, $push, $addToSet, $pull; updateOne also
 // upserts), and aggregate with
 // $match, $sort, $group ($first, $min, $max, $sum, $push), $skip, $limit
@@ -17,6 +17,11 @@ import { Types } from 'mongoose';
 
 type Doc = Record<string, unknown>;
 type Filter = Record<string, unknown>;
+
+interface FakeDelete {
+  setOptions: (options: Record<string, unknown>) => FakeDelete;
+  exec: () => Promise<{ deletedCount: number }>;
+}
 
 export interface FakeModelOptions {
   /** Each entry is one unique index, by its field names. */
@@ -204,6 +209,7 @@ export interface FakeModel {
     exec: () => Promise<{ _id: unknown } | null>;
   };
   deleteOne: (filter: Filter) => FakeResult;
+  deleteMany: (filter: Filter) => FakeDelete;
   countDocuments: (filter?: Filter) => { exec: () => Promise<number> };
   create: (doc: Doc | Doc[], options?: unknown) => Promise<Doc>;
   updateOne: (
@@ -350,6 +356,19 @@ export function fakeModel(
         });
       },
     }),
+    deleteMany: (filter) => {
+      const deletion: FakeDelete = {
+        // Query options (e.g. an append-only release) are not checked here.
+        setOptions: () => deletion,
+        exec: () => {
+          options.beforeWrite?.('deleteMany', filter);
+          const gone = matching(filter);
+          for (const doc of gone) docs.splice(docs.indexOf(doc), 1);
+          return Promise.resolve({ deletedCount: gone.length });
+        },
+      };
+      return deletion;
+    },
     countDocuments: (filter) => ({
       exec: () => Promise.resolve(matching(filter).length),
     }),
