@@ -16,6 +16,8 @@ import {
   reconcileIndexes,
 } from './index-setup';
 import { MANAGED_SCHEMAS } from './managed-schemas';
+import { ensureAtlasIndex } from '../search/search-engine.service';
+import { ATLAS_SEARCH_INDEX_NAME } from '../search/search-pipeline';
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
@@ -44,6 +46,15 @@ async function main(): Promise<number> {
     );
     const outcome = await reconcileIndexes(models, { dryRun });
     for (const line of formatIndexOutcome(outcome, dryRun)) console.warn(line);
+    // Search (Chunk 15): its one Atlas Search index, where the server allows
+    // it. Not counted in the exit code: without it search uses $text.
+    const atlas = await ensureAtlasIndex(
+      connection.collection('searchentries'),
+      dryRun,
+    );
+    console.warn(
+      `Atlas Search index ${ATLAS_SEARCH_INDEX_NAME}: ${atlas.outcome}${atlas.reason ? ` (${atlas.reason})` : ''}`,
+    );
     return EXIT_CODES[outcome.status];
   } finally {
     await connection.close();

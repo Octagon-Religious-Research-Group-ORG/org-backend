@@ -147,6 +147,64 @@ key. Resend keeps keys 24 hours, so an ambiguous send is not retried after
 and removed. A bad value is logged at start-up and ignored (emails then link
 to the website's unsubscribe page, without one-click).
 
+## Search (Chunk 15)
+
+`GET /api/v1/search?q=&type=all|members|beliefs|pages&page=` searches member
+display names, belief titles and text, and the published ORG pages. Comments
+are not searched. It is public; a signed-in reader is recognised from the
+token. Answers are `no-store` and vary on `Origin, Authorization`; a visitor
+gets 30 searches a minute; a query is at most 100 characters.
+
+**Who sees what.** `MembersService.searchScope` runs `decideProfileAccess` on
+every listable page: a page the directory lists can be found by its name (a
+reader with name-only access gets the name and nothing else, as on its
+directory card); a page the reader may read in full can be found by its
+beliefs. Unlisted, pending, removed and deleted pages are found by nobody,
+admins included. This filter, plus a check that each indexed copy is exactly
+what the site shows now (current name, live tab and its current title, the
+newest version of a live block, the published CMS revision), runs INSIDE the
+aggregation before grouping, counting and paging (`search-pipeline.ts`), so
+neither page 2 nor the total can reveal anything else. Snippets are cut only
+from text that passed it.
+
+**Engines.** The copies live in `searchentries`, refreshed from the source
+collections (at most every 15 s while searched, everything every 6 h). Atlas
+Search (`$search`) is used when its index exists and is queryable; otherwise
+`$text`; otherwise, if even the text index is missing, a regex. All three run
+behind the same filter. A missing or building index is logged once and never
+fails a search.
+
+**Indexes to create before production.** `npm run db:indexes -- --confirm
+<database>` creates the managed indexes, including the `$text` fallback
+`search_text_fallback` on `searchentries`, and tries to create the Atlas Search
+index too (it reports `unsupported` where the server refuses). The Atlas
+Search index, if made by hand in the Atlas UI (JSON editor), on database
+`<database>`, collection `searchentries`:
+
+```json
+{
+  "name": "search_entries",
+  "definition": {
+    "mappings": {
+      "dynamic": false,
+      "fields": { "text": { "type": "string", "analyzer": "lucene.standard" } }
+    }
+  }
+}
+```
+
+**Suggested Fragments.** `GET /api/v1/search/fragments`. Only aggregate counts
+are stored (`searchtermdays`: term, UTC day, number of different searchers;
+deleted by TTL after the window). Different searchers are told apart in
+memory only, by an HMAC with a random key made each day and never written
+down (`searcher-counter.ts`). A term is counted only when it matched content a
+signed-out reader can see, and shown only while it still does, has at least
+`SEARCH_FRAGMENT_MIN_SEARCHERS` (default 5) different searchers in
+`SEARCH_FRAGMENT_WINDOW_DAYS` (default 30), passes the shape check (3–40
+letters, digits, spaces, hyphens, apostrophes; at most four words; no long
+numbers or `@`) and is not hidden. Admins see and hide them at
+`/api/v1/admin/search-fragments`; each change is in the moderation log.
+
 ## Heroku deployment
 
 The repository includes a `Procfile` that starts the compiled application with

@@ -18,6 +18,7 @@ import { configureDnsServers } from './config/dns';
 import { ContentModule } from './content/content.module';
 import { MembershipModule } from './membership/membership.module';
 import { MembersModule } from './members/members.module';
+import { SearchModule } from './search/search.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { MembersModule } from './members/members.module';
     SocialModule,
     MembershipModule,
     MembersModule,
+    SearchModule,
     DbModule,
   ],
   controllers: [AppController],

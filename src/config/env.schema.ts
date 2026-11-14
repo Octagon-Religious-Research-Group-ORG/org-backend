@@ -109,6 +109,18 @@ export const envValidationSchema = Joi.object({
     .min(0)
     .max(23)
     .default(DEFAULT_DIGEST_HOUR_UTC),
+  // Suggested Fragments (Chunk 15): how many different searchers a term needs
+  // within how many days before it is suggested.
+  SEARCH_FRAGMENT_MIN_SEARCHERS: Joi.number()
+    .integer()
+    .min(2)
+    .max(1000)
+    .default(5),
+  SEARCH_FRAGMENT_WINDOW_DAYS: Joi.number()
+    .integer()
+    .min(1)
+    .max(90)
+    .default(30),
 })
   .custom(requireTestSiteOnTestDatabase)
   .custom(requireReserveBelowLimit);

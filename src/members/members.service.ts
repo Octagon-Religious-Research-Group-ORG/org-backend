@@ -21,6 +21,8 @@ import {
   type ProfileBlockDocument,
 } from '../social/schemas/profile-block.schema';
 import {
+  type ProfileReviewStatus,
+  type ProfileVisibility,
   SLUG_PATTERN,
   SocialProfile,
   type SocialProfileDocument,
@@ -59,6 +61,27 @@ export const PROFILE_NOT_FOUND = 'That page does not exist.';
 
 /** More than the community has; a client is told when there are more. */
 export const MAX_DIRECTORY_CARDS = 1000;
+
+/**
+ * Search reads at most this many pages' access facts per query (Chunk 15).
+ * Far above the community's size; past it, the rest are simply not
+ * searchable, which is the safe direction, and it is logged.
+ */
+export const MAX_SEARCH_SCOPE_PAGES = 5000;
+
+/**
+ * The pages that can be listed at all: a narrowing for the database only.
+ * `decideProfileAccess` still decides every row it returns.
+ */
+const LISTABLE_PAGES = {
+  visibility: {
+    $in: ['public', 'members', 'named-members'] as ProfileVisibility[],
+  },
+  reviewStatus: {
+    $nin: ['claiming', 'pending', 'removed'] as ProfileReviewStatus[],
+  },
+  deletedAt: { $exists: false },
+};
 
 /**
  * The only fields read for an access decision or a response. `similarNameOf`,
@@ -166,11 +189,7 @@ export class MembersService {
     viewer: Viewer,
   ): Promise<{ members: DirectoryCard[]; hasMore: boolean }> {
     const rows = (await this.profileModel
-      .find({
-        visibility: { $in: ['public', 'members', 'named-members'] },
-        reviewStatus: { $nin: ['claiming', 'pending', 'removed'] },
-        deletedAt: { $exists: false },
-      })
+      .find(LISTABLE_PAGES)
       .select(PROFILE_FIELDS)
       .sort({ displayName: 1 })
       .limit(MAX_DIRECTORY_CARDS + 1)
@@ -199,6 +218,39 @@ export class MembersService {
       )
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
     return { members, hasMore: rows.length > MAX_DIRECTORY_CARDS };
+  }
+
+  /**
+   * What this reader may find in search (Chunk 15), page by page, decided by
+   * the SAME `decideProfileAccess` as the directory and the pages: a page
+   * the directory lists is `listed` (its name can be found), a page the
+   * reader may read in full is `full` too (its beliefs can be found).
+   * Unlisted, pending, removed and deleted pages are in neither, for anyone.
+   */
+  async searchScope(
+    viewer: Viewer,
+  ): Promise<{ listed: Types.ObjectId[]; full: Types.ObjectId[] }> {
+    const rows = (await this.profileModel
+      .find(LISTABLE_PAGES)
+      .select({ visibility: 1, reviewStatus: 1, ownerUserId: 1, deletedAt: 1 })
+      .sort({ _id: 1 })
+      .limit(MAX_SEARCH_SCOPE_PAGES + 1)
+      .lean()
+      .exec()) as unknown as ProfileRowWithId[];
+    if (rows.length > MAX_SEARCH_SCOPE_PAGES) {
+      this.logger.warn(
+        `Search covers the first ${MAX_SEARCH_SCOPE_PAGES} member pages only.`,
+      );
+    }
+    const listed: Types.ObjectId[] = [];
+    const full: Types.ObjectId[] = [];
+    for (const row of rows.slice(0, MAX_SEARCH_SCOPE_PAGES)) {
+      const access = decideProfileAccess(viewer, row);
+      if (!access.listed || access.level === 'none') continue;
+      listed.push(row._id);
+      if (access.level === 'full') full.push(row._id);
+    }
+    return { listed, full };
   }
 
   private guestCanSee(row: ProfileRow) {

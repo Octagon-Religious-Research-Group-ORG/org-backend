@@ -217,7 +217,15 @@
       "member-notifications/notification-dispatcher.service.ts",
       "member-notifications/digest-sender.ts",
       "member-notifications/notifications.controller.ts",
-      "member-notifications/send-attempts.ts"
+      "member-notifications/send-attempts.ts",
+      "search/search-text.ts",
+      "search/search-pipeline.ts",
+      "search/searcher-counter.ts",
+      "search/search-engine.service.ts",
+      "search/search-indexer.service.ts",
+      "search/search.service.ts",
+      "search/search-fragments.service.ts",
+      "search/search.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

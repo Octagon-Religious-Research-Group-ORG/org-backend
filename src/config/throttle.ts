@@ -71,3 +71,10 @@ export const PICTURE_THROTTLE = { ttl: seconds(60), limit: 600 };
 
 /** Applies {@link WRITE_THROTTLE} to a route or controller. */
 export const WriteThrottle = () => Throttle({ default: WRITE_THROTTLE });
+
+/**
+ * Searches per visitor address per minute (Chunk 15): well above typing a
+ * few queries and paging through them, far below walking a word list to map
+ * what members have written.
+ */
+export const SEARCH_THROTTLE = { ttl: seconds(60), limit: 30 };

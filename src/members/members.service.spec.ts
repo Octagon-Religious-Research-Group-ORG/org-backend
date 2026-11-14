@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment */
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { MAX_DIRECTORY_CARDS, MembersService } from './members.service';
@@ -764,5 +764,61 @@ describe('MembersService.chats', () => {
       voting: 'invite',
       inviteUrl: 'https://t.me/+abc',
     });
+  });
+});
+
+describe('MembersService.searchScope (Chunk 15)', () => {
+  const id = (n: number) => new Types.ObjectId(String(n).padStart(24, 'b'));
+  const rows = [
+    page({ _id: id(1), visibility: 'public' }),
+    page({ _id: id(2), visibility: 'members', ownerUserId: 'o2' }),
+    page({ _id: id(3), visibility: 'named-members', ownerUserId: 'o3' }),
+    // Never listed, for anyone: the query should not return them, and if it
+    // did, decideProfileAccess still drops them.
+    page({ _id: id(4), visibility: 'unlisted' }),
+    page({ _id: id(5), reviewStatus: 'pending' }),
+    page({ _id: id(6), reviewStatus: 'removed' }),
+    page({ _id: id(7), deletedAt: new Date(0) }),
+  ];
+
+  it('asks the database only for listable pages', async () => {
+    const { service, profileModel } = setup({ many: rows });
+    await service.searchScope(GUEST_VIEWER);
+    expect(profileModel.find).toHaveBeenCalledWith({
+      visibility: { $in: ['public', 'members', 'named-members'] },
+      reviewStatus: { $nin: ['claiming', 'pending', 'removed'] },
+      deletedAt: { $exists: false },
+    });
+  });
+
+  it.each([
+    ['a guest', GUEST_VIEWER, [1, 2, 3], [1]],
+    ['an anonymous member', anonymousMember, [1, 2, 3], [1, 2]],
+    ['a named member', member, [1, 2, 3], [1, 2, 3]],
+    ['an admin', admin, [1, 2, 3], [1, 2, 3]],
+  ])(
+    'gives %s the directory rule for names and the page rule for beliefs',
+    async (_label, viewer, listed, full) => {
+      const { service } = setup({ many: rows });
+      const scope = await service.searchScope(viewer);
+      expect(scope.listed.map(String)).toEqual(
+        listed.map((n) => String(id(n))),
+      );
+      expect(scope.full.map(String)).toEqual(full.map((n) => String(id(n))));
+    },
+  );
+
+  it('covers a bounded number of pages and says so', async () => {
+    const many = Array.from({ length: 5001 }, (_, n) =>
+      page({ _id: new Types.ObjectId(), slug: `p-${n}` }),
+    );
+    const { service } = setup({ many });
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const scope = await service.searchScope(GUEST_VIEWER);
+    expect(scope.listed).toHaveLength(5000);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

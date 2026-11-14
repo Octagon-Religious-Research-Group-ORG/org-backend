@@ -22,6 +22,9 @@ import { EmailBudgetDaySchema } from '../member-notifications/schemas/email-budg
 import { NotificationDigestRowSchema } from '../member-notifications/schemas/notification-digest.schema';
 import { NotificationPrefsRowSchema } from '../member-notifications/schemas/notification-prefs.schema';
 import { NotificationQueueRowSchema } from '../member-notifications/schemas/notification-queue.schema';
+import { SearchEntrySchema } from '../search/schemas/search-entry.schema';
+import { SearchFragmentHideSchema } from '../search/schemas/search-fragment-hide.schema';
+import { SearchTermDaySchema } from '../search/schemas/search-term-day.schema';
 
 /**
  * Every collection whose indexes are created deliberately (`autoIndex: false`).
@@ -56,4 +59,7 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'NotificationQueueRow', schema: NotificationQueueRowSchema },
     { name: 'NotificationDigestRow', schema: NotificationDigestRowSchema },
     { name: 'EmailBudgetDay', schema: EmailBudgetDaySchema },
+    { name: 'SearchEntry', schema: SearchEntrySchema },
+    { name: 'SearchTermDay', schema: SearchTermDaySchema },
+    { name: 'SearchFragmentHide', schema: SearchFragmentHideSchema },
   ];

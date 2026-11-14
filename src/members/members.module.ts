@@ -184,5 +184,7 @@ import { VotesService } from './votes/votes.service';
     ModerationQueueService,
     ModerationThrottleGuard,
   ],
+  // Search (Chunk 15) asks the same service who is reading and what they may see.
+  exports: [MembersService],
 })
 export class MembersModule {}
