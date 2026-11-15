@@ -232,6 +232,8 @@ describe('AnchorVerifierService', () => {
         'pass',
         'pass',
         'pass',
+        // No anchor log on this verifier (Chunk 16b): never a pass.
+        'cannot-measure',
       ]);
       const c = await prove('comment', comment);
       expect(c.anchored && c.checks.hash.outcome).toBe('pass');

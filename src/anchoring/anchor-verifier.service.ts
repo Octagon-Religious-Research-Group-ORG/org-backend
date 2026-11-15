@@ -11,6 +11,9 @@ import {
   type CommentVersionDocument,
 } from '../social/schemas/comment-version.schema';
 import { type PurgeShape, PurgeMarksService } from './purge-marks.service';
+import { AnchorLogService, type DayState } from './anchor-log.service';
+import type { LogCheck } from './anchor-log-view';
+import { leafSetHash } from './day-record';
 import { withBytes } from './bytes';
 import { FREETSA_ROOT_PEM } from './freetsa-certs';
 import { buildTree, leafHash, type PathStep, rootFromPath } from './merkle';
@@ -69,6 +72,12 @@ export interface AnchorReport {
   ots: Check;
   /** The Bitcoin block itself: needs a Bitcoin node, which we do not have. */
   bitcoin: Check;
+  /**
+   * Its day in the daily anchor log, against the PUBLISHED head (Chunk
+   * 16b). Reported beside the four checks above, not folded into
+   * `lastCheck`, so the claim sweep keeps its Chunk 16 rules.
+   */
+  log: LogCheck;
 }
 
 export interface HealthReport {
@@ -91,9 +100,18 @@ export interface HealthReport {
   coverage: Check;
   /** Per check, how many anchors passed, failed, or could not be measured. */
   totals: Record<
-    'root' | 'versions' | 'tsa' | 'ots' | 'bitcoin',
+    'root' | 'versions' | 'tsa' | 'ots' | 'bitcoin' | 'log',
     Record<Outcome, number>
   >;
+  /** The whole anchor log against its published head (Chunk 16b). */
+  log: LogCheck & {
+    size: number;
+    publishedSize?: number;
+    /** When the leaf-set audit behind this answer ran (M2). */
+    auditedAt?: string;
+    /** ANCHOR_LOG_BOOTSTRAP is set: a warning for the owner (round 3, L1). */
+    bootstrap?: true;
+  };
 }
 
 /** What a receipt says about one version's anchoring. */
@@ -119,6 +137,18 @@ export type VersionProof =
         path: Check;
         tsa: Check;
         ots: Check;
+        /** The anchor's day in the published anchor log (Chunk 16b). */
+        log: LogCheck;
+      };
+      /** The day's inclusion in the published head, when published. */
+      log?: {
+        index: number;
+        size: number;
+        record: string;
+        proof: string[];
+        checkpoint: string;
+        /** The log key that signs it (public). */
+        verifierKey?: string;
       };
     };
 
@@ -136,6 +166,34 @@ const unknown = (detail: string): Check => ({
   outcome: 'cannot-measure',
   detail,
 });
+
+/** Without the log on this server: never a pass. */
+export const NO_ANCHOR_LOG = 'no anchor log on this server';
+
+/** A day's place in the anchor log as a check (Chunk 16b). */
+export function logCheckOf(state: DayState): LogCheck {
+  if (state.state === 'published') {
+    return { ...pass(state.detail), state: 'published' };
+  }
+  if (state.state === 'fail') {
+    return { ...fail(state.detail), state: 'failed', reason: state.reason };
+  }
+  return {
+    ...unknown(
+      state.state === 'pending'
+        ? `pending publication: ${state.detail}`
+        : state.detail,
+    ),
+    state: state.state,
+    reason: state.reason,
+  };
+}
+
+const NO_LOG: LogCheck = {
+  outcome: 'cannot-measure',
+  state: 'cannot-measure',
+  detail: NO_ANCHOR_LOG,
+};
 
 type AnchorQuery = QueryFilter<TimestampAnchor>;
 
@@ -248,7 +306,6 @@ export function checkOts(
     };
   }
 }
-
 /**
  * Verifies anchors (Chunk 16) from what is stored, without trusting any of
  * it: versions are rehashed from their fields, roots rebuilt from leaves,
@@ -270,6 +327,7 @@ export class AnchorVerifierService {
     string,
     {
       tree: ReturnType<typeof safeTree>;
+      leafset: string;
       tsa: Check;
       ots: Check;
       size: number;
@@ -286,7 +344,29 @@ export class AnchorVerifierService {
     @InjectModel(CommentVersion.name)
     private readonly commentVersionModel: Model<CommentVersionDocument>,
     @Optional() private readonly marks?: PurgeMarksService,
+    @Optional() private readonly log?: AnchorLogService,
   ) {}
+
+  /** The log check of one anchor, inside a request already begun. */
+  private async logCheck(
+    anchorId: string,
+    leafset?: string,
+  ): Promise<LogCheck> {
+    if (!this.log) return NO_LOG;
+    const view = await this.log.view();
+    // This request read the anchor's leaves: check them against its log
+    // entry at once, rather than waiting for the next audit (round 2, M2).
+    const record = view.recordOf(anchorId);
+    if (leafset !== undefined && record && record.leafset !== leafset) {
+      return {
+        outcome: 'fail',
+        state: 'failed',
+        reason: 'mismatch',
+        detail: 'its stored leaves are not the leaf list its log entry records',
+      };
+    }
+    return logCheckOf(view.day(anchorId));
+  }
 
   /**
    * A row carrying `purgedAt`, checked by shape and its owner's mark
@@ -403,6 +483,7 @@ export class AnchorVerifierService {
    */
   beginCheck(): void {
     this.marks?.beginCheck();
+    this.log?.beginCheck();
   }
 
   /** Every check on one anchor row, as its own request. */
@@ -439,6 +520,7 @@ export class AnchorVerifierService {
         tsa: relabelled,
         ots: relabelled,
         bitcoin: relabelled,
+        log: await this.logCheck(anchor._id),
       };
     }
     if (anchor.status === 'empty' && (await this.nothingOn(anchor))) {
@@ -451,6 +533,7 @@ export class AnchorVerifierService {
         tsa: nothing,
         ots: nothing,
         bitcoin: nothing,
+        log: await this.logCheck(anchor._id),
       };
     }
     if (anchor.status !== 'built') {
@@ -466,6 +549,7 @@ export class AnchorVerifierService {
         tsa: note,
         ots: note,
         bitcoin: note,
+        log: await this.logCheck(anchor._id),
       };
     }
     // A built anchor without a root was changed after it was built.
@@ -480,6 +564,7 @@ export class AnchorVerifierService {
       versions: await this.checkVersions(anchor._id, leaves),
       tsa: checkTsa(anchor.tsa?.response, root, this.trustedRoots),
       ...checkOts(anchor.ots?.proof, root),
+      log: await this.logCheck(anchor._id, leafSetHash(leaves)),
     };
   }
 
@@ -624,7 +709,14 @@ export class AnchorVerifierService {
         .exec();
     }
     const totals = {} as HealthReport['totals'];
-    for (const key of ['root', 'versions', 'tsa', 'ots', 'bitcoin'] as const) {
+    for (const key of [
+      'root',
+      'versions',
+      'tsa',
+      'ots',
+      'bitcoin',
+      'log',
+    ] as const) {
       totals[key] = { pass: 0, fail: 0, 'cannot-measure': 0 };
       for (const report of reports) totals[key][report[key].outcome] += 1;
     }
@@ -637,6 +729,20 @@ export class AnchorVerifierService {
       totalsScope: 'page',
       totals,
       global: await this.globalCounts(),
+      log: await this.logSummary(),
+    };
+  }
+
+  /** The whole log against its published head, for the health view. */
+  private async logSummary(): Promise<HealthReport['log']> {
+    if (!this.log) return { ...NO_LOG, size: 0 };
+    const view = await this.log.view();
+    return {
+      ...view.check,
+      size: view.size,
+      ...(view.published ? { publishedSize: view.published.size } : {}),
+      ...(view.auditedAt ? { auditedAt: view.auditedAt } : {}),
+      ...(view.bootstrap ? { bootstrap: true as const } : {}),
     };
   }
 
@@ -733,6 +839,9 @@ export class AnchorVerifierService {
               ? 'the path does not lead to the anchored root'
               : 'the anchor this version was claimed by is missing',
           );
+    const inLog = this.log
+      ? (await this.log.view()).proofOf(claim.anchorId)
+      : undefined;
     const rehashed = recomputeHash(kind, record);
     const shape =
       record.hash === claim.versionHash
@@ -763,7 +872,9 @@ export class AnchorVerifierService {
         path: pathCheck,
         tsa: checked?.tsa ?? checkTsa(undefined, root, this.trustedRoots),
         ots: checked?.ots ?? checkOts(undefined, root).ots,
+        log: await this.logCheck(claim.anchorId, checked?.leafset),
       },
+      ...(inLog ? { log: inLog } : {}),
     };
   }
 
@@ -795,6 +906,7 @@ export class AnchorVerifierService {
     const leaves = stored?.leaves ?? [];
     const checked = {
       tree: safeTree(leaves),
+      leafset: leafSetHash(leaves),
       tsa: checkTsa(anchor.tsa?.response, root, this.trustedRoots),
       ots: checkOts(anchor.ots?.proof, root).ots,
       size: Math.max(1, leaves.length),

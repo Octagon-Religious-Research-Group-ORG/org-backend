@@ -286,6 +286,7 @@ describe('receipts', () => {
         path: { outcome: 'pass', detail: '' },
         tsa: { outcome: 'cannot-measure', detail: '' },
         ots: { outcome: 'cannot-measure', detail: '' },
+        log: { outcome: 'cannot-measure', state: 'cannot-measure', detail: '' },
       },
     };
     const [version] = buildReceipt(

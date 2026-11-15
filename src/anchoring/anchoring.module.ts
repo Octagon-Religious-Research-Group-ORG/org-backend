@@ -27,6 +27,14 @@ import {
   CommentVersionSchema,
 } from '../social/schemas/comment-version.schema';
 import { AnchorScheduler } from './anchor-scheduler.service';
+import { AnchorLogController } from './anchor-log.controller';
+import { AnchorLogService } from './anchor-log.service';
+import {
+  AnchorLogCheckpoint,
+  AnchorLogCheckpointSchema,
+  AnchorLogLeaf,
+  AnchorLogLeafSchema,
+} from './schemas/anchor-log.schema';
 import { AnchorVerifierService } from './anchor-verifier.service';
 import { AdminAnchorsController } from './anchoring.controller';
 import { AnchoringService } from './anchoring.service';
@@ -53,6 +61,9 @@ import {
       { name: TimestampAnchor.name, schema: TimestampAnchorSchema },
       { name: AnchorLeaf.name, schema: AnchorLeafSchema },
       { name: AnchorRunLock.name, schema: AnchorRunLockSchema },
+      // The daily anchor log (Chunk 16b): its cache and signed checkpoints.
+      { name: AnchorLogLeaf.name, schema: AnchorLogLeafSchema },
+      { name: AnchorLogCheckpoint.name, schema: AnchorLogCheckpointSchema },
       { name: BlockVersion.name, schema: BlockVersionSchema },
       { name: CommentVersion.name, schema: CommentVersionSchema },
       // Read only: whether a purged version's owner is marked (Chunk 17).
@@ -64,10 +75,11 @@ import {
       { name: AccountDeletion.name, schema: AccountDeletionSchema },
     ]),
   ],
-  controllers: [AdminAnchorsController],
+  controllers: [AdminAnchorsController, AnchorLogController],
   providers: [
     TsaProvider,
     OtsProvider,
+    AnchorLogService,
     AnchoringService,
     AnchorVerifierService,
     PurgeMarksService,

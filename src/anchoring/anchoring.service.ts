@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model, PipelineStage, QueryFilter, Types } from 'mongoose';
 import {
@@ -21,6 +21,7 @@ import {
   type TimestampNode,
 } from './ots';
 import { OtsProvider, TsaProvider } from './providers';
+import { AnchorLogService, type LogAppendReport } from './anchor-log.service';
 import { parseTimestampResponse, tokenImprint } from './rfc3161';
 import {
   AnchorRunLock,
@@ -190,6 +191,8 @@ export interface RunReport {
   /** Finished anchors whose claims outside their tree were released now. */
   released: string[];
   build: BuildOutcome;
+  /** The daily anchor log's append and checkpoint (Chunk 16b). */
+  log?: LogAppendReport;
   tsa: StepOutcome[];
   ots: StepOutcome[];
 }
@@ -237,6 +240,7 @@ export class AnchoringService {
     private readonly ots: OtsProvider,
     @InjectModel(AnchorRunLock.name)
     private readonly lockModel: Model<AnchorRunLockDocument>,
+    @Optional() private readonly log?: AnchorLogService,
   ) {}
 
   /** The lock's clock: real time, whatever `now` a run is given. */
@@ -288,6 +292,21 @@ export class AnchoringService {
       });
       await step(async () => {
         report.build = await this.build(now, force);
+      });
+      // Every finished day enters the log, and a checkpoint is signed, BEFORE
+      // the day's FreeTSA stamp: so a day's signed time is never earlier
+      // than its append (Chunk 16b). Inside the run lock.
+      await step(async () => {
+        if (!this.log) return;
+        try {
+          report.log = await this.log.append(now);
+        } catch (error) {
+          // The log is a second record: its failure never stops anchoring.
+          this.logger.error(
+            `Anchor log: the append failed: ${describe(error)}`,
+          );
+          report.log = { state: 'failed', note: describe(error) };
+        }
       });
       for (const kind of ['tsa', 'ots'] as const) {
         for (const id of await this.due(kind, now)) {

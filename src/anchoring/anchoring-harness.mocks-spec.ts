@@ -15,6 +15,9 @@ import {
   type FakeModel,
 } from '../test-support/fake-model.mocks-spec';
 import { AnchorVerifierService } from './anchor-verifier.service';
+import { ANCHOR_LOG_ORIGIN } from './anchor-log-config';
+import { AnchorLogService, type PublishedFetch } from './anchor-log.service';
+import { generateNoteKey } from './signed-note';
 import { AnchoringService } from './anchoring.service';
 import { parseTimestamp } from './ots';
 import type { OtsProvider } from './providers';
@@ -30,6 +33,9 @@ export interface AnchorModels {
   comments: FakeModel & Extra;
   /** The run lock (review round 7); made on first use when absent. */
   locks?: FakeModel;
+  /** The anchor log's cache (Chunk 16b); made on first use. */
+  logLeaves?: FakeModel;
+  logCheckpoints?: FakeModel;
 }
 
 interface Extra {
@@ -184,7 +190,7 @@ export function addCommentVersion(
 export function offlineAnchoring(
   m: AnchorModels,
   tsa: TestTsa,
-  options: { upgrade?: OtsProvider['upgrade'] } = {},
+  options: { upgrade?: OtsProvider['upgrade']; log?: AnchorLogService } = {},
 ) {
   const settings = { enabled: true, hourUtc: 0 };
   // Shared by every service on these models, as one collection would be.
@@ -218,6 +224,7 @@ export function offlineAnchoring(
       upgrade: options.upgrade ?? (() => Promise.resolve({ state: 'pending' })),
     } as never,
     m.locks as never,
+    options.log,
   );
   service.retryPauseMs = 0;
   return service;
@@ -229,6 +236,7 @@ export function verifierFor(
   m: AnchorModels,
   tsa: TestTsa,
   marks?: PurgeMarksService,
+  log?: AnchorLogService,
 ) {
   const verifier = new AnchorVerifierService(
     m.anchors as never,
@@ -236,7 +244,64 @@ export function verifierFor(
     m.blocks as never,
     m.comments as never,
     marks,
+    log,
   );
   verifier.trustedRoots = [tsa.root];
   return verifier;
+}
+
+/** The anchor log's key for every spec (made per run, never written). */
+export const LOG_KEY = generateNoteKey(ANCHOR_LOG_ORIGIN);
+
+/**
+ * An anchor log (Chunk 16b) on these models, signing with `LOG_KEY`, whose
+ * published head is whatever the spec says: `publishLatest()` publishes
+ * the newest checkpoint it signed, as the publication repository would.
+ */
+export function anchorLogFor(
+  m: AnchorModels,
+  tsa: TestTsa,
+  env: Record<string, string | undefined> = {
+    ANCHOR_LOG_SIGNING_KEY: LOG_KEY.privateKey,
+    ANCHOR_LOG_PUBLISHED_URL: 'https://example.org/latest.txt',
+    // Until the first publication only (review 2, H1).
+    ANCHOR_LOG_BOOTSTRAP: '1',
+  },
+) {
+  m.logLeaves ??= fakeModel([], { unique: [['_id'], ['day']] });
+  m.logCheckpoints ??= fakeModel([], { unique: [['_id']] });
+  let published: PublishedFetch = {
+    ok: false,
+    error: 'HTTP 404',
+    nothing: true,
+  };
+  const log = new AnchorLogService(
+    m.logLeaves as never,
+    m.logCheckpoints as never,
+    m.anchors as never,
+    { get: (key: string) => env[key] } as never,
+    () => Promise.resolve(published),
+  );
+  log.trustedRoots = [tsa.root];
+  const checkpoints = m.logCheckpoints;
+  // Once published, the owner removes the bootstrap flag and restarts (H1).
+  const offBootstrap = () => {
+    (log.settings as { bootstrap: boolean }).bootstrap = false;
+  };
+  return {
+    log,
+    publish(answer: PublishedFetch) {
+      published = answer;
+      if (answer.ok) offBootstrap();
+      log.refreshPublished();
+    },
+    publishLatest() {
+      const newest = [...checkpoints.docs].sort(
+        (a, b) => (b._id as number) - (a._id as number),
+      )[0];
+      published = { ok: true, note: newest.note as string };
+      offBootstrap();
+      log.refreshPublished();
+    },
+  };
 }

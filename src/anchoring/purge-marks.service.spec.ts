@@ -5,7 +5,14 @@ import { PurgeMarksService } from './purge-marks.service';
 import { AnchorVerifierService } from './anchor-verifier.service';
 import { purgeAfterOf } from '../member-data/member-data.constants';
 import { accountDeletedRows } from './account-deletion-record';
-import { buildTree, leafHash } from './merkle';
+import { buildTree, leafHash, MERKLE_SCHEME } from './merkle';
+import {
+  anchorLogFor,
+  type AnchorModels,
+  LOG_KEY,
+} from './anchoring-harness.mocks-spec';
+import { ANCHOR_LOG_ORIGIN } from './anchor-log-config';
+import { checkpointText, parseSigner, signNote } from './signed-note';
 import { makeTestTsa } from './test-tsa.mocks-spec';
 import * as rfc3161 from './rfc3161';
 import { redactionRow } from './redaction';
@@ -90,6 +97,9 @@ function anchorDoc(
     status: 'built',
     builtAt: sign instanceof Date ? sign : AT,
     leaves,
+    // As a finished build writes them (read by the anchor log, Chunk 16b).
+    scheme: MERKLE_SCHEME,
+    leafCount: leaves.length,
     ...(root ? { merkleRoot: root } : {}),
     ...(root && sign !== 'none'
       ? {
@@ -135,6 +145,7 @@ function marks({
   versions = [accepted],
   ownLeavesExtra = [],
   ownAnchor = {},
+  withLog = false,
 }: {
   pageMark?: 'purgedAt' | 'purgeStartedAt' | 'none';
   commentMark?: boolean;
@@ -183,6 +194,8 @@ function marks({
   ownLeavesExtra?: Array<{ leaf: string }>;
   /** Fields to overwrite on the redaction's own anchor (round 7, 3). */
   ownAnchor?: Record<string, unknown>;
+  /** With the anchor log (Chunk 16b); `logOf` reaches it. Anchors get day ids. */
+  withLog?: boolean;
 } = {}) {
   const record = redactionRow(version, writtenAt, recordAccount);
   const stored = { ...record, _id: storedId ?? record._id };
@@ -211,6 +224,48 @@ function marks({
       : deletion === 'missingPart'
         ? parts.slice(1)
         : parts;
+  const anchorsModel = fakeModel([
+    {
+      ...anchorDoc(
+        anchorId,
+        // A building anchor has no leaves yet: they are set with `built`.
+        redaction === 'unclaimed' || redaction === 'building' ? [] : own.leaves,
+        redactionSigned,
+        {
+          status: redaction === 'building' ? 'building' : 'built',
+        },
+      ),
+      ...(ownLeavesExtra.length > 0
+        ? { leaves: [...own.leaves, ...ownLeavesExtra] }
+        : {}),
+      ...ownAnchor,
+    },
+    anchorDoc(
+      deletionAnchorId,
+      deletionClaims.flatMap((c) => c.leaves),
+      deletionSigned,
+      {
+        status: deletion === 'building' ? 'building' : 'built',
+        ...deletionAnchor,
+      },
+    ),
+    ...history.map((h, i) => ({
+      ...anchorDoc(
+        withLog ? `2031-10-${10 + i}` : `hist-${i}`,
+        [
+          {
+            kind: 'comment',
+            versionId: stored._id,
+            versionHash: h.hash,
+            leaf: h.leaf ?? leafHash(h.hash, SALT),
+          },
+        ],
+        h.signed,
+      ),
+      ...h.extra,
+    })),
+    ...anchors,
+  ]);
   const service = new PurgeMarksService(
     fakeModel([
       {
@@ -245,50 +300,7 @@ function marks({
       ...(redaction === 'unclaimed' ? [] : [own.claim]),
       ...(deletion === 'unclaimed' ? [] : deletionClaims.map((c) => c.claim)),
     ]) as never,
-    fakeModel([
-      {
-        ...anchorDoc(
-          anchorId,
-          // A building anchor has no leaves yet: they are set with `built`.
-          redaction === 'unclaimed' || redaction === 'building'
-            ? []
-            : own.leaves,
-          redactionSigned,
-          {
-            status: redaction === 'building' ? 'building' : 'built',
-          },
-        ),
-        ...(ownLeavesExtra.length > 0
-          ? { leaves: [...own.leaves, ...ownLeavesExtra] }
-          : {}),
-        ...ownAnchor,
-      },
-      anchorDoc(
-        deletionAnchorId,
-        deletionClaims.flatMap((c) => c.leaves),
-        deletionSigned,
-        {
-          status: deletion === 'building' ? 'building' : 'built',
-          ...deletionAnchor,
-        },
-      ),
-      ...history.map((h, i) => ({
-        ...anchorDoc(
-          `hist-${i}`,
-          [
-            {
-              kind: 'comment',
-              versionId: stored._id,
-              versionHash: h.hash,
-              leaf: h.leaf ?? leafHash(h.hash, SALT),
-            },
-          ],
-          h.signed,
-        ),
-        ...h.extra,
-      })),
-      ...anchors,
-    ]) as never,
+    anchorsModel as never,
     // The deleted account; its purge ran at `runs` (round 4, #1).
     (withAccounts
       ? fakeModel([
@@ -312,8 +324,24 @@ function marks({
   );
   service.trustedRoots = [tsa.root];
   service.now = () => clock;
+  if (withLog) {
+    const logged = anchorLogFor(
+      { anchors: anchorsModel } as unknown as AnchorModels,
+      tsa,
+    );
+    logged.log.now = () => clock;
+    (service as unknown as { log: unknown }).log = logged.log;
+    logs.set(service, { ...logged, anchors: anchorsModel });
+  }
   return service;
 }
+
+const logs = new WeakMap<
+  PurgeMarksService,
+  ReturnType<typeof anchorLogFor> & { anchors: ReturnType<typeof fakeModel> }
+>();
+/** The anchor log of a `marks({ withLog: true })` service. */
+const logOf = (service: PurgeMarksService) => logs.get(service)!;
 
 describe('PurgeMarksService: content purges', () => {
   it('accepts a purged block version only on a page marked purged', async () => {
@@ -1631,5 +1659,199 @@ describe('PurgeMarksService: round 9', () => {
         clock: new Date(AT.getTime() + 41 * DAY),
       }).classify('block', accepted),
     ).toBe('suggester');
+  });
+});
+
+describe('PurgeMarksService and the anchor log (Chunk 16b)', () => {
+  // The Chunk 17 residual: a full-database writer deletes the honest
+  // anchor document outright and re-stamps a forged redaction with a fresh,
+  // genuine FreeTSA token. Nothing left in the database contradicts the
+  // forgery; only a copy of the log OUTSIDE the database can.
+  const tampered = { ...accepted, text: 'Words the owner never accepted' };
+  const honest = redactionRow(accepted, AT, ACCOUNT).hash;
+  // As in round 7's r7b: a fresh stamp within the one-year margin.
+  const FORGE = new Date(AT.getTime() + 200 * DAY);
+  const forged = {
+    version: tampered,
+    history: [{ hash: honest, signed: new Date(AT.getTime() + DAY) }],
+    redactionSigned: FORGE,
+    clock: new Date(FORGE.getTime() + DAY),
+    withLog: true,
+  };
+
+  /** Appends every anchor, signs, and publishes it, as the repository would. */
+  async function published(service: PurgeMarksService) {
+    const logged = logOf(service);
+    await logged.log.append(new Date(FORGE.getTime() + DAY));
+    logged.publishLatest();
+    service.beginCheck();
+  }
+
+  it('the attack without the log: deleting the honest holder lets the forgery read as proven', async () => {
+    const service = marks({ ...forged, withLog: false });
+    // The honest holder (`hist-0`) is gone; the database is self-consistent.
+    const anchors = (
+      service as unknown as { anchorModel: { docs: Array<{ _id: string }> } }
+    ).anchorModel;
+    anchors.docs.splice(
+      anchors.docs.findIndex((d) => d._id === 'hist-0'),
+      1,
+    );
+    service.beginCheck();
+    expect(await service.classify('block', tampered)).toBe('suggester');
+  });
+
+  it('FAILS the forgery once the honest holder was in the published log', async () => {
+    const service = marks(forged);
+    await published(service);
+    // Before the deletion the forgery is already caught (Chunk 17 round 7).
+    expect(await service.classify('block', tampered)).toBe('invalid');
+    // The writer deletes the honest anchor document outright.
+    const { anchors } = logOf(service);
+    anchors.docs.splice(
+      anchors.docs.findIndex((d) => d._id === '2031-10-10'),
+      1,
+    );
+    service.beginCheck();
+    expect(await service.classify('block', tampered)).toBe('invalid');
+  });
+
+  it('an honest purge reads as proven only once its anchors are in the published log', async () => {
+    const service = marks({ withLog: true });
+    // In this server's log, not published yet: pending, never proven.
+    await logOf(service).log.append(new Date(AT.getTime() + 2 * DAY));
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('suggester-pending');
+    logOf(service).publishLatest();
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('suggester');
+  });
+
+  it('cannot measure without a published log: pending, never proven', async () => {
+    const service = marks({ withLog: true });
+    const { log } = logOf(service);
+    await log.append(new Date(AT.getTime() + 2 * DAY));
+    logOf(service).publish({ ok: false, error: 'HTTP 503' });
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('suggester-pending');
+  });
+
+  it('FAILS an honest-looking row when the log it was published in was rewritten', async () => {
+    const service = marks({ withLog: true });
+    await published(service);
+    // Honest data; only the published head disagrees (a fork), so only the
+    // log can see it.
+    logOf(service).publish({
+      ok: true,
+      note: signNote(
+        checkpointText(ANCHOR_LOG_ORIGIN, 3, Buffer.alloc(32, 5)),
+        parseSigner(LOG_KEY.privateKey),
+      ),
+    });
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('invalid');
+  });
+});
+
+describe('PurgeMarksService: a second holder the log disowns (Chunk 16b)', () => {
+  const honest = redactionRow(accepted, AT, ACCOUNT).hash;
+  // Same hash, signed after the claimed anchor: round 7's rules accept it.
+  const history = [
+    { hash: honest, signed: new Date(AT.getTime() + 1.5 * DAY) },
+  ];
+  const clock = new Date(AT.getTime() + 4 * DAY);
+
+  it('the control: without the log, such a holder is accepted', async () => {
+    expect(await marks({ history, clock }).classify('block', accepted)).toBe(
+      'suggester',
+    );
+  });
+
+  it('FAILS a holder that no longer matches its own (unpublished) log entry', async () => {
+    const service = marks({ history, clock, withLog: true });
+    const logged = logOf(service);
+    const { anchors, log } = logged;
+    const at = anchors.docs.findIndex((d) => d._id === '2031-10-10');
+    const [holder] = anchors.docs.splice(at, 1);
+    await log.append(new Date(AT.getTime() + 3 * DAY));
+    logged.publishLatest();
+    // Appended after the publication: in the log's unpublished tail.
+    anchors.docs.push(holder);
+    await log.append(new Date(AT.getTime() + 3 * DAY));
+    // A count the round 7 checks never read, but its log entry binds.
+    holder.leafCount = 9;
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('invalid');
+  });
+});
+
+describe('PurgeMarksService: a deletion record whose anchor the log disowns (Chunk 16b)', () => {
+  it('FAILS, where an unchecked day would only read pending', async () => {
+    const service = marks({
+      withLog: true,
+      clock: new Date(AT.getTime() + 4 * DAY),
+    });
+    const logged = logOf(service);
+    const { anchors, log } = logged;
+    // The deletion record's anchor enters the log after the publication.
+    const at = anchors.docs.findIndex((d) => d._id === '2026-11-15');
+    const [deletionAnchor] = anchors.docs.splice(at, 1);
+    await log.append(new Date(AT.getTime() + 3 * DAY));
+    logged.publishLatest();
+    anchors.docs.push(deletionAnchor);
+    await log.append(new Date(AT.getTime() + 3 * DAY));
+    // Then its row no longer gives its log entry (a count the other
+    // checks never read).
+    deletionAnchor.leafCount = 9;
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('invalid');
+  });
+});
+
+describe('PurgeMarksService: review 1, L3, a holder hidden by its versionId', () => {
+  // The writer leaves the honest anchor in place (its status, root and
+  // count still give its published log entry) but rewrites the versionId of
+  // the redaction's entry in its leaves, keeping the leaf value, so no
+  // lookup by version id finds it; then re-stamps a forged redaction.
+  const tampered = { ...accepted, text: 'Words the owner never accepted' };
+  const honest = redactionRow(accepted, AT, ACCOUNT).hash;
+  const FORGE = new Date(AT.getTime() + 200 * DAY);
+
+  it('L3: FAILS once the hidden holder was published', async () => {
+    const service = marks({
+      version: tampered,
+      history: [{ hash: honest, signed: new Date(AT.getTime() + DAY) }],
+      redactionSigned: FORGE,
+      clock: new Date(FORGE.getTime() + DAY),
+      withLog: true,
+    });
+    const logged = logOf(service);
+    await logged.log.append(new Date(FORGE.getTime() + DAY));
+    logged.publishLatest();
+    const holder = logged.anchors.docs.find((d) => d._id === '2031-10-10')!;
+    (holder.leaves as Array<{ versionId: unknown }>)[0].versionId =
+      new Types.ObjectId();
+    // Caught at the next leaf-set audit (review round 2, M2): this holder is
+    // read by no check, so no per-request check can see it.
+    await logged.log.refreshAudit();
+    service.beginCheck();
+    expect(await service.classify('block', tampered)).toBe('invalid');
+  });
+});
+
+describe('PurgeMarksService: review 2, M2, the leaves a check reads are checked at once', () => {
+  it('M2: a claimed anchor whose leaf list was rewritten after the audit FAILS without waiting for the next one', async () => {
+    const service = marks({ withLog: true });
+    const logged = logOf(service);
+    await logged.log.append(new Date(AT.getTime() + 2 * DAY));
+    logged.publishLatest();
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('suggester');
+    // The redaction's own anchor: one leaf's version id rewritten, root kept.
+    const own = logged.anchors.docs.find((d) => d._id === '2031-11-15')!;
+    (own.leaves as Array<{ versionId: unknown }>)[0].versionId =
+      new Types.ObjectId();
+    service.beginCheck();
+    expect(await service.classify('block', accepted)).toBe('invalid');
   });
 });

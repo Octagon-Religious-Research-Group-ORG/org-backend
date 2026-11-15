@@ -164,6 +164,18 @@ export const envValidationSchema = Joi.object({
   OTS_CALENDARS: Joi.string()
     .custom(requireHttpsList)
     .default(DEFAULT_OTS_CALENDARS.join(',')),
+  // The daily anchor log (Chunk 16b), all optional: without the signing key
+  // the log is kept but unsigned, and every check says so. Keys are read by
+  // the anchoring code, never echoed (a bad one is reported by name only).
+  ANCHOR_LOG_SIGNING_KEY: Joi.string().allow('').optional(),
+  ANCHOR_LOG_VERIFIER_KEY: Joi.string().allow('').optional(),
+  // 1 only until the first publication (Chunk 16b review round 2, H1).
+  ANCHOR_LOG_BOOTSTRAP: Joi.string().valid('', '0', '1').optional(),
+  ANCHOR_LOG_ORIGIN: Joi.string().allow('').optional(),
+  ANCHOR_LOG_PUBLISHED_URL: Joi.string()
+    .uri({ scheme: ['https'] })
+    .allow('')
+    .optional(),
   ANCHOR_HTTP_TIMEOUT_MS: Joi.number()
     .integer()
     .min(1_000)

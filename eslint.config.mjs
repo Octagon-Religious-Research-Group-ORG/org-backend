@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['eslint.config.mjs'],
+    ignores: ['eslint.config.mjs', 'coverage/**', 'dist/**'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
@@ -31,5 +31,16 @@ export default tseslint.config(
       '@typescript-eslint/no-unsafe-argument': 'warn',
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
+  },
+  // The owner's plain-JavaScript scripts (scripts/*.mjs) are not in the
+  // TypeScript project: linted without type information, as ES modules
+  // (review round 3, L5), so `npx eslint .` parses every file it reaches.
+  {
+    files: ['scripts/**/*.mjs'],
+    ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: { sourceType: 'module' },
   },
 );

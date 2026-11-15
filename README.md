@@ -474,7 +474,8 @@ visitor.
 
 **Indexes to create before production** (`npm run db:indexes`):
 `timestampanchors` `{tsa.status: 1}`, `{ots.status: 1}`; `anchorleaves`
-`{anchorId: 1}`, `{versionId: 1}`. The `_id` of each is its key. The
+`{anchorId: 1}`, `{versionId: 1}`. Chunk 16b adds `anchorlogleaves` `{day: 1}` (unique)
+and the `anchorlogcheckpoints` collection. The `_id` of each is its key. The
 `blockversions.createdAt` and `commentversions.createdAt` indexes already
 exist (Chunks 3 and 9).
 
@@ -491,6 +492,342 @@ exist (Chunks 3 and 9).
 Upgrades are fetched only from calendars on the reference client's whitelist
 (`*.calendar.opentimestamps.org`, `*.calendar.eternitywall.com`,
 `*.calendar.catallaxy.com`, https, no port), whatever a calendar answered.
+
+## Anchor log (Chunk 16b)
+
+Each daily anchor stands alone, and every anchor lives in the same database
+as the content it vouches for. So a writer with full database access could
+delete an honest day and re-stamp a forged one, and nothing left in the
+database would contradict it (the Chunk 17 residual). The anchor log closes
+that the way Certificate Transparency (RFC 9162), Go's checksum database and
+Sigsum do: one append-only Merkle log, signed checkpoints, and a copy of the
+latest checkpoint kept OUTSIDE this server, against which everything is
+checked.
+
+### What it is
+
+- **One leaf per finished day**, in the order the days finished: the leaf is
+  SHA-256(0x00 ‖ the canonical day record) and nodes are SHA-256(0x01 ‖ L ‖
+  R), the RFC 6962 tree (`src/anchoring/tlog.ts`, inclusion and consistency
+  proofs from RFC 9162 §2.1.3–2.1.4, tested against the RFC 6962 vectors of
+  Google's Go library `transparency-dev/merkle`). The day trees of Chunk 16
+  are unchanged.
+- **The day record** (`src/anchoring/day-record.ts`, `org-anchor-day-v2`)
+  holds only hashes, counts and a time, never text or ids:
+
+  ```
+  org-anchor-day-v2
+  day 2026-11-14
+  tree org-anchor-merkle-v2
+  root <the day's Merkle root, hex>
+  leaves <how many versions>
+  leafset <SHA-256 of the day's whole leaf list, hex>
+  appended <when this server appended it>
+  ```
+
+  An empty day is `tree none`, `root none`, `leaves 0`, `leafset none`.
+  The tree scheme's version has at most three digits and the root is 64 hex
+  digits (review round 3, L4): an anchor with anything else is never
+  recorded, and the leaf-set audit reports it as unreadable.
+  - `leafset` (review round 1, L3) is SHA-256 over the sorted lines
+    `kind versionId versionHash leaf` of the anchor's stored leaves. The day
+    root covers only the salted leaf values, so without it a writer could
+    rewrite a leaf's version id behind an unchanged root: the honest holder
+    of a redaction then hides from every lookup by version id, and a
+    re-stamped forgery read as proven (measured: `purge-marks.service.spec.ts`,
+    "L3"). The ids are inside a hash, never published.
+  - `appended` is the server's clock when the day entered the log.
+- **Checkpoints** are C2SP checkpoints (`c2sp.org/tlog-checkpoint`), origin
+  `orgspirituality.org/anchors/v1` (or `ANCHOR_LOG_ORIGIN` after a key
+  rotation), signed as C2SP signed notes with Ed25519 (node:crypto, no new
+  dependency). Keys are in Go's `sumdb/note` formats.
+- **When it signs.** A run appends every finished day not yet in the log,
+  then signs the new size ONLY when all of these hold:
+  - its copy still gives the newest checkpoint it signed (kept in
+    `anchorlogcheckpoints`, verified with the key) and the one it signed
+    earlier in this process;
+  - `ANCHOR_LOG_PUBLISHED_URL` is set, and the published checkpoint was read
+    and its copy gives it, and `ANCHOR_LOG_BOOTSTRAP` is NOT set;
+  - **or**, for the very first checkpoint only, `ANCHOR_LOG_BOOTSTRAP=1` is
+    set, the publication answered 404 (nothing published yet), and this
+    server has never signed a checkpoint itself: no row in
+    `anchorlogcheckpoints` and none signed by this process (review
+    round 3, L1). Once it has signed one, a 404 is `published-missing`
+    even with the flag on: publish, then remove the flag.
+  - Anything else appends but signs nothing, with a structured reason in
+    the run report (`signing: { state: 'blocked', reason }`) and an error in
+    the log: `no-key`, `no-url`, `published-unreadable` (a timeout, a 5xx),
+    `published-missing` (a 404 without the flag), `bootstrap-on` (the flag
+    still set although a checkpoint is published), `inconsistent`.
+  - Why a 404 is not "nothing published" (review round 2, H1): GitHub's raw
+    host answers 404 for a missing file AND for a missing or renamed
+    repository, so an attacker holding the database and the ORG's GitHub,
+    or an honest misconfiguration, could make the head "vanish" and get a
+    fork signed. Only the owner, in the server's environment, can say
+    "nothing is published yet". And a flag left on once something is
+    published blocks signing, so a forgotten flag cannot reopen the hole.
+  - Review round 1, M1: a writer who rewrote the cache and deleted the
+    stored checkpoints, a restart, and one 503 from GitHub used to be
+    enough to sign a fork. Without a published URL it never signs: the
+    stored checkpoints are in the same database a writer controls.
+- **Mongo is only a cache.** `anchorlogleaves` (`_id` = index, `day`
+  unique) and `anchorlogcheckpoints` (`_id` = size) are append-only. Each
+  anchoring run, inside its run lock, appends and signs before asking
+  FreeTSA for the day's stamp. A second appender gets a duplicate key and
+  stops; the next run carries on. A log failure is reported in the run's
+  report and never stops the anchoring.
+- **Publication by pull.** A public repository fetches the checkpoint once
+  a day, checks the signature, a consistency proof, and every new day
+  record against the signed root, then commits the checkpoint AND the
+  records, and OpenTimestamps-stamps it. The server holds no credential
+  for it. With the records the repository alone can rebuild and audit the
+  whole log, and restore this server's cache (Recovery).
+
+### Endpoints (public, read-only, 20 a minute per visitor)
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/anchors/checkpoint` | the newest signed checkpoint, `text/plain`, exactly the C2SP note; **503** with the reasons when none is signed |
+| `GET /api/v1/anchors/log` | origin, public key, sizes (this server's, signed, published), the check against the published head, and `startup`: whether the run this start made is `running` or `done` |
+| `GET /api/v1/anchors/entries?from=M&to=N` | the day records of entries M..N-1, at most 100 a page (a full page of the widest records is under 32 KB, half the publication job's answer cap; review round 2, M3) |
+| `GET /api/v1/anchors/proof/inclusion?day=YYYY-MM-DD[&size=N]` | the day's record, index, leaf hash, audit path and root (base64), in the tree of `N` entries (default: all) |
+| `GET /api/v1/anchors/proof/consistency?from=M&to=N` | the RFC 9162 consistency proof, `1 ≤ M ≤ N` |
+
+Sizes are bounded at 1,000,000; a 409 means this server's copy does not
+hold together and nothing is given from it (the publication job treats it
+as REFUSED).
+
+### How the checks use it
+
+The trust anchors are the log's **public key** (`ANCHOR_LOG_VERIFIER_KEY`,
+or derived from the signing key) and the latest **published** checkpoint
+(`ANCHOR_LOG_PUBLISHED_URL`, read at most every 5 minutes, failures retried
+after 1). Every check (admin health view, each anchor's report, receipts,
+the purge marks of Chunk 17) asks where an anchor's day stands:
+
+- Every answer carries a structured `state` (`published`, `pending`,
+  `failed`, `cannot-measure`) and a `reason` code; pages decide from those,
+  never from the detail text (review round 2, L3). The admin page shows
+  `published-missing` and `bootstrap-on` as alerts, and a warning
+  whenever `ANCHOR_LOG_BOOTSTRAP` is set (`bootstrap` in the health
+  view's log summary and in `GET /anchors/log`, review round 3, L1).
+- **published** (pass): its entry is inside the published head, this
+  server's copy still gives the published root, the anchor row still gives
+  the entry's day, tree, root and count, and the latest leaf-set audit
+  found its whole leaf list unchanged. A day appended
+  more than a week after its own date is still published, and its detail
+  says "appended N days after its day" (review round 1, L2).
+- **pending publication** (cannot measure): in this server's log after the
+  published head, or finished and not yet appended.
+- **fail**, when an anchor is missing from the log although the log holds,
+  published, a day appended more than a day after that anchor's signed
+  FreeTSA time: an honest run appends a day before stamping it, so this
+  row did not come through an append before that publication.
+- **fail**, and if ANY published day fails (its anchor deleted, re-rooted,
+  relabelled, recounted, or its leaf list changed; entries removed; the
+  copy rewritten; a checkpoint signed by another key, a bad signature, a
+  fork), **every day fails**: a hidden honest day can back a forgery
+  anywhere.
+- **cannot measure** without a public key, without a published location,
+  or when it cannot be read. Never a pass.
+
+What the log proves, stated exactly (review round 1, L2): the ORDER in which
+days entered it and each entry's `appended` time, from the moment that
+entry is published. It does NOT prove that a day's activity happened on the
+date in its id: a writer who plants an anchor under an unused, valid old
+day id before the next run has it appended by the server itself, and it
+then reads as published (with the "appended N days after its day" flag).
+What it cannot do is hide or replace a day already published.
+
+Purge marks (Chunk 17): an anchor gives a signed time only once its day is
+published; before that the row is pending. So the residual "delete an
+honest anchor document (or hide it by rewriting its leaves) and re-stamp a
+forgery" now FAILS for any day at or before the published head. Receipts
+carry `day-record.txt`, `checkpoint.txt` and step 6 (one `openssl` command
+per hashing step, ending at the checkpoint's root), and tell the reader to
+check the checkpoint with the key in the repository's `log.vkey` or the one
+shipped in the website, never a key the receipt itself carries. A failing
+log makes a receipt "could not be confirmed". The per-anchor log check is
+reported beside the four Chunk 16 checks, not folded into `lastCheck`, so
+the claim sweep keeps its rules.
+
+**The leaf-set audit (review round 2, M2).** Catching a leaf list rewritten
+behind an unchanged root means reading every anchored leaf (about 213 MB
+and 1.7 s for a million leaves, measured by the reviewer). So it is not
+done per request:
+
+- each anchoring run audits every leaf list, a few anchors at a time
+  (memory: one batch of leaf lists, plus one 64-character hash per day);
+- a check whose audit is older than 2 hours starts a new one, at most once
+  every 10 minutes whatever the traffic, and a burst shares one;
+- with no fresh audit (or one that does not cover a published day yet),
+  those days and the whole log check read **cannot measure**, never pass;
+- a check that reads an anchor's leaves itself, fresh, on every request
+  (the admin health view, the purge marks) compares them with the day's
+  record at once.
+- A **receipt** does not: it reads an anchor's leaves once and keeps the
+  result, keyed by the anchor's root and proofs, not its leaves (re-reading
+  every leaf list per receipt is the cost this cache exists to avoid). So
+  for receipts a rewritten leaf list falls under the audit window like any
+  other check (review round 3, L3; pinned by `receipt.log.spec.ts`, "L3
+  (review 3)").
+
+So a leaf list rewritten behind an unchanged root is caught at once by the
+admin health view and the purge marks of that anchor, and everywhere else
+(receipts included) at the next audit: within the next anchoring run
+(hourly while the server is awake) or 2 hours. The
+health view and `GET /anchors/log` show the audit's time (`auditedAt`).
+
+### Threat model
+
+Closed: a writer with full access to the database (not to the server's
+environment, not to the ORG's GitHub) can no longer delete, rewrite, hide or
+re-stamp any day at or before the published head without every check
+failing (a rewritten leaf list behind an unchanged root: by the next
+leaf-set audit, see above), and can no longer get a checkpoint signed that
+forks from the published one. Neither can someone who ALSO holds the ORG's
+GitHub but not the server's environment: making the published head vanish
+(a 404) stops all signing instead of opening it (review round 2, H1). Only
+the owner's `ANCHOR_LOG_BOOTSTRAP` turns a 404 into "nothing published
+yet", and only while this server has no checkpoint stored and has signed
+none since it started (review round 3, L1).
+
+What remains, stated plainly:
+
+- **The unpublished tail.** Days appended since the last publication are
+  protected only by this server's own records: a database writer who
+  rewrites those entries AND deletes the checkpoints signed over them
+  before the next publication is not caught (the in-memory copy of the
+  last checkpoint catches it until a restart). How long that tail is: the
+  daily job wakes the server and waits for the run that start makes (it
+  builds the day and signs it) before fetching, up to 4 minutes (review
+  round 1, L1), so a day built by that wake is published within minutes;
+  a day built earlier the same day (the server was already awake at 03:00
+  UTC) waits until the 07:17 UTC job, about 4 hours. If that run is slower
+  than the wait, or fails, its day waits a full day for the next job.
+- **Server and GitHub together.** An attacker holding the signing key (the
+  server's environment) and the ORG's GitHub can publish a rewritten log
+  before the next daily publication. Even then the OpenTimestamps stamps of
+  earlier checkpoints and anyone's clone of the repository expose it
+  afterwards.
+- **The bootstrap window.** While `ANCHOR_LOG_BOOTSTRAP=1` is set, the first
+  checkpoint is signed with no published head to check against: whatever
+  the database holds then becomes the start of the log. After that, with
+  the flag still on, a 404 signs nothing (L1), and a published head blocks
+  signing until the flag is removed. **What is left:** if the owner leaves
+  the flag on after the first publication, an attacker who holds the ORG's
+  GitHub (to make `latest.txt` 404) AND the database (to delete every row
+  of `anchorlogcheckpoints` and rewrite the log), and who strikes after a
+  server restart (so the process holds no memory of signing), gets a fork
+  signed. The admin page shows a warning for as long as the flag is set;
+  the fork would still contradict the repository's history and its
+  OpenTimestamps stamps. Remove the flag right after the first publication.
+- **Planted days** under unused valid day ids before the next run (above).
+- **Publication stopping.** If the daily publication stops (GitHub disables
+  scheduled workflows after 60 days with no repository activity; the daily
+  commit should count as activity, NOT YET VERIFIED live), new days stay
+  "pending publication" for good: honest, never a pass.
+- No independent witness yet (c2sp.org/tlog-witness): the publication
+  repository is the one outside copy.
+
+### Recovery (review round 1, M2b)
+
+If the anchor log's cache is lost or behind (the database restored from a
+backup older than the last publication), rebuild it from a clone of the
+publication repository:
+
+```
+git clone <the publication repository> /tmp/anchors
+npm run build
+MONGODB_URI=… ANCHOR_LOG_VERIFIER_KEY=<the key shipped in the website> \
+  npm run anchor-log:restore -- /tmp/anchors --dry-run
+MONGODB_URI=… ANCHOR_LOG_VERIFIER_KEY=… \
+  npm run anchor-log:restore -- /tmp/anchors --confirm <database>
+```
+
+**Stop the server first.** The restore takes the anchoring run lock and
+refuses while a run holds it (review round 2, L2).
+
+It writes nothing unless the repository's `latest.txt` is signed by that key
+(the repository's own `log.vkey` must be the same key) and its `entries/`
+reproduce the checkpoint's root exactly. Then it inserts only the missing
+entries and the published checkpoint; a cached entry that differs stops it
+(back the database up, look, and drop `anchorlogleaves` by hand). Exit 0
+done, 1 refused, 2 usage, 3 cannot measure.
+
+After an honest restore from an older backup, the anchors of the days
+between the backup and the last publication are gone, so those days FAIL
+("in the published log but missing here"). That is the truth: they were
+published, and the database lost them. Restore those anchors from a later
+backup if one exists. If none does, the loss is permanent and every check
+keeps failing: that is an operator decision for the owner, not a switch.
+The way forward is a key rotation (below): a new log over what the
+database still holds, with the old log frozen as the evidence of what was
+lost. There is deliberately no "acknowledge the loss" setting: a database
+writer could flip it.
+
+### Key rotation (review round 1, M2c)
+
+A key is never replaced inside a log: C2SP checkpoints are bound to their
+origin and key. A rotation starts a NEW log and freezes the old one:
+
+1. Check the old log passes (`/admin/anchors`, Anchor log), and let its
+   job publish once more. Then switch its workflow off: v1 is frozen, its
+   repository stays public, read-only.
+2. Make the new key: `node scripts/anchor-log-keygen.mjs --origin
+   orgspirituality.org/anchors/v2 <a new file>`.
+3. Back the database up, then drop `anchorlogleaves` and
+   `anchorlogcheckpoints` by hand (they are append-only to the app).
+4. On Render: `ANCHOR_LOG_ORIGIN=orgspirituality.org/anchors/v2`, the new
+   `ANCHOR_LOG_SIGNING_KEY` and `ANCHOR_LOG_VERIFIER_KEY`, and
+   `ANCHOR_LOG_PUBLISHED_URL` pointing at a new repository for v2 (its
+   `log.json` names v2, its `log.vkey` the new key). The next run appends
+   every finished day again, in order, under v2.
+5. The v2 repository refuses to publish unless v2 keeps v1 (review round
+   2, M4): copy v1's frozen `latest.txt` and `entries/` into the v2
+   repository's `previous/`, and pin v1 in its `log.json`:
+   `"previous": { "origin": "orgspirituality.org/anchors/v1", "vkey": "<v1 key>", "size": <v1 size>, "root": "<v1 root, base64>" }`.
+   Every publication then checks that the vendored v1 is exactly the
+   pinned one, signed by the v1 key, and that every v1 day is in v2 with
+   the same tree, root, count and leaf set (only `appended` is new);
+   otherwise it is REFUSED. `node compare-logs.mjs <v1 clone> <v2 clone>`
+   does the same by hand. So the rebuild from the database is re-trusted
+   only for days v1 never published. A log's first append is not flagged
+   "late": it takes in all of history by construction.
+6. Ship the new key and origin in the website (`src/lib/anchor-log.ts`) in
+   a commit, so the change is visible in its history.
+
+The server checks only the current log; the frozen v1 repository keeps
+proving the old days to anyone, offline, with step 5's script.
+
+### Owner steps
+
+1. **Make the key on your own machine:**
+   `node scripts/anchor-log-keygen.mjs <path to a new file>`. It writes the
+   private key to that file (refusing to overwrite one) and prints only the
+   public key. Put the file's one line in Render as `ANCHOR_LOG_SIGNING_KEY`,
+   keep a copy in your password manager, then delete the file (on Windows
+   the file is readable by your account and administrators; there are no
+   POSIX permissions).
+2. **Create the public repository** (e.g. `org-anchor-checkpoints`) from the
+   staged files, put the public key in its `log.vkey` and the API address in
+   `log.json`, and add the workflow file `.github/workflows/publish.yml`
+   yourself.
+3. **Set on Render, together:** `ANCHOR_LOG_SIGNING_KEY`,
+   `ANCHOR_LOG_VERIFIER_KEY` (the printed public key),
+   `ANCHOR_LOG_PUBLISHED_URL` (the raw URL of `latest.txt` in the
+   repository) and, for the first publication only, `ANCHOR_LOG_BOOTSTRAP=1`.
+   Nothing is signed until the URL is set, and a 404 is "nothing published
+   yet" only while the flag is set.
+4. **After the first publication, remove `ANCHOR_LOG_BOOTSTRAP`.** While it
+   is set, the admin page shows a warning; once a checkpoint is published,
+   nothing is signed until it is removed. Publish the first checkpoint
+   before the next anchoring run: until then, with the flag on, that run
+   appends but signs nothing (`published-missing`).
+5. `npm run db:indexes`: `anchorlogleaves {day}` (unique) and the
+   `anchorlogcheckpoints` collection.
+6. Run the workflow once by hand; ship the public key in the website
+   (`src/lib/anchor-log.ts`).
 
 ## Data export and page deletion (Chunk 17)
 
@@ -669,9 +1006,11 @@ rescan or resume point counts, or a rescan point released after that build
   check: the row reads "cannot measure". The anchor health view FAILS a
   rewritten anchor (its root no longer matches its token); a deleted one
   shows only if other versions it held are left unanchored, which a writer
-  can also hide. Closing it needs each daily root to commit to
-  the previous one, a change to Chunk 16's anchor format that is an owner
-  decision.
+  can also hide. **Closed by the anchor log (Chunk 16b) for every day at or
+  before the published head**: deleting or rewriting a published day's anchor
+  FAILS every check, and an anchor gives a signed time only once its day is
+  published. Still open: the unpublished tail (see "Anchor log", Threat
+  model).
 
 In the anchor health view, an anchor marked `empty` that still holds
 leaves, a root, a TSA token or an OTS proof FAILS every check: an honest

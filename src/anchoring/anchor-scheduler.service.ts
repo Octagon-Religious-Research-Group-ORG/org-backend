@@ -10,6 +10,16 @@ import { AnchoringService, type RunReport } from './anchoring.service';
 export const ANCHOR_TICK_MS = 60 * 60_000;
 
 /**
+ * The run every start makes (review round 1, L1). The publication job wakes
+ * the sleeping server, then waits for this before it fetches the
+ * checkpoint, so the day that run builds and signs is published the same
+ * morning instead of the next. `done` whether the run succeeded or failed.
+ */
+export type StartupRun =
+  | { state: 'not-started' | 'off' | 'running' }
+  | { state: 'done'; finishedAt: string };
+
+/**
  * Runs the daily anchor without an external scheduler (Chunk 16), like the
  * email digest (Chunk 14): once when the server starts, because Render's
  * free instance sleeps and every wake must catch up, then hourly. The timer
@@ -27,6 +37,7 @@ export class AnchorScheduler
   private readonly logger = new Logger(AnchorScheduler.name);
   private timer?: ReturnType<typeof setInterval>;
   private chain: Promise<unknown> = Promise.resolve();
+  private started?: StartupRun;
 
   constructor(private readonly anchoring: AnchoringService) {}
 
@@ -35,11 +46,20 @@ export class AnchorScheduler
       this.logger.warn(
         'Timestamp anchoring is off (ANCHORING_ENABLED=false): no version is anchored.',
       );
+      this.started = { state: 'off' };
       return;
     }
     this.timer = setInterval(() => void this.tick(), ANCHOR_TICK_MS);
     this.timer.unref();
-    void this.tick();
+    this.started = { state: 'running' };
+    void this.tick().then(() => {
+      this.started = { state: 'done', finishedAt: new Date().toISOString() };
+    });
+  }
+
+  /** Where the start-up run stands (`GET /anchors/log`). */
+  startup(): StartupRun {
+    return this.started ?? { state: 'not-started' };
   }
 
   onModuleDestroy() {

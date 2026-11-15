@@ -1,6 +1,9 @@
 import { strToU8, zipSync } from 'fflate';
 import type { Check, VersionProof } from './anchor-verifier.service';
 import { FREETSA_ROOT_PEM, FREETSA_TSA_PEM } from './freetsa-certs';
+import { dayRecordHash } from './day-record';
+import { parseCheckpoint } from './signed-note';
+import { inclusionSteps } from './tlog';
 import { nodeHash } from './merkle';
 import type { AnchoredKind } from './schemas/anchor-leaf.schema';
 import { canonicalOf, type VersionRecord } from './version-records';
@@ -109,7 +112,9 @@ function failedCheck(version: ReceiptVersion): boolean {
   return (
     version.anchor.state === 'anchored' &&
     (version.anchor.serverChecks.hash.outcome === 'fail' ||
-      version.anchor.serverChecks.path.outcome === 'fail')
+      version.anchor.serverChecks.path.outcome === 'fail' ||
+      // The anchor log does not hold (Chunk 16b): the anchor may be forged.
+      version.anchor.serverChecks.log.outcome === 'fail')
   );
 }
 
@@ -261,7 +266,21 @@ export interface ReceiptVersion {
           proofBase64?: string;
         };
         /** What this server found when it checked, each on its own. */
-        serverChecks: Record<'hash' | 'path' | 'tsa' | 'ots', Check>;
+        serverChecks: Record<'hash' | 'path' | 'tsa' | 'ots' | 'log', Check>;
+        /**
+         * The day's place in the PUBLISHED anchor log (Chunk 16b): its
+         * record (`day-record.txt`), its inclusion proof (base64 hashes)
+         * and the signed checkpoint it is proven in (`checkpoint.txt`).
+         * Absent while the day is not published.
+         */
+        log?: {
+          index: number;
+          size: number;
+          record: string;
+          proof: string[];
+          checkpoint: string;
+          verifierKey?: string;
+        };
       };
 }
 
@@ -406,6 +425,7 @@ function versionOf(
               : {}),
           },
           serverChecks: proof.checks,
+          ...(proof.log ? { log: proof.log } : {}),
         }
       : { state: 'pending', message: PENDING_MESSAGE },
   };
@@ -469,7 +489,55 @@ function stepsFor(version: ReceiptVersion, folder: string): string[] {
         }: \`ots verify -d ${a.root} ${folder}/anchor.ots\` (the ots client from https://opentimestamps.org). While the proof is pending, \`ots upgrade ${folder}/anchor.ots\` fetches its Bitcoin part once the calendars have it. Without a Bitcoin node: \`ots info ${folder}/anchor.ots\` prints "BitcoinBlockHeaderAttestation(<height>)" then "# Bitcoin block merkle root <root>"; look the block height up on any public block explorer (e.g. https://blockstream.info/block-height/<height>) and check that its Merkle root is the same.`
       : '5. OpenTimestamps: no proof yet (it will be tried again on the next run).',
   );
+  lines.push(...logSteps(a, folder));
   return lines;
+}
+
+/** Step 6: the day in the published anchor log (Chunk 16b). */
+function logSteps(
+  a: Extract<ReceiptVersion['anchor'], { state: 'anchored' }>,
+  folder: string,
+): string[] {
+  const check = a.serverChecks.log;
+  if (!a.log) {
+    return [
+      check.outcome === 'fail'
+        ? `6. Anchor log: this server's check failed: ${check.detail}. Do not rely on this receipt; tell an ORG admin.`
+        : `6. Anchor log: not in the published log yet (${check.detail}). Download the receipt again after the next daily publication.`,
+    ];
+  }
+  const log = a.log;
+  const leaf = dayRecordHash(log.record);
+  const checkpoint = parseCheckpointNote(log.checkpoint);
+  const lines = [
+    `6. Anchor log: this anchor's day is entry ${log.index} of the ${log.size}-entry log in the signed checkpoint ${folder}/checkpoint.txt (origin ${checkpoint?.origin ?? 'unreadable'}). Its record ${folder}/day-record.txt must name this root (${a.root}). Leaf: \`(printf '00' | xxd -r -p; cat ${folder}/day-record.txt) | openssl dgst -sha256\` must print ${leaf.toString('hex')}.`,
+  ];
+  inclusionSteps(
+    log.index,
+    log.size,
+    leaf,
+    log.proof.map((hash) => Buffer.from(hash, 'base64')),
+  ).forEach((step, index) => {
+    lines.push(
+      `6.${index + 1}. \`printf '01${step.left.toString('hex')}${step.right.toString('hex')}' | xxd -r -p | openssl dgst -sha256\` must print ${step.result.toString('hex')}.`,
+    );
+  });
+  lines.push(
+    `   The last value (or the leaf, for a one-entry log) must be the checkpoint's root ${checkpoint?.root ?? 'unreadable'}: its third line, base64 (\`sed -n 3p ${folder}/checkpoint.txt | base64 -d | xxd -p -c 32\`).`,
+    `   The checkpoint is a C2SP signed note (c2sp.org/tlog-checkpoint). Check its signature with any signed-note tool and the log's public key, taken from OUTSIDE this receipt: the file log.vkey in ORG's public checkpoint repository, or the key shipped in the ORG website (a key this server handed you would prove nothing). Then check that the same checkpoint, or a later one consistent with it, is in that repository: that copy is outside this server.`,
+  );
+  return lines;
+}
+
+/** The checkpoint's root (hex) and origin, from its note text. */
+function parseCheckpointNote(
+  note: string,
+): { root: string; origin: string } | undefined {
+  const body = note.slice(0, note.lastIndexOf('\n\n') + 1);
+  const parsed = parseCheckpoint(body);
+  return parsed
+    ? { root: parsed.root.toString('hex'), origin: parsed.origin }
+    : undefined;
 }
 
 /** Builds the receipt for one history entry (one or several versions). */
@@ -556,6 +624,12 @@ export function receiptZip(receipt: Receipt): Uint8Array {
         files[`${folder}/anchor.ots`] = Buffer.from(
           version.anchor.opentimestamps.proofBase64,
           'base64',
+        );
+      }
+      if (version.anchor.log) {
+        files[`${folder}/day-record.txt`] = strToU8(version.anchor.log.record);
+        files[`${folder}/checkpoint.txt`] = strToU8(
+          version.anchor.log.checkpoint,
         );
       }
     }

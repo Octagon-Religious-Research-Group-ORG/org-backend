@@ -46,6 +46,8 @@ import {
   parseAccountDeleted,
 } from './account-deletion-record';
 import { SWEEP_DAYS } from './anchoring.service';
+import { AnchorLogService, type DayState } from './anchor-log.service';
+import { leafSetHash } from './day-record';
 import { asBytes } from './bytes';
 import { FREETSA_ROOT_PEM } from './freetsa-certs';
 import { buildTree, leafHash } from './merkle';
@@ -130,6 +132,8 @@ type AnchorHead = Pick<
 >;
 interface CheckedAnchor {
   entries: Map<string, AnchoredLeaf>;
+  /** Its leaves are not the list its anchor log entry records (M2). */
+  rewritten: boolean;
   signedAt: Date | undefined | 'mismatch';
 }
 
@@ -170,7 +174,18 @@ export class PurgeMarksService {
     @Optional()
     @InjectModel(BlockVersion.name)
     private readonly blockVersionModel?: Model<BlockVersionDocument>,
+    @Optional() private readonly log?: AnchorLogService,
   ) {}
+
+  /**
+   * An anchor's day in the anchor log (Chunk 16b), or undefined without the
+   * log (specs that predate it). With the log, an anchor proves a time only
+   * once its day is in the PUBLISHED log: before that it is unsigned, and a
+   * log that does not hold fails every anchor.
+   */
+  private async logState(anchorId: string): Promise<DayState | undefined> {
+    return this.log ? (await this.log.view()).day(anchorId) : undefined;
+  }
 
   /**
    * Did a completed anchor run miss a record written at `at` (round 3,
@@ -372,9 +387,18 @@ export class PurgeMarksService {
       .lean()
       .exec()) as Pick<TimestampAnchor, 'leaves'> | null;
     const leaves = stored?.leaves ?? [];
+    // The leaves this check reads must be the list the anchor log records
+    // for their day (review round 2, M2): checked here, at once, for the
+    // anchors this check needs; the audit covers the ones it never reads.
+    const record = this.log
+      ? (await this.log.view()).recordOf(head._id)
+      : undefined;
+    const rewritten =
+      record !== undefined && record.leafset !== leafSetHash(leaves);
     const checked: CheckedAnchor = {
       entries: new Map(leaves.map((leaf) => [String(leaf.versionId), leaf])),
-      signedAt: this.signedTime({ ...head, leaves }),
+      rewritten,
+      signedAt: rewritten ? 'mismatch' : this.signedTime({ ...head, leaves }),
     };
     if (this.anchorChecks.size >= this.anchorCacheSize) {
       const [oldest] = this.anchorChecks.keys();
@@ -420,6 +444,9 @@ export class PurgeMarksService {
       .exec()) as AnchorHead | null;
     if (anchor?.status !== 'built') return { state: 'pending' };
     const checked = await this.checkedAnchor(anchor);
+    // Leaves that no longer give the anchor's log entry: a mismatch before
+    // anything else, a missing entry included (round 2, M2).
+    if (checked.rewritten) return { state: 'mismatch' };
     const entry = checked.entries.get(String(row._id));
     if (!entry || entry.kind !== 'comment') return { state: 'pending' };
     if (
@@ -430,8 +457,17 @@ export class PurgeMarksService {
     }
     const signedAt = checked.signedAt;
     if (signedAt === 'mismatch') return { state: 'mismatch' };
+    // Its day in the published log (Chunk 16b): the database writer who
+    // deletes an honest anchor and re-stamps a forgery cannot change that.
+    const day = await this.logState(claim.anchorId);
+    if (day?.state === 'fail') return { state: 'mismatch' };
     const held = { anchorId: claim.anchorId, salt: claim.salt };
-    if (signedAt) return { state: 'anchored', signedAt, ...held };
+    if (signedAt) {
+      // Signed but not yet published (or not checkable): no time yet.
+      return day && day.state !== 'published'
+        ? { state: 'unsigned', ...held }
+        : { state: 'anchored', signedAt, ...held };
+    }
     // No verified token: pending only inside the TSA retry and sweep window
     // (round 6, 3b) and never dated ahead of the clock (round 7, 3). A newer
     // anchor being signed proves nothing about this one: each anchor has its
@@ -460,8 +496,9 @@ export class PurgeMarksService {
    * - the claim must be in its anchor's tree, and that anchor must be the
    *   earliest signed holder.
    * Any other holder is a mismatch, never skipped. A row re-issued after
-   * its first anchoring therefore FAILS. The known limit, deleting or
-   * rewriting the honest anchor document outright, is in the README.
+   * its first anchoring therefore FAILS. Deleting or rewriting the honest
+   * anchor document outright is caught by the anchor log (Chunk 16b) for
+   * any published day; the unpublished tail is in the README.
    */
   private async firstAnchored(row: {
     _id: unknown;
@@ -482,6 +519,7 @@ export class PurgeMarksService {
     let earliest: { anchorId: string; at: number } | undefined;
     for (const anchor of held) {
       if (anchor.status !== 'built') return mismatch;
+      if ((await this.logState(anchor._id))?.state === 'fail') return mismatch;
       const { entries, signedAt } = await this.checkedAnchor(anchor);
       if (signedAt === 'mismatch') return mismatch;
       const entry = entries.get(String(row._id));
@@ -674,6 +712,7 @@ export class PurgeMarksService {
    */
   beginCheck(): void {
     this.anchorChecks.clear();
+    this.log?.beginCheck();
   }
 
   async classify(
