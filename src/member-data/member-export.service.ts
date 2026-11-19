@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { strToU8, zipSync } from 'fflate';
+import { ConnectionRecords } from '../connections/connection-records.service';
 import type { Model, Types } from 'mongoose';
 import {
   type Receipt,
@@ -177,6 +178,7 @@ export class MemberExportService {
     private readonly receipts: ReceiptsService,
     private readonly authors: CommentAuthorsService,
     private readonly pictures: PictureStore,
+    private readonly connections: ConnectionRecords,
   ) {}
 
   private async many(
@@ -285,6 +287,9 @@ export class MemberExportService {
           }
         : ('default: every email on' as const),
       backupContacts: (contacts?.backup as unknown[] | undefined) ?? [],
+      // Requests sent and received, connections, and the blocks the member
+      // made, never blocks against them (Chunk 18).
+      connections: await this.connections.exportFor(userId, viewer),
       receipts: {
         included: receipts.map((entry) => entry.name),
         ...(jobs.length > MAX_EXPORT_RECEIPTS

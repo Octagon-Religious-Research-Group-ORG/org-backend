@@ -1,3 +1,4 @@
+import { recordsOver } from '../connections/connections-harness.mocks-spec';
 import { strFromU8, unzipSync } from 'fflate';
 import { Types } from 'mongoose';
 import type { Receipt } from '../anchoring/receipt';
@@ -463,6 +464,7 @@ function build(overrides: { page?: Record<string, unknown> | null } = {}) {
       Promise.resolve({ data: Buffer.from('synthetic-webp'), fileId: 'pic1' }),
     ),
   };
+  const connected = recordsOver(m.profiles);
   const service = new MemberExportService(
     m.profiles as never,
     m.tabs as never,
@@ -480,6 +482,7 @@ function build(overrides: { page?: Record<string, unknown> | null } = {}) {
     receipts as never,
     authors as never,
     pictures as never,
+    connected.records,
   );
   return {
     service,
@@ -488,6 +491,7 @@ function build(overrides: { page?: Record<string, unknown> | null } = {}) {
     authors,
     pictures,
     ids: { MINE, OPEN, HIDDEN, ORG },
+    connected,
   };
 }
 
@@ -951,5 +955,50 @@ describe('MemberExportService: after "Delete my page", and without a page', () =
     pictures.read.mockResolvedValue(undefined as never);
     const { zip } = await service.build(ME, member, T);
     expect(unpack(zip).files).not.toHaveProperty('picture.webp');
+  });
+});
+
+describe('MemberExportService: connection requests (Chunk 18)', () => {
+  it('holds the member’s connections and requests, and only the blocks they made, never another Clerk id', async () => {
+    const { service, connected } = build();
+    connected.connections.docs.push(
+      {
+        fromUserId: ME,
+        toUserId: OTHER,
+        pairKey: 'p1',
+        status: 'accepted',
+        note: 'Synthetic hello',
+        createdAt: T,
+        decidedAt: T,
+      },
+      {
+        fromUserId: ADMIN,
+        toUserId: ME,
+        pairKey: 'p2',
+        status: 'declined',
+        createdAt: T,
+        decidedAt: T,
+      },
+    );
+    connected.blocks.docs.push(
+      { blockerUserId: ME, blockedUserId: 'user_hidden', createdAt: T },
+      { blockerUserId: OTHER, blockedUserId: ME, createdAt: T },
+    );
+    const { data, zip } = await service.build(ME, member, T);
+    expect(data.connections.connected).toHaveLength(1);
+    expect(data.connections.requestsSent).toEqual([
+      expect.objectContaining({ status: 'accepted', note: 'Synthetic hello' }),
+    ]);
+    expect(data.connections.requestsReceived).toEqual([
+      expect.objectContaining({ status: 'declined' }),
+    ]);
+    expect(data.connections.blocksMade).toHaveLength(1);
+    const { all, text } = unpack(zip);
+    expect(all).not.toContain(OTHER);
+    expect(all).not.toContain(ADMIN);
+    expect(all).not.toContain('user_hidden');
+    expect(text['READ-ME-FIRST.txt']).toContain(
+      'Connections: 1 connected, 1 requests sent, 1 received, 1 members you blocked',
+    );
   });
 });

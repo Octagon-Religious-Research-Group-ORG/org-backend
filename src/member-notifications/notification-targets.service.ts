@@ -29,6 +29,19 @@ import {
   SocialProfile,
   type SocialProfileDocument,
 } from '../social/schemas/social-profile.schema';
+import {
+  MemberConnection,
+  type MemberConnectionDocument,
+} from '../connections/schemas/connection.schema';
+import { expiryCutoff } from '../connections/connection-rules';
+import {
+  type ConnectionTerms,
+  readConnectionTerms,
+} from '../connections/connection-terms.service';
+import {
+  OrgSetting,
+  type OrgSettingDocument,
+} from '../members/schemas/org-setting.schema';
 import type { NotificationKind } from './notification-kinds';
 import type { NotificationQueueRow } from './schemas/notification-queue.schema';
 
@@ -44,6 +57,9 @@ export const ORG_PAGE_PATHS: Record<string, string> = {
   donations: '/gifts-contributions',
   membership: '/membership',
 };
+
+/** Where connection request emails link (Chunk 18). */
+export const CONNECTIONS_PATH = '/settings/connections';
 
 /** Where a link goes when the reader may not open the page itself. */
 export const FALLBACK_PATH = '/community';
@@ -62,6 +78,8 @@ export interface Described {
   kind: NotificationKind;
   /** A website path, starting with `/`. */
   path: string;
+  /** For a connection request: the admins' name for it, read now. */
+  terms?: ConnectionTerms;
 }
 
 interface CommentFacts {
@@ -101,7 +119,25 @@ export class NotificationTargets {
     private readonly pageModel: Model<WebsitePageDocument>,
     private readonly clerk: ClerkUserInfoService,
     private readonly adminAccess: AdminAccessService,
+    @InjectModel(MemberConnection.name)
+    private readonly connectionModel: Model<MemberConnectionDocument>,
+    @InjectModel(OrgSetting.name)
+    private readonly settingModel: Model<OrgSettingDocument>,
   ) {}
+
+  /** Whether a member still has an approved, undeleted page. */
+  private async stillHasPage(userId: string) {
+    const page = (await this.profileModel
+      .findOne({ ownerUserId: userId, reviewStatus: { $ne: 'claiming' } })
+      .select({ reviewStatus: 1, deletedAt: 1 })
+      .lean()
+      .exec()) as { reviewStatus?: string; deletedAt?: Date } | null;
+    return (
+      !!page &&
+      !page.deletedAt &&
+      (page.reviewStatus ?? 'approved') === 'approved'
+    );
+  }
 
   /**
    * The reader now, from Clerk and their own page.
@@ -161,6 +197,46 @@ export class NotificationTargets {
         return recipient.isAdmin ? { kind, path: '/admin' } : undefined;
       case 'admin-claim-requested':
         return recipient.isAdmin ? { kind, path: '/admin/claims' } : undefined;
+      case 'connection-requested':
+      case 'connection-accepted': {
+        // Only while it still stands: a request withdrawn, declined or
+        // ended before the email went out is not news.
+        const row = refs.connectionId
+          ? ((await this.connectionModel
+              .findOne({ _id: refs.connectionId, live: true })
+              .select({ status: 1, createdAt: 1, fromUserId: 1, toUserId: 1 })
+              .lean()
+              .exec()) as {
+              status: string;
+              createdAt: Date;
+              fromUserId: string;
+              toUserId: string;
+            } | null)
+          : null;
+        const expected =
+          kind === 'connection-requested' ? 'pending' : 'accepted';
+        // A request past its 90 days is not news, swept yet or not.
+        const stale =
+          row?.status === 'pending' &&
+          row.createdAt <= expiryCutoff(new Date());
+        // And only while the member it is about (the sender of a request,
+        // the member who accepted) still has an approved page: news about a
+        // member who deleted theirs is not sent (review round 6). The reader
+        // needs one too: a member whose page was removed or deleted gets no
+        // connection email (review round 8).
+        const about =
+          kind === 'connection-requested' ? row?.fromUserId : row?.toUserId;
+        return row?.status === expected &&
+          !stale &&
+          (await this.stillHasPage(about!)) &&
+          (await this.stillHasPage(recipient.userId))
+          ? {
+              kind,
+              path: CONNECTIONS_PATH,
+              terms: await readConnectionTerms(this.settingModel),
+            }
+          : undefined;
+      }
       case 'claim-approved':
       case 'claim-rejected':
         return {

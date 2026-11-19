@@ -1,5 +1,8 @@
 // The "Report" button (Chunk 13) with the real comment and page services
 // over in-memory models. Synthetic data only.
+import { recordsOver } from '../../connections/connections-harness.mocks-spec';
+import { pairKeyOf } from '../../connections/connection-rules';
+import { Types } from 'mongoose';
 import {
   BadRequestException,
   ConflictException,
@@ -25,6 +28,7 @@ import {
   REPORT_LIMIT,
   REPORT_NOTE_TOO_LONG,
   REPORT_OWN_CONTENT,
+  REPORT_NOTE_NOT_FOUND,
   REPORT_PAGE_NOT_FOUND,
   REPORT_TARGET_MISSING,
   REPORTS_PER_DAY,
@@ -41,6 +45,7 @@ function build(notify: () => Promise<void> = () => Promise.resolve()) {
   const quotas = fakeModel([], { unique: [['reporterUserId', 'day']] });
   const quota = new ReportQuotaStore(quotas as never);
   const { connection } = fakeConnection();
+  const connected = recordsOver(h.profiles);
   const service = new ReportsService(
     reports as never,
     h.store,
@@ -51,8 +56,9 @@ function build(notify: () => Promise<void> = () => Promise.resolve()) {
     quota,
     h.comments as never,
     connection as never,
+    connected.records,
   );
-  return { h, reports, inbox, service, quotas, quota };
+  return { h, reports, inbox, service, quotas, quota, connected };
 }
 
 async function comment(h: Harness, userId: string, slug = 'open-page') {
@@ -509,5 +515,73 @@ describe('ReportsService: a report racing a decision (review L-4)', () => {
     ).rejects.toThrow(new ConflictException(NOT_REPORTABLE));
     expect(reports.docs).toHaveLength(0);
     expect(quotas.docs[0]).toMatchObject({ n: 0 });
+  });
+});
+
+describe('ReportsService: the note with a connection request (Chunk 18)', () => {
+  function note(from: string, to: string, extra: Record<string, unknown> = {}) {
+    return {
+      _id: new Types.ObjectId(),
+      fromUserId: from,
+      toUserId: to,
+      pairKey: pairKeyOf(from, to),
+      status: 'pending',
+      live: true,
+      note: 'Synthetic note text.',
+      createdAt: new Date(),
+      ...extra,
+    };
+  }
+
+  it('lets the recipient report it, naming the sender’s page', async () => {
+    const { h, inbox, service, reports, connected } = build();
+    connected.connections.docs.push(note(U.named, U.anon));
+    const id = String(connected.connections.docs[0]._id);
+    await expect(
+      service.report(await h.writer(U.anon), {
+        targetType: 'connection-note',
+        connectionId: id,
+        reason: 'harassment',
+      }),
+    ).resolves.toEqual({ reported: true });
+    expect(reports.docs[0]).toMatchObject({
+      targetType: 'connection-note',
+      targetId: id,
+      targetProfileId: ids.named,
+      reporterUserId: U.anon,
+    });
+    expect(inbox.notifyReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetType: 'connection-note',
+        subjectUserId: U.named,
+      }),
+    );
+  });
+
+  it('refuses the sender, anyone else, and a note not shown', async () => {
+    const { h, service, connected } = build();
+    connected.connections.docs.push(
+      note(U.named, U.anon),
+      note(U.owner, U.anon, { noteHiddenAt: new Date() }),
+    );
+    const [id, hidden] = connected.connections.docs.map((d) => String(d._id));
+    const ask = async (userId: string, connectionId?: string) =>
+      service.report(await h.writer(userId), {
+        targetType: 'connection-note',
+        ...(connectionId ? { connectionId } : {}),
+        reason: 'spam',
+      });
+    await expect(ask(U.named, id)).rejects.toEqual(
+      new ForbiddenException(REPORT_OWN_CONTENT),
+    );
+    await expect(ask(U.owner, id)).rejects.toEqual(
+      new NotFoundException(REPORT_NOTE_NOT_FOUND),
+    );
+    await expect(ask(U.anon, hidden)).rejects.toEqual(
+      new NotFoundException(REPORT_NOTE_NOT_FOUND),
+    );
+    await expect(ask(U.anon)).rejects.toEqual(
+      new BadRequestException(REPORT_TARGET_MISSING),
+    );
   });
 });

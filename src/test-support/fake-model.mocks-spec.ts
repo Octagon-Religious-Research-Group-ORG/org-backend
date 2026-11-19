@@ -304,6 +304,8 @@ export function fakeModel(
       if (clash) {
         throw Object.assign(new Error('E11000 duplicate key'), {
           code: 11000,
+          // As the driver reports it: which index refused the write.
+          keyPattern: Object.fromEntries(keys.map((key) => [key, 1])),
         });
       }
     }

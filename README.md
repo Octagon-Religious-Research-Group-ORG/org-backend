@@ -1065,6 +1065,163 @@ purge's person indexes (`comments` author, linked user and decider,
 person details keys) are plain, not partial: the purge matches by plain
 equality, which a `$type` partial index cannot serve.
 
+## Connection requests (Chunk 18)
+
+Members ask to see each other's contact rows (plan §2d item 3). Accepting
+changes nothing else: page visibility stays as it is. Not anchored: these are
+relationships, not beliefs or comments.
+
+### Routes
+
+| Route | Who | What |
+|---|---|---|
+| `GET /connections/terms` | anyone | the feature's name, `{singular, plural}` (default "connection request") |
+| `GET /me/connections` | signed in | the member's settings and four lists: incoming, outgoing, connected (with contact rows), blocked |
+| `GET /me/connections/with/:slug` | signed in | where the member stands with that page's owner: the profile button |
+| `POST /me/connections` `{slug, note?}` | member | send a request; the note is at most 500 characters |
+| `POST /me/connections/:id/accept\|decline\|withdraw\|disconnect` | member | answer, take back, or end |
+| `POST /me/connections/blocks` `{slug}` or `{connectionId}` | member | block; ends everything between the two |
+| `DELETE /me/connections/blocks/:id` | member | unblock |
+| `PUT /me/connections/settings` `{openTo?, contacts?}` | member | who may send requests; contact rows for connections only |
+| `PUT /admin/settings/connection-name` `{singular, plural}` | admin | rename the feature; both empty puts the default back |
+
+Writes are on the member-write ration and the per-visitor limit, and refused
+for a deleted account. A note is reported through `POST /me/reports` with
+`{targetType: "connection-note", connectionId}` (recipient only); admins hide
+it with `POST /admin/moderation/connection-notes/:id/hide {reason}`.
+
+### Rules
+
+- Only a member with an approved page (not removed or deleted, account not
+  deleted) sends or receives.
+- A Private (unlisted) member may request only a member whose page is Public.
+- The recipient's "open to": `nobody`, `public-members` or `any-member`. With
+  no choice made, the default follows the page's CURRENT visibility: nobody
+  for Private, any member otherwise. Once the member chooses, the choice
+  stands across visibility changes.
+- At most 20 requests waiting per sender, counting only requests to members
+  who still have an approved page; one to a member whose page was removed
+  stays in the sender's list as unavailable, and can be withdrawn. If an
+  admin restores such a page, its requests count again, so a sender can be
+  briefly above 20 (an accepted soft overshoot): further sends are refused
+  until the count drops below 20. After a
+  decline, the same sender waits 30 days before asking the same member
+  again. A withdrawal or an end starts no wait.
+- A request nobody answers expires 90 days after it was sent: it leaves the
+  recipient's list, stops counting, and starts no wait. An hourly in-app job
+  (`ConnectionExpiryScheduler`) expires them, and every read or write that
+  depends on it expires the records it touches first.
+- A page the requester cannot see is never reachable: every send to it is
+  the same 404 as an address with no page (`profile-access.ts`: unlisted is
+  owner and admins only). So a Private member only ever sends requests, to
+  Public members; their "open to" setting is kept for when they change
+  visibility. Lists name a member the reader cannot see only when that
+  member wrote to them or they are connected; otherwise "A member".
+- On a page the requester can see, the answers come in a fixed order: the
+  Private rule (a Private requester and a page that is not Public), then
+  the 30-day decline wait, then ONE "not open" for every reason on the
+  recipient's side (closed, no approved page, a block either way, one
+  landing mid-send). Everything a block could hide is answered first, so a
+  block always gives the answer "open to nobody" would give.
+  `src/connections/connections.review2.spec.ts` checks every requester ×
+  target visibility × open-to × decline wait × block combination.
+- A duplicate key on the send counts as a crossing only when it comes from
+  the pair index; any other duplicate is passed on.
+- A block ends what stands between the two the way a non-block story would,
+  as the blocked member sees it: their waiting request as a decline (with
+  the 30-day wait), the blocker's request to them as a withdrawal, a
+  connection as a disconnect. The end reason "block" is for admins only.
+  `connections.review3.spec.ts` compares everything the blocked member can
+  observe (button, send, answers on old ids, lists, export, emails) for
+  every state a block can land on.
+- The send and the profile button share one refusal order
+  (`requestRefusal`, `noMemberRefusal`, `liveWith`), checked to agree on
+  every combination, a member whose account is gone included: nothing is
+  live with a member who no longer counts.
+- Expire before act: every entry point that reads or writes connection rows
+  (send, answers, disconnect, block, unblock, settings, both views, the
+  deletion, the export, reports and the moderation queue) first expires the
+  stale requests it touches (`ConnectionRecords.fresh`), so a request past
+  its 90 days is never declined, withdrawn, ended, shown or emailed as if it
+  still waited. `connections.expire-first.spec.ts` runs every method on a
+  stale, unswept request in each direction, beside an unrelated stale pair,
+  and checks the method's answer, the request and the other pair.
+- "Delete my page" and the account webhook write the member's gate row in
+  their transaction. Every write that makes a row live or makes a
+  connection (send, a send that crosses a waiting request, accept) runs in
+  one transaction that writes both members' gate rows and then checks that
+  BOTH still have an approved page on a live account; such a write racing
+  a deletion of either member is either ended by it or refused. The
+  real-Mongo e2e forces each of those writes against "Delete my page" and
+  the account webhook for each party. Decline, withdraw, disconnect and
+  block only end rows; unblock and the settings save make no row live
+  (shared contacts are read at view time, for connected members who still
+  count). An undo within the window brings the page back, never a request.
+- A connection email is dropped when the member it is about (the sender of
+  a request, the member who accepted) or the member it goes to no longer
+  has an approved page. Other email categories are unchanged.
+- In the blocker's own export a record their block ended reads "ended",
+  with `youBlockedThisMember`; the blocked member's view is unchanged.
+  Admins see why a record ended (`endReason`) in the moderation queue; no
+  member view or export carries it.
+- The Private-to-Public rule holds again at accept time: if the recipient's
+  page is no longer Public, the accept is refused and the request closed.
+- In a member's own data, a request stopped by a decline (as its sender),
+  an expiry, a block, a page gone or that rule reads as one `closed` with one
+  `closedAt`, so a blocked member cannot tell. The real status is kept for
+  admins.
+- One live record per pair, either way round: a partial unique index on the
+  sorted pair key where `live` is true. A request crossing one already
+  waiting from the other member ACCEPTS that one (both asked); its note is
+  dropped. Concurrent sends are measured in
+  `test/connections-mongo.e2e-spec.ts`.
+- A send runs in a transaction that first writes the sender's
+  `connectionsettings.gateAt`, so two sends at once are ordered and the cap
+  holds; a block writes both members' gate rows, so a send racing a block
+  sees it. Both are fault-injected in the same file.
+
+### Contacts
+
+A connected member sees the other's page contact rows plus the rows kept in
+`connectionsettings.contacts` (connections only, never on the page), while
+both members have an approved page. Admin-only backup contacts
+(`membercontacts`) are never read by this module. A disconnect, a block or a
+deletion ends it at once.
+
+### Emails, deletion, export, purge
+
+- Emails (Chunk 14), categories `connectionRequests` and `connectionAccepts`,
+  each with its own opt-out and unsubscribe link; digest only. A new-request
+  email is at most one per sender, recipient and day; if the request is
+  withdrawn and sent again that day, the day's email points at the live
+  one, queued again if the digest had dropped it as no longer visible
+  (never one more sent email per pair and day). A re-point bumps the queue
+  row's `refsVersion`; the digest and the dispatcher drop a row as "no
+  longer visible" only while its refs are still what they described. No
+  note text, no name.
+  The lines and unsubscribe words use the admins' name, read when the email
+  is written.
+- "Delete my page" and the account webhook end every live request and
+  connection (`endReason: page-deleted`) in the deletion's transaction. An
+  undo brings the page back, not the connections.
+- The export has `connections`: settings, connected members, requests sent
+  and received (a received note unless a moderator hid it), and only the
+  blocks the member made. Other members appear as the member sees them now.
+- The purge: a page's purge removes its owner's requests, settings and own
+  blocks, and keeps blocks others made against them (they protect those
+  members if the person joins again); an account's purge removes every
+  record naming the person.
+
+### Before production
+
+`npm run db:indexes` creates `connections {pairKey}` (unique, partial on
+`live: true`), `{fromUserId, status, createdAt}`, `{toUserId, status,
+createdAt}`, `{pairKey, status, decidedAt}`, `{createdAt}` (partial on
+`live: true, status: pending`, for the expiry sweep; the real-Mongo e2e
+checks it is an index scan); `connectionblocks
+{blockerUserId, blockedUserId}` (unique) and `{blockedUserId}`;
+`connectionsettings {userId}` (unique).
+
 ## Heroku deployment
 
 The repository includes a `Procfile` that starts the compiled application with

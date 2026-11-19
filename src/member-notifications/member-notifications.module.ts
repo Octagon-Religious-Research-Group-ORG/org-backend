@@ -12,6 +12,14 @@ import {
   WebsitePage,
   WebsitePageSchema,
 } from '../content/schemas/website-page.schema';
+import {
+  MemberConnection,
+  MemberConnectionSchema,
+} from '../connections/schemas/connection.schema';
+import {
+  OrgSetting,
+  OrgSettingSchema,
+} from '../members/schemas/org-setting.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
 import {
   BeliefTab,
@@ -68,6 +76,10 @@ import {
       { name: WebsitePage.name, schema: WebsitePageSchema },
       // Only its `emailedAt`, once the admins were told.
       { name: AdminInboxEntry.name, schema: AdminInboxEntrySchema },
+      // Read only: whether a connection request still stands (Chunk 18),
+      // and the admins' name for it.
+      { name: MemberConnection.name, schema: MemberConnectionSchema },
+      { name: OrgSetting.name, schema: OrgSettingSchema },
     ]),
   ],
   controllers: [

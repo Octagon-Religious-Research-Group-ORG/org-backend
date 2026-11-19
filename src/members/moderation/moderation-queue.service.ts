@@ -8,6 +8,10 @@ import {
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { type ClientSession, type Connection, Model, Types } from 'mongoose';
 import { AdminInboxService } from '../../admin-inbox/admin-inbox.service';
+import {
+  ConnectionRecords,
+  type ReportedNoteView,
+} from '../../connections/connection-records.service';
 import { inTransaction } from '../../db/transactions';
 import { MemberNotifier } from '../../member-notifications/member-notifier.service';
 import { ModerationLogService } from '../../moderation/moderation-log.service';
@@ -55,6 +59,7 @@ export const NOT_MODERATED =
 export const COMMENT_BUSY_NOW =
   'The comment is being saved or changed right now. Please try again in a moment.';
 export const NO_OPEN_REPORTS = 'There are no open reports on that.';
+export const NOTE_NOT_SHOWN = 'That note is not shown any more.';
 /**
  * Hiding an accepted suggestion hides the suggestion only (review L-2): its
  * wording is already the belief's text, which only the belief's owner can
@@ -134,7 +139,9 @@ export interface QueueEntry {
   ownContent: boolean;
   comment?: ReportedCommentView;
   page?: ReportedPageView;
-  /** The comment or page no longer exists at all. */
+  /** A reported note with a connection request (Chunk 18). */
+  note?: ReportedNoteView;
+  /** The comment, page or request no longer exists at all. */
   missing?: boolean;
 }
 
@@ -214,6 +221,8 @@ export class ModerationQueueService {
     private readonly reports: ReportsStore,
     private readonly inbox: AdminInboxService,
     private readonly log: ModerationLogService,
+    /** Reported notes with connection requests (Chunk 18). */
+    private readonly connectionNotes: ConnectionRecords,
     /** Tells a comment's author of a decision (Chunk 14). */
     @Optional() private readonly notifier?: MemberNotifier,
   ) {}
@@ -279,6 +288,11 @@ export class ModerationQueueService {
       );
     const comments = await this.commentViews(commentIds);
     const pages = await this.pageRows(pageIds);
+    const notes = await this.connectionNotes.noteViews(
+      shown
+        .filter((group) => group._id.targetType === 'connection-note')
+        .map((group) => group._id.targetId),
+    );
     const reporterOf = await this.authors.resolve(
       shown.flatMap((group) => group.reports.map((r) => r.reporterUserId)),
       ADMIN_READER,
@@ -290,9 +304,13 @@ export class ModerationQueueService {
           targetType === 'comment' ? comments.get(targetId) : undefined;
         const pageRow =
           targetType === 'member-page' ? pages.get(targetId) : undefined;
+        const note =
+          targetType === 'connection-note' ? notes.get(targetId) : undefined;
         const ownContent = comment
           ? comment.authorUserId === adminId
-          : pageRow?.ownerUserId === adminId;
+          : note
+            ? note.sender.ownerUserId === adminId
+            : pageRow?.ownerUserId === adminId;
         return {
           targetType,
           targetId,
@@ -325,7 +343,8 @@ export class ModerationQueueService {
                 },
               }
             : {}),
-          ...(!comment && !pageRow ? { missing: true } : {}),
+          ...(note ? { note } : {}),
+          ...(!comment && !pageRow && !note ? { missing: true } : {}),
         };
       }),
       hasMore: groups.length > QUEUE_PAGE_SIZE,
@@ -626,12 +645,59 @@ export class ModerationQueueService {
     });
   }
 
+  /**
+   * Hides a reported note with a connection request (Chunk 18): its
+   * recipient no longer sees it; the request itself stands. Closes the
+   * note's open reports, in one transaction with its log entry.
+   *
+   * @throws ForbiddenException for the admin's own note /
+   *   ConflictException when there is no shown note to hide
+   */
+  async hideNote(adminId: string, connectionId: string, rawReason: string) {
+    const reason = cleanReason(rawReason);
+    return inTransaction(this.connection, async (session) => {
+      const sender = await this.connectionNotes.senderOf(connectionId, session);
+      if (sender === undefined) throw new NotFoundException(NOTE_NOT_SHOWN);
+      if (sender === adminId) throw new ForbiddenException(OWN_CONTENT);
+      const hidden = await this.connectionNotes.hideNote(
+        connectionId,
+        new Date(),
+        session,
+      );
+      if (!hidden) throw new ConflictException(NOTE_NOT_SHOWN);
+      const closed = await this.closeReports(
+        'connection-note',
+        connectionId,
+        'hidden',
+        adminId,
+        session,
+      );
+      await this.log.record(
+        {
+          actorUserId: adminId,
+          action: 'connection-note.hidden',
+          targetType: 'connection-note',
+          targetId: connectionId,
+          reason,
+          details: { reportsClosed: closed, authorUserId: sender },
+        },
+        session,
+      );
+      return { hidden: true as const, reportsClosed: closed };
+    });
+  }
+
   private async isOwnContent(
     adminId: string,
     targetType: ReportTargetType,
     targetId: string,
     session: ClientSession,
   ) {
+    if (targetType === 'connection-note') {
+      return (
+        (await this.connectionNotes.senderOf(targetId, session)) === adminId
+      );
+    }
     if (targetType === 'comment') {
       const row = (await this.commentModel
         .findOne({ commentId: targetId })

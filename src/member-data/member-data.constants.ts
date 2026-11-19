@@ -32,6 +32,7 @@ export const DELETION_DISCLOSURE = [
   `For ${UNDO_DAYS} days you can bring your page back yourself. After that, only an ORG admin can.`,
   'After five years the personal content is removed for good: your text, your name, your account id and addresses.',
   'Your comments on other members’ pages stay in their threads, shown as “A former member”, so their conversations still make sense.',
+  'Your connection requests and connections end at once, and members you were connected with no longer see your contact details. Bringing your page back does not bring them back.',
   'You can still download your data after deleting your page.',
 ] as const;
 

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { MANAGED_SCHEMAS } from '../db/managed-schemas';
+import { ConnectionsModule } from '../connections/connections.module';
 import { MembersModule } from '../members/members.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import { ClerkWebhookController } from './clerk-webhook.controller';
@@ -27,6 +28,8 @@ import { PageDeletionService } from './page-deletion.service';
 @Module({
   imports: [
     MembersModule,
+    // Connection requests end, export and purge with the member (Chunk 18).
+    ConnectionsModule,
     ModerationModule,
     MongooseModule.forFeature([...MANAGED_SCHEMAS]),
   ],

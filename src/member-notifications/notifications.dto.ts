@@ -9,6 +9,8 @@ export class CategoryTogglesDto {
   @IsOptional() @IsBoolean() votes?: boolean;
   @IsOptional() @IsBoolean() claims?: boolean;
   @IsOptional() @IsBoolean() moderation?: boolean;
+  @IsOptional() @IsBoolean() connectionRequests?: boolean;
+  @IsOptional() @IsBoolean() connectionAccepts?: boolean;
   @IsOptional() @IsBoolean() adminPages?: boolean;
   @IsOptional() @IsBoolean() adminEam?: boolean;
   @IsOptional() @IsBoolean() adminReports?: boolean;

@@ -3,6 +3,8 @@ import {
   type NotificationKind,
   type UnsubscribeScope,
 } from './notification-kinds';
+import { article } from '../connections/connection-messages';
+import type { ConnectionTerms } from '../connections/connection-terms.service';
 import type { Described } from './notification-targets.service';
 import { signUnsubscribe } from './unsubscribe-tokens';
 
@@ -25,15 +27,35 @@ const SCOPE_WORDS: Record<string, string> = {
   votes: 'emails about your agreed beliefs',
   claims: 'emails about your claim requests',
   moderation: 'emails about moderation of your comments',
+  connectionRequests: 'emails about new connection requests',
+  connectionAccepts: 'emails about accepted connection requests',
   adminPages: 'admin emails about new member pages',
   adminEam: 'admin emails about EaM requests',
   adminReports: 'admin emails about reports',
   adminClaims: 'admin emails about claim requests',
 };
 
+/**
+ * Words about connection requests in the admins' name for them (review
+ * round 1, #6); any other text, or no name, as written.
+ */
+export function renamed(text: string, terms?: ConnectionTerms): string {
+  if (!terms) return text;
+  return text
+    .replace(/connection requests/g, terms.plural)
+    .replace(
+      /\ba connection request\b/g,
+      `${article(terms.singular)} ${terms.singular}`,
+    )
+    .replace(/connection request/g, terms.singular);
+}
+
 /** What an unsubscribe link turns off, in words. */
-export function scopeWords(scope: UnsubscribeScope): string {
-  return SCOPE_WORDS[scope];
+export function scopeWords(
+  scope: UnsubscribeScope,
+  terms?: ConnectionTerms,
+): string {
+  return renamed(SCOPE_WORDS[scope], terms);
 }
 
 export interface ComposedEmail {
@@ -47,6 +69,7 @@ interface Group {
   kind: NotificationKind;
   path: string;
   count: number;
+  terms?: ConnectionTerms;
 }
 
 /** Same kind and same link: one line with a count. Order of first sight. */
@@ -87,9 +110,10 @@ export function composeEmail(input: {
       : 'News from the ORG website:',
     '',
   ];
-  for (const { kind, path, count } of shown) {
+  const terms = input.items.find((item) => item.terms)?.terms;
+  for (const { kind, path, count, terms: named } of shown) {
     const [one, many] = LINE_OF[kind];
-    lines.push(`- ${count === 1 ? one : many(count)}`);
+    lines.push(`- ${renamed(count === 1 ? one : many(count), named)}`);
     lines.push(`  ${input.publicAppUrl}${path}`);
   }
   if (groups.length > shown.length) {
@@ -105,7 +129,7 @@ export function composeEmail(input: {
     'Sign in to read it: the site shows you only what you are allowed to see.',
     '',
     `Your email settings: ${input.publicAppUrl}${SETTINGS_PATH}`,
-    `Turn off ${scopeWords(input.scope)}: ${pageLink}`,
+    `Turn off ${scopeWords(input.scope, terms)}: ${pageLink}`,
   );
   const headers: Record<string, string> = input.publicApiUrl
     ? {
@@ -118,7 +142,7 @@ export function composeEmail(input: {
     subject: input.digest
       ? 'Your ORG activity summary'
       : first.count === 1
-        ? LINE_OF[first.kind][0].replace(/[.:].*$/, '')
+        ? renamed(LINE_OF[first.kind][0], first.terms).replace(/[.:].*$/, '')
         : 'News from the ORG website',
     lines,
     headers,

@@ -86,6 +86,7 @@ export class NotificationQueueRow {
       commentId: { type: String },
       claimId: { type: String },
       inboxKey: { type: String },
+      connectionId: { type: String },
     },
     default: {},
   })
@@ -96,11 +97,22 @@ export class NotificationQueueRow {
     claimId?: string;
     /** The admin inbox notice it is about (its `dedupeKey`). */
     inboxKey?: string;
+    /** A connection request (Chunk 18). */
+    connectionId?: string;
   };
 
   /** One row per event per reader (unique while set). */
   @Prop({ type: String })
   dedupeKey?: string;
+
+  /**
+   * Bumped each time `refs` is pointed at a newer event (a connection
+   * request sent again the same day). A sender that read the row before
+   * drops it as "no longer visible" only if this is still what it read, so a
+   * re-pointed email is never lost (review round 5).
+   */
+  @Prop({ type: Number, min: 0 })
+  refsVersion?: number;
 
   /** Send attempts that failed. */
   @Prop({ type: Number, required: true, default: 0, min: 0 })

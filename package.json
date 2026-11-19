@@ -261,7 +261,16 @@
       "member-data/member-purge.service.ts",
       "member-data/member-purge.scheduler.ts",
       "member-data/clerk-webhook.controller.ts",
-      "member-data/member-data.controller.ts"
+      "member-data/member-data.controller.ts",
+      "connections/connection-rules.ts",
+      "connections/connection-messages.ts",
+      "connections/connection-terms.service.ts",
+      "connections/connection-records.service.ts",
+      "connections/connections.service.ts",
+      "connections/connection-lookups.service.ts",
+      "connections/connection-views.service.ts",
+      "connections/connection-expiry.scheduler.ts",
+      "connections/connections.controller.ts"
     ],
     "coverageThreshold": {
       "global": {

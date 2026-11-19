@@ -6,6 +6,7 @@
 // and that hidden text reaches no reader but an admin. Needs MONGO_TEST_URI
 // (a throwaway replica-set database; it is dropped). Without it the suite is
 // reported as SKIPPED, never as passed. Synthetic data only.
+import { ConnectionRecords } from '../src/connections/connection-records.service';
 import { ConflictException } from '@nestjs/common';
 import mongoose, { type Model } from 'mongoose';
 import { AdminInboxService } from '../src/admin-inbox/admin-inbox.service';
@@ -174,6 +175,12 @@ describeWithMongo('moderation on a real MongoDB', () => {
       conn,
       log,
     );
+    const records = new ConnectionRecords(
+      m.MemberConnection,
+      m.ConnectionBlock,
+      m.ConnectionSettings,
+      m.SocialProfile,
+    );
     reports = new ReportsService(
       m.Report,
       store,
@@ -184,6 +191,7 @@ describeWithMongo('moderation on a real MongoDB', () => {
       new ReportQuotaStore(m.ReportQuota),
       m.Comment,
       conn,
+      records,
     );
     build = (withLog) =>
       new ModerationQueueService(
@@ -197,6 +205,7 @@ describeWithMongo('moderation on a real MongoDB', () => {
         new ReportsStore(m.Report),
         inbox,
         withLog,
+        records,
       );
     queue = build(log);
     admin = new AdminMembersService(

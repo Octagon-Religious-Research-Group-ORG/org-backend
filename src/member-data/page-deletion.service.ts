@@ -9,6 +9,7 @@ import {
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import type { ClientSession, Connection, Model, Types } from 'mongoose';
 import { accountDeletedRows } from '../anchoring/account-deletion-record';
+import { ConnectionRecords } from '../connections/connection-records.service';
 import { inTransaction } from '../db/transactions';
 import {
   Comment,
@@ -167,6 +168,7 @@ export class PageDeletionService {
     private readonly commentVersionModel: Model<CommentVersionDocument>,
     @InjectModel(UserWriteGate.name)
     private readonly gateModel: Model<UserWriteGateDocument>,
+    private readonly connections: ConnectionRecords,
   ) {}
 
   private ownPage(userId: string, session?: ClientSession) {
@@ -252,6 +254,9 @@ export class PageDeletionService {
         'The member deleted their page.',
         session,
       );
+      // Their requests and connections end with the page (Chunk 18); an
+      // undo brings the page back, not the connections.
+      await this.connections.endAllFor(userId, now, session);
       return { page, deletion };
     });
     await this.quietNotifications(result.page._id);
@@ -321,6 +326,8 @@ export class PageDeletionService {
         })
         .exec();
       const page = await this.ownPage(userId, session);
+      // Requests and connections end with the account (Chunk 18).
+      await this.connections.endAllFor(userId, now, session);
       // The account's own clock (review #6), with or without a page;
       // $setOnInsert keeps the first delivery's time on a redelivery.
       const known = await this.accountModel

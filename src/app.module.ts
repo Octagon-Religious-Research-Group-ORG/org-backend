@@ -21,6 +21,7 @@ import { MembersModule } from './members/members.module';
 import { SearchModule } from './search/search.module';
 import { AnchoringModule } from './anchoring/anchoring.module';
 import { MemberDataModule } from './member-data/member-data.module';
+import { ConnectionsModule } from './connections/connections.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { MemberDataModule } from './member-data/member-data.module';
     SearchModule,
     AnchoringModule,
     MemberDataModule,
+    ConnectionsModule,
     DbModule,
   ],
   controllers: [AppController],

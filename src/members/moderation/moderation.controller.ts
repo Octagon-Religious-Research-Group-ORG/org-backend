@@ -76,6 +76,9 @@ export class MyReportWritesController {
       reason: body.reason,
       ...(body.commentId !== undefined ? { commentId: body.commentId } : {}),
       ...(body.slug !== undefined ? { slug: body.slug } : {}),
+      ...(body.connectionId !== undefined
+        ? { connectionId: body.connectionId }
+        : {}),
       ...(body.note !== undefined ? { note: body.note } : {}),
     });
   }
@@ -151,6 +154,22 @@ export class AdminModerationWritesController {
     @Body() body: ReasonDto,
   ) {
     return this.act(request, commentId, 'restore', body);
+  }
+
+  /** Hides a reported note with a connection request (Chunk 18). */
+  @Post('connection-notes/:connectionId/hide')
+  @WriteThrottle()
+  hideNote(
+    @Req() request: AuthenticatedRequest,
+    @Param('connectionId') connectionId: string,
+    @Body() body: ReasonDto,
+  ) {
+    const target = targetParams('connection-note', connectionId);
+    return this.queue.hideNote(
+      getUserSub(request),
+      target.targetId,
+      body.reason,
+    );
   }
 
   @Post(':targetType/:targetId/dismiss')

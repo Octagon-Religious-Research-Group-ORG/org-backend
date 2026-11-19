@@ -6,6 +6,7 @@ import { NotificationDispatcher } from './notification-dispatcher.service';
 import {
   CATEGORY_OF,
   deliveryFor,
+  NO_LONGER_VISIBLE,
   type NotificationKind,
 } from './notification-kinds';
 import { NotificationPrefsService } from './notification-prefs.service';
@@ -199,6 +200,49 @@ export class MemberNotifier {
   }
 
   /**
+   * A member sent another a connection request (Chunk 18). At most one
+   * email per sender, recipient and UTC day, so sending and withdrawing over
+   * and over cannot flood the recipient. The note is never in it.
+   */
+  async connectionRequested(event: {
+    connectionId: string;
+    fromUserId: string;
+    toUserId: string;
+    at: Date;
+  }) {
+    await this.queue(
+      event.toUserId,
+      'connection-requested',
+      { connectionId: event.connectionId },
+      {
+        actorUserId: event.fromUserId,
+        dedupeKey: `connection-requested:${event.fromUserId}:${event.toUserId}:${utcDay(event.at)}`,
+        // A request withdrawn and sent again the same day: the one email
+        // still waiting now points at the live request (review round 3).
+        latestRefs: true,
+      },
+    );
+  }
+
+  /** The recipient accepted: the sender hears of it once. */
+  async connectionAccepted(event: {
+    connectionId: string;
+    fromUserId: string;
+    acceptedBy: string;
+    at: Date;
+  }) {
+    await this.queue(
+      event.fromUserId,
+      'connection-accepted',
+      { connectionId: event.connectionId },
+      {
+        actorUserId: event.acceptedBy,
+        dedupeKey: `connection-accepted:${event.connectionId}`,
+      },
+    );
+  }
+
+  /**
    * Something the admins should know about. One row for all admins, fanned
    * out to each admin by the next tick (reading the admin list is a Clerk
    * call, kept off the request). Never sent to the admin it is about, nor
@@ -246,7 +290,7 @@ export class MemberNotifier {
     userId: string,
     kind: NotificationKind,
     refs: Refs,
-    options: { actorUserId: string; dedupeKey?: string },
+    options: { actorUserId: string; dedupeKey?: string; latestRefs?: true },
   ) {
     if (userId === options.actorUserId || userId.startsWith('imported:')) {
       return;
@@ -269,10 +313,44 @@ export class MemberNotifier {
       });
       if (delivery === 'immediate') void this.dispatcher.kick();
     } catch (error) {
-      if (isDuplicateKey(error)) return;
-      this.logger.warn(
-        `Could not queue a notification (${kind}): ${describe(error)}`,
-      );
+      if (!isDuplicateKey(error)) {
+        this.logger.warn(
+          `Could not queue a notification (${kind}): ${describe(error)}`,
+        );
+        return;
+      }
+      if (options.latestRefs) {
+        // The day's one email now points at the live request: while it still
+        // waits, or after the digest dropped it as no longer visible (it was
+        // never sent, so it is queued again). One already sent stays the
+        // day's one (review round 4).
+        try {
+          await this.queueModel
+            .updateOne(
+              {
+                dedupeKey: options.dedupeKey,
+                $or: [
+                  { status: 'queued' },
+                  {
+                    status: 'skipped',
+                    outcome: NO_LONGER_VISIBLE,
+                    sentAt: { $exists: false },
+                  },
+                ],
+              },
+              {
+                $set: { refs, status: 'queued' },
+                $unset: { outcome: 1 },
+                $inc: { refsVersion: 1 },
+              },
+            )
+            .exec();
+        } catch (failure) {
+          this.logger.warn(
+            `Could not update a queued notification (${kind}): ${describe(failure)}`,
+          );
+        }
+      }
     }
   }
 }

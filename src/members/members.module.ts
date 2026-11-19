@@ -36,6 +36,7 @@ import {
 } from '../social/schemas/vote-tally.schema';
 import { Claim, ClaimSchema } from '../social/schemas/claim.schema';
 import { SocialModule } from '../social/social.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import {
   WebsitePage,
   WebsitePageSchema,
@@ -132,6 +133,8 @@ import {
     AdminInboxModule,
     MemberNotificationsModule,
     AnchoringModule,
+    // Reported notes with connection requests (Chunk 18).
+    ConnectionsModule,
     MongooseModule.forFeature([
       { name: SocialProfile.name, schema: SocialProfileSchema },
       { name: BeliefTab.name, schema: BeliefTabSchema },

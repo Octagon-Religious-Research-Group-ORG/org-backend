@@ -28,6 +28,7 @@ function setup() {
     queue: jest.fn(() => Promise.resolve('queue')),
     moderateComment: jest.fn(() => Promise.resolve('done')),
     dismiss: jest.fn(() => Promise.resolve('dismissed')),
+    hideNote: jest.fn(() => Promise.resolve('hidden')),
   };
   const writer = { kind: 'named-member', userId: 'user_m', isAdmin: false };
   const writers = { requireWriter: jest.fn(() => Promise.resolve(writer)) };
@@ -145,6 +146,31 @@ describe('moderation controllers (Chunk 13)', () => {
       slug: 'some-page',
       reason: 'other',
       note: 'Synthetic.',
+    });
+  });
+});
+
+describe('moderation controllers: notes with connection requests (Chunk 18)', () => {
+  it('hides only a well-formed request id, and reports a note by its request', async () => {
+    const { queue, writes, mine, reports, writer } = setup();
+    const id = '0123456789abcdef01234567';
+    const body = { reason: 'Synthetic' };
+    await expect(writes.hideNote(request(ADMIN), id, body)).resolves.toBe(
+      'hidden',
+    );
+    expect(queue.hideNote).toHaveBeenCalledWith(ADMIN, id, 'Synthetic');
+    expect(() => writes.hideNote(request(ADMIN), 'bad', body)).toThrow(
+      NotFoundException,
+    );
+    await mine.report(request('user_m'), {
+      targetType: 'connection-note',
+      connectionId: id,
+      reason: 'harassment',
+    });
+    expect(reports.report).toHaveBeenLastCalledWith(writer, {
+      targetType: 'connection-note',
+      connectionId: id,
+      reason: 'harassment',
     });
   });
 });

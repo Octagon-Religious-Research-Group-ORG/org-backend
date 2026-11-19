@@ -1,3 +1,4 @@
+import { recordsOver } from '../connections/connections-harness.mocks-spec';
 import { Types } from 'mongoose';
 import {
   fakeModel,
@@ -358,6 +359,7 @@ function scenario({
     },
   });
   const record = jest.fn(() => Promise.resolve({}));
+  const connected = recordsOver(m.profiles);
   const service = new MemberPurgeService(
     m.profiles as never,
     m.tabs as never,
@@ -383,10 +385,11 @@ function scenario({
     pictures,
     { record } as never,
     m.gates as never,
+    connected.records,
   );
   const serverClock = service.lockClock;
   service.lockClock = () => RUN;
-  return { service, m, P, Q, ACC, files, record, serverClock };
+  return { service, m, P, Q, ACC, files, record, serverClock, connected };
 }
 
 /** What a live account's data looks like, to compare before and after. */
@@ -1365,5 +1368,58 @@ describe('MemberPurgeService: round 10, 2', () => {
     const { service, m } = scenario({ account: true, page: false });
     await service.run(RUN);
     expect(m.gates.docs.map((g) => g._id)).toEqual([writeGateId(OTHER)]);
+  });
+});
+
+describe('MemberPurgeService: connection requests (Chunk 18)', () => {
+  function seed(connected: ReturnType<typeof scenario>['connected']) {
+    connected.connections.docs.push(
+      {
+        fromUserId: U,
+        toUserId: OTHER,
+        pairKey: 'a',
+        status: 'ended',
+        note: 'n',
+      },
+      { fromUserId: 'user_x', toUserId: U, pairKey: 'b', status: 'declined' },
+      {
+        fromUserId: OTHER,
+        toUserId: 'user_x',
+        pairKey: 'c',
+        status: 'accepted',
+      },
+    );
+    connected.blocks.docs.push(
+      { blockerUserId: U, blockedUserId: 'user_x' },
+      { blockerUserId: OTHER, blockedUserId: U },
+    );
+    connected.settings.docs.push(
+      { userId: U, openTo: 'nobody' },
+      { userId: OTHER },
+    );
+  }
+
+  it('removes the page owner’s records and own blocks, keeping blocks that protect others', async () => {
+    const { service, connected } = scenario();
+    seed(connected);
+    await service.run(RUN);
+    expect(connected.connections.docs.map((r) => r.pairKey)).toEqual(['c']);
+    expect(connected.blocks.docs.map((b) => b.blockerUserId)).toEqual([OTHER]);
+    expect(connected.settings.docs.map((r) => r.userId)).toEqual([OTHER]);
+  });
+
+  it('removes every record naming the person once their account is due', async () => {
+    const { service, connected } = scenario({ account: true });
+    seed(connected);
+    await service.run(RUN);
+    expect(connected.blocks.docs).toHaveLength(0);
+  });
+
+  it('touches no connection for a page nobody owns', async () => {
+    const { service, m, connected } = scenario();
+    seed(connected);
+    delete m.profiles.docs[0].ownerUserId;
+    await service.run(RUN);
+    expect(connected.connections.docs).toHaveLength(3);
   });
 });

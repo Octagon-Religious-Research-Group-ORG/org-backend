@@ -15,11 +15,11 @@ import {
 import { AdminAccessService } from '../auth/admin-access.service';
 import { ClerkAdminDirectoryService } from '../auth/clerk-admin-directory.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { DigestSender } from './digest-sender';
+import { DigestSender, sameRefs } from './digest-sender';
 import { EmailBudgetStore, nextUtcDay } from './email-budget.store';
 import { composeEmail } from './notification-mail';
 import { readNotificationConfig } from './notification-config';
-import { deliveryFor } from './notification-kinds';
+import { deliveryFor, NO_LONGER_VISIBLE } from './notification-kinds';
 import { NotificationPrefsService } from './notification-prefs.service';
 import {
   NotificationTargets,
@@ -451,6 +451,24 @@ export class NotificationDispatcher
   ): Promise<'done' | 'budget'> {
     const skip = (outcome: string) =>
       this.settle(row, token, { status: 'skipped', outcome });
+    // "No longer visible" only while `refs` is still what was described: a
+    // re-pointed row (review round 5) goes back to the queue instead.
+    const skipUnseen = async () => {
+      const done = await this.queueModel
+        .updateOne(
+          {
+            _id: row._id,
+            leaseToken: token,
+            ...sameRefs(row.refsVersion ?? 0),
+          },
+          {
+            $set: { status: 'skipped', outcome: NO_LONGER_VISIBLE },
+            $unset: { leaseUntil: 1, leaseToken: 1 },
+          },
+        )
+        .exec();
+      if (done.modifiedCount === 0) await this.settle(row, token, {});
+    };
     // Nothing was sent: no key was used, so it stays as it is.
     const retry = async (outcome: string) => {
       const attempts = row.attempts + 1;
@@ -535,7 +553,7 @@ export class NotificationDispatcher
       }
       const built = await build();
       if (!built) {
-        await skip('no longer visible');
+        await skipUnseen();
         return 'done';
       }
       if (!recipient.email) {

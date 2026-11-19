@@ -33,6 +33,12 @@ export class NewReportDto {
   @Matches(SLUG_INPUT)
   slug?: string;
 
+  /** The connection request, when `targetType` is `connection-note`. */
+  @IsOptional()
+  @IsString()
+  @Matches(PAGE_ID_PATTERN)
+  connectionId?: string;
+
   @IsIn(REPORT_REASONS)
   reason: ReportReason;
 

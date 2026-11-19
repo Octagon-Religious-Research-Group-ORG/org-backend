@@ -7,6 +7,7 @@
 // MONGO_TEST_URI (a throwaway replica-set database; it is dropped) and, for
 // the standalone case, MONGO_STANDALONE_URI. Without them the suites are
 // SKIPPED, never passed. Synthetic data only.
+import { ConnectionRecords } from '../src/connections/connection-records.service';
 import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { strFromU8, unzipSync } from 'fflate';
 import mongoose, { type Model } from 'mongoose';
@@ -88,6 +89,7 @@ describeWithMongo('page deletion, export and purge on a real MongoDB', () => {
   let deletion: PageDeletionService;
   let purge: MemberPurgeService;
   let exporter: MemberExportService;
+  let records: ConnectionRecords;
   let myCommentId: string;
   let theirCommentId: string;
 
@@ -164,6 +166,12 @@ describeWithMongo('page deletion, export and purge on a real MongoDB', () => {
       orgPages,
     );
     const log = new ModerationLogService(m.ModerationLogEntry);
+    records = new ConnectionRecords(
+      m.MemberConnection,
+      m.ConnectionBlock,
+      m.ConnectionSettings,
+      m.SocialProfile,
+    );
     deletion = new PageDeletionService(
       conn,
       m.SocialProfile,
@@ -173,6 +181,7 @@ describeWithMongo('page deletion, export and purge on a real MongoDB', () => {
       m.Comment,
       m.CommentVersion,
       m.UserWriteGate,
+      records,
     );
     purge = new MemberPurgeService(
       m.SocialProfile,
@@ -199,6 +208,7 @@ describeWithMongo('page deletion, export and purge on a real MongoDB', () => {
       { remove: () => Promise.resolve() } as never,
       log,
       m.UserWriteGate,
+      records,
     );
     // No anchoring here: receipts are covered by the unit suite. A real
     // ReceiptsService, so the export goes through its disclosure code.
@@ -228,6 +238,7 @@ describeWithMongo('page deletion, export and purge on a real MongoDB', () => {
       receipts,
       authors,
       { currentPicture: () => Promise.resolve(undefined) } as never,
+      records,
     );
 
     // The member whose page will go writes on someone else's page, and
@@ -975,6 +986,7 @@ describeStandalone('page deletion on a standalone MongoDB', () => {
       {} as never,
       {} as never,
       {} as never,
+      { endAllFor: () => Promise.resolve() } as never,
     );
     await expect(
       service.deleteOwn('user_sa', 'quiet-fern'),

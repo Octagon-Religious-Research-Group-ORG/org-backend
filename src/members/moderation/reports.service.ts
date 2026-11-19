@@ -11,6 +11,7 @@ import {
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import type { ClientSession, Connection, Model, Types } from 'mongoose';
 import { AdminInboxService } from '../../admin-inbox/admin-inbox.service';
+import { ConnectionRecords } from '../../connections/connection-records.service';
 import { inTransaction } from '../../db/transactions';
 import { ReportQuotaStore } from '../../moderation/report-quota.store';
 import {
@@ -55,6 +56,7 @@ export const REPORT_NOTE_TOO_LONG = `A note can hold at most ${MAX_REPORT_NOTE_L
 export const REPORT_TARGET_MISSING =
   'Say which comment or page you are reporting.';
 export const REPORT_PAGE_NOT_FOUND = 'That page does not exist.';
+export const REPORT_NOTE_NOT_FOUND = 'That note is no longer there.';
 
 export interface NewReportInput {
   targetType: ReportTargetType;
@@ -62,6 +64,8 @@ export interface NewReportInput {
   commentId?: string;
   /** For a member page. */
   slug?: string;
+  /** For the note with a connection request (Chunk 18). */
+  connectionId?: string;
   reason: ReportReason;
   note?: string;
 }
@@ -118,6 +122,7 @@ export class ReportsService {
     @InjectModel(Comment.name)
     private readonly commentModel: Model<CommentDocument>,
     @InjectConnection() private readonly connection: Connection,
+    private readonly connectionNotes: ConnectionRecords,
   ) {}
 
   /**
@@ -136,7 +141,9 @@ export class ReportsService {
     const target =
       input.targetType === 'comment'
         ? await this.commentTarget(writer, input.commentId)
-        : await this.pageTarget(writer, input.slug);
+        : input.targetType === 'connection-note'
+          ? await this.noteTarget(writer, input.connectionId)
+          : await this.pageTarget(writer, input.slug);
 
     const day = await this.quota.take(writer.userId, REPORTS_PER_DAY);
     if (day === undefined) {
@@ -258,6 +265,30 @@ export class ReportsService {
       subjectUserId:
         row.authorUserId ?? row.linkedUserId ?? `imported:${commentId}`,
     };
+  }
+
+  /**
+   * The note with a connection request the reporter RECEIVED: only its
+   * recipient sees it. Anything else is the same 404.
+   */
+  private async noteTarget(
+    writer: CommentWriter,
+    connectionId: string | undefined,
+  ): Promise<ReportTarget> {
+    if (connectionId === undefined) {
+      throw new BadRequestException(REPORT_TARGET_MISSING);
+    }
+    const found = await this.connectionNotes.noteTarget(
+      writer.userId,
+      connectionId,
+    );
+    if (found.kind === 'own') {
+      throw new ForbiddenException(REPORT_OWN_CONTENT);
+    }
+    if (found.kind !== 'ok') {
+      throw new NotFoundException(REPORT_NOTE_NOT_FOUND);
+    }
+    return found;
   }
 
   /** A member page the reporter can see, at least by name. */

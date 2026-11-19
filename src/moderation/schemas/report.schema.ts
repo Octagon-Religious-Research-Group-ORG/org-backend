@@ -5,9 +5,16 @@ import { HydratedDocument, Types } from 'mongoose';
  * What a member can report (Chunk 13):
  * - `comment`: any listed comment, on a belief, a page's own thread or one of
  *   ORG's own pages (Chunk 10b); `targetId` is its `commentId`;
- * - `member-page`: a member page; `targetId` is the page's `_id`.
+ * - `member-page`: a member page; `targetId` is the page's `_id`;
+ * - `connection-note`: the note with a connection request (Chunk 18),
+ *   reported by the member it was sent to; `targetId` is the request's
+ *   `_id` and `targetProfileId` the sender's page.
  */
-export const REPORT_TARGET_TYPES = ['comment', 'member-page'] as const;
+export const REPORT_TARGET_TYPES = [
+  'comment',
+  'member-page',
+  'connection-note',
+] as const;
 export type ReportTargetType = (typeof REPORT_TARGET_TYPES)[number];
 
 /** The short reasons a reporter picks from. */

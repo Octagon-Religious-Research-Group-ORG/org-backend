@@ -20,6 +20,8 @@ describe('NotificationPrefsService (Chunk 14)', () => {
         votes: true,
         claims: true,
         moderation: true,
+        connectionRequests: true,
+        connectionAccepts: true,
       },
       digest: true,
       immediate: true,

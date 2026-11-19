@@ -156,6 +156,7 @@ describeStandalone('claims on a standalone MongoDB', () => {
       new ReportsStore(m.Report),
       { closeReportNotice: () => Promise.resolve() } as never,
       new ModerationLogService(m.ModerationLogEntry),
+      {} as never,
     );
     await expect(
       queue.moderateComment('user_admin', 'cmt_standalone', 'hide', 'r'),

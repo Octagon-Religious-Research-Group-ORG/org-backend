@@ -159,6 +159,8 @@ describeWithMongo('member notifications on a real MongoDB', () => {
           }),
       } as never,
       { isAllowlisted: () => false } as never,
+      m.MemberConnection,
+      m.OrgSetting,
     );
   });
 

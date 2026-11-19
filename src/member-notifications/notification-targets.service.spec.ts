@@ -155,6 +155,7 @@ function build() {
     isAllowlisted: (email: string | undefined, verified: boolean) =>
       verified && email === 'listed@example.test',
   };
+  const connections = fakeModel([]);
   const targets = new NotificationTargets(
     comments as never,
     profiles as never,
@@ -162,8 +163,10 @@ function build() {
     pages as never,
     clerk as never,
     adminAccess as never,
+    connections as never,
+    fakeModel([]) as never,
   );
-  return { targets, profiles };
+  return { targets, profiles, connections };
 }
 
 const reader = (change: Partial<Recipient['viewer']> = {}): Recipient => ({

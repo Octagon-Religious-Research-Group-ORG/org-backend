@@ -7,6 +7,12 @@
  * the reader's access when the email is sent (`NotificationTargets`).
  */
 
+/**
+ * Why an email was dropped when it was due: what it was about is no longer
+ * there for its reader. Such a row was never sent.
+ */
+export const NO_LONGER_VISIBLE = 'no longer visible';
+
 /** Categories a member can turn on or off one by one. */
 export const MEMBER_CATEGORIES = [
   'comments',
@@ -15,6 +21,9 @@ export const MEMBER_CATEGORIES = [
   'votes',
   'claims',
   'moderation',
+  // Connection requests (Chunk 18): a new one, and one accepted.
+  'connectionRequests',
+  'connectionAccepts',
 ] as const;
 
 /** Categories only admins receive. */
@@ -63,6 +72,8 @@ export const NOTIFICATION_KINDS = [
   'admin-eam-request',
   'admin-report',
   'admin-claim-requested',
+  'connection-requested',
+  'connection-accepted',
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
@@ -81,6 +92,8 @@ export const CATEGORY_OF: Record<NotificationKind, Category> = {
   'admin-eam-request': 'adminEam',
   'admin-report': 'adminReports',
   'admin-claim-requested': 'adminClaims',
+  'connection-requested': 'connectionRequests',
+  'connection-accepted': 'connectionAccepts',
 };
 
 /** One line per kind, singular and plural. Never any member text. */
@@ -143,6 +156,14 @@ export const LINE_OF: Record<
   'admin-claim-requested': [
     'A member asked to claim an imported page.',
     (n) => `${n} members asked to claim an imported page.`,
+  ],
+  'connection-requested': [
+    'A member sent you a connection request.',
+    (n) => `Members sent you ${n} connection requests.`,
+  ],
+  'connection-accepted': [
+    'A member accepted your connection request.',
+    (n) => `Members accepted ${n} of your connection requests.`,
   ],
 };
 

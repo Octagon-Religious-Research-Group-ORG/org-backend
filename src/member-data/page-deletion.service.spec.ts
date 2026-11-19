@@ -1,3 +1,4 @@
+import { recordsOver } from '../connections/connections-harness.mocks-spec';
 import {
   BadRequestException,
   ConflictException,
@@ -53,6 +54,7 @@ function harness(pages: Array<Record<string, unknown>> = [page()]) {
   const commentVersions = fakeModel([], { unique: [['commentId', 'seq']] });
   const { connection, session } = fakeConnection();
   const gates = fakeModel([]);
+  const connected = recordsOver(profiles);
   const service = new PageDeletionService(
     connection as never,
     profiles as never,
@@ -62,6 +64,7 @@ function harness(pages: Array<Record<string, unknown>> = [page()]) {
     comments as never,
     commentVersions as never,
     gates as never,
+    connected.records,
   );
   return {
     service,
@@ -73,6 +76,7 @@ function harness(pages: Array<Record<string, unknown>> = [page()]) {
     accounts,
     comments,
     commentVersions,
+    connected,
   };
 }
 
@@ -729,5 +733,48 @@ describe('PageDeletionService: the write gate (Chunk 17 round 9, F2)', () => {
       expect.objectContaining({ _id: writeGateId(OWNER), at: NOW }),
     ]);
     expect(JSON.stringify(h.gates.docs)).not.toContain(OWNER);
+  });
+});
+
+describe('PageDeletionService: connection requests (Chunk 18)', () => {
+  function live(from: string, to: string, status = 'pending') {
+    return {
+      _id: new Types.ObjectId(),
+      fromUserId: from,
+      toUserId: to,
+      pairKey: [from, to].sort().join('|'),
+      status,
+      live: true,
+      createdAt: NOW,
+    };
+  }
+
+  it('ends the member’s requests and connections with their page, and an undo does not bring them back', async () => {
+    const h = harness();
+    h.connected.connections.docs.push(
+      live(OWNER, 'user_other'),
+      live('user_third', OWNER, 'accepted'),
+      live('user_other', 'user_third'),
+    );
+    await h.service.deleteOwn(OWNER, 'quiet-fern', NOW);
+    expect(
+      h.connected.connections.docs.map((r) => [r.status, r.endReason]),
+    ).toEqual([
+      ['ended', 'page-deleted'],
+      ['ended', 'page-deleted'],
+      ['pending', undefined],
+    ]);
+    await h.service.undoOwn(OWNER, LATER);
+    expect(h.connected.connections.docs[1].status).toBe('ended');
+  });
+
+  it('ends them when the account is deleted', async () => {
+    const h = harness();
+    h.connected.connections.docs.push(live('user_other', OWNER, 'accepted'));
+    await h.service.accountDeleted(OWNER, NOW);
+    expect(h.connected.connections.docs[0]).toMatchObject({
+      status: 'ended',
+      endReason: 'page-deleted',
+    });
   });
 });

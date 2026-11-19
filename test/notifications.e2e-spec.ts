@@ -164,6 +164,8 @@ describe('notification routes (e2e)', () => {
         votes: true,
         claims: true,
         moderation: true,
+        connectionRequests: true,
+        connectionAccepts: true,
       },
       digest: false,
       immediate: true,

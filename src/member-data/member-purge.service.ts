@@ -32,6 +32,7 @@ import {
   toRecord,
   VERSION_PROJECTION,
 } from '../anchoring/version-records';
+import { ConnectionRecords } from '../connections/connection-records.service';
 import { titleBlockId } from '../members/editable-fields';
 import { PictureStore } from '../members/picture-store.service';
 import { PERSON_DETAIL_KEYS } from '../moderation/log-details';
@@ -130,6 +131,8 @@ interface DuePage {
   imageIds?: string[];
   deletedAt?: Date;
   deletion: ProfileDeletion;
+  /** Absent on an imported page nobody claimed, and once purged. */
+  ownerUserId?: string;
 }
 
 interface DueAccount {
@@ -291,6 +294,7 @@ export class MemberPurgeService {
     private readonly log: ModerationLogService,
     @InjectModel(UserWriteGate.name)
     private readonly gateModel: Model<UserWriteGateDocument>,
+    private readonly connections: ConnectionRecords,
   ) {}
 
   private duePages(now: Date) {
@@ -376,6 +380,7 @@ export class MemberPurgeService {
           imageIds: 1,
           deletedAt: 1,
           deletion: 1,
+          ownerUserId: 1,
         })
         .sort({ 'deletion.purgeAfter': 1, _id: 1 })
         .limit(PURGE_BATCH)
@@ -550,6 +555,11 @@ export class MemberPurgeService {
       )
       .exec();
     await this.searchModel.deleteMany({ profileId: page._id }).exec();
+    // The owner's connection requests, settings and own blocks (Chunk 18);
+    // read before the last write, which removes the owner.
+    if (page.ownerUserId) {
+      await this.connections.purgeForPage(page.ownerUserId);
+    }
     // A picture already gone counts as removed (round 2, #3).
     for (const id of page.imageIds ?? []) await this.pictures.remove(id);
 
@@ -667,6 +677,7 @@ export class MemberPurgeService {
           imageIds: 1,
           deletedAt: 1,
           deletion: 1,
+          ownerUserId: 1,
         })
         .lean()
         .exec()) as unknown as DuePage;
@@ -735,6 +746,7 @@ export class MemberPurgeService {
       .exec();
     await this.contactsModel.deleteMany({ userId }).exec();
     await this.prefsModel.deleteMany({ userId }).exec();
+    await this.connections.purgeForAccount(userId);
     await this.queueModel
       .deleteMany({ $or: [{ userId }, { actorUserId: userId }] })
       .exec();

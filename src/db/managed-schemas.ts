@@ -37,6 +37,9 @@ import { AccountDeletionSchema } from '../member-data/schemas/account-deletion.s
 import { PurgeRunLockSchema } from '../member-data/schemas/purge-run-lock.schema';
 import { WebhookEventSchema } from '../member-data/schemas/webhook-event.schema';
 import { UserWriteGateSchema } from '../member-data/schemas/user-write-gate.schema';
+import { ConnectionBlockSchema } from '../connections/schemas/connection-block.schema';
+import { ConnectionSettingsSchema } from '../connections/schemas/connection-settings.schema';
+import { MemberConnectionSchema } from '../connections/schemas/connection.schema';
 
 /**
  * Every collection whose indexes are created deliberately (`autoIndex: false`).
@@ -84,4 +87,7 @@ export const MANAGED_SCHEMAS: ReadonlyArray<{ name: string; schema: Schema }> =
     { name: 'PurgeRunLock', schema: PurgeRunLockSchema },
     { name: 'AccountDeletion', schema: AccountDeletionSchema },
     { name: 'UserWriteGate', schema: UserWriteGateSchema },
+    { name: 'MemberConnection', schema: MemberConnectionSchema },
+    { name: 'ConnectionBlock', schema: ConnectionBlockSchema },
+    { name: 'ConnectionSettings', schema: ConnectionSettingsSchema },
   ];

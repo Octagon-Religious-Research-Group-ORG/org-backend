@@ -1,6 +1,8 @@
 // The moderation queue and the moderator's actions (Chunk 13), with the real
 // comment services over in-memory models. Transactions themselves are tested
 // on a real replica set (test/moderation-mongo.e2e-spec.ts). Synthetic data.
+import { recordsOver } from '../../connections/connections-harness.mocks-spec';
+import { pairKeyOf } from '../../connections/connection-rules';
 import {
   BadRequestException,
   ConflictException,
@@ -30,6 +32,7 @@ import {
   COMMENT_BUSY_NOW,
   ModerationQueueService,
   NO_OPEN_REPORTS,
+  NOTE_NOT_SHOWN,
   NOT_MODERATED,
   OWN_CONTENT,
   QUEUE_PAGE_SIZE,
@@ -46,6 +49,7 @@ interface Built {
   inboxModel: FakeModel;
   log: { record: jest.Mock };
   service: ModerationQueueService;
+  connected: ReturnType<typeof recordsOver>;
 }
 
 function build(notifier?: unknown): Built {
@@ -54,6 +58,7 @@ function build(notifier?: unknown): Built {
   const inboxModel = fakeModel([], { timestamps: true });
   const log = { record: jest.fn(() => Promise.resolve({})) };
   const { connection } = fakeConnection();
+  const connected = recordsOver(h.profiles);
   const inbox = new AdminInboxService(
     inboxModel as never,
     h.profiles as never,
@@ -71,15 +76,16 @@ function build(notifier?: unknown): Built {
     new ReportsStore(reports as never),
     inbox,
     log as never,
+    connected.records,
     notifier as never,
   );
-  return { h, reports, inboxModel, log, service };
+  return { h, reports, inboxModel, log, service, connected };
 }
 
 let minute = 0;
 function report(
   b: Built,
-  targetType: 'comment' | 'member-page',
+  targetType: 'comment' | 'member-page' | 'connection-note',
   targetId: string,
   extra: Record<string, unknown> = {},
 ) {
@@ -650,5 +656,89 @@ describe('ModerationQueueService: telling the author (Chunk 14)', () => {
     expect(commentModerated).toHaveBeenLastCalledWith(
       expect.objectContaining({ commentId: 'cmt_imp1', authorUserId: U.owner }),
     );
+  });
+});
+
+describe('ModerationQueueService: notes with connection requests (Chunk 18)', () => {
+  function withNote(b: Built, from = U.named, to = U.anon) {
+    const _id = new Types.ObjectId();
+    b.connected.connections.docs.push({
+      _id,
+      fromUserId: from,
+      toUserId: to,
+      pairKey: pairKeyOf(from, to),
+      status: 'pending',
+      live: true,
+      note: SECRET,
+      createdAt: new Date(Date.UTC(2026, 10, 1)),
+    });
+    return String(_id);
+  }
+
+  it('lists a reported note with its text and both members, for admins', async () => {
+    const b = build();
+    const id = withNote(b);
+    report(b, 'connection-note', id);
+    report(b, 'connection-note', String(new Types.ObjectId()));
+    const { entries } = await b.service.queue(ADMIN, 'open', 1);
+    expect(entries[0]).toMatchObject({
+      targetType: 'connection-note',
+      ownContent: false,
+      note: {
+        note: SECRET,
+        hidden: false,
+        sender: { slug: 'named-writer', ownerUserId: U.named },
+        recipient: { ownerUserId: U.anon },
+      },
+    });
+    expect(entries[1]).toMatchObject({ missing: true });
+    const own = await b.service.queue(U.named, 'open', 1);
+    expect(own.entries[0].ownContent).toBe(true);
+  });
+
+  it('hides the note, closes its reports, and logs it in one transaction', async () => {
+    const b = build();
+    const id = withNote(b);
+    report(b, 'connection-note', id);
+    await expect(
+      b.service.hideNote(ADMIN, id, 'Synthetic: insulting'),
+    ).resolves.toEqual({ hidden: true, reportsClosed: 1 });
+    expect(b.connected.connections.docs[0].noteHiddenAt).toBeInstanceOf(Date);
+    expect(b.reports.docs[0]).toMatchObject({
+      status: 'resolved',
+      resolution: 'hidden',
+    });
+    expect(b.log.record).toHaveBeenCalledWith(
+      {
+        actorUserId: ADMIN,
+        action: 'connection-note.hidden',
+        targetType: 'connection-note',
+        targetId: id,
+        reason: 'Synthetic: insulting',
+        details: { reportsClosed: 1, authorUserId: U.named },
+      },
+      expect.anything(),
+    );
+    await expect(b.service.hideNote(ADMIN, id, 'again')).rejects.toEqual(
+      new ConflictException(NOTE_NOT_SHOWN),
+    );
+  });
+
+  it('never acts on an admin’s own note, nor one that does not exist', async () => {
+    const b = build();
+    const id = withNote(b, ADMIN, U.anon);
+    report(b, 'connection-note', id);
+    await expect(b.service.hideNote(ADMIN, id, 'r')).rejects.toEqual(
+      new ForbiddenException(OWN_CONTENT),
+    );
+    await expect(
+      b.service.dismiss(ADMIN, 'connection-note', id, 'r'),
+    ).rejects.toEqual(new ForbiddenException(OWN_CONTENT));
+    await expect(
+      b.service.hideNote(ADMIN, String(new Types.ObjectId()), 'r'),
+    ).rejects.toEqual(new NotFoundException(NOTE_NOT_SHOWN));
+    await expect(
+      b.service.dismiss(U.named, 'connection-note', id, 'Synthetic: fine'),
+    ).resolves.toEqual({ dismissed: 1 });
   });
 });

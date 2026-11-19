@@ -48,6 +48,12 @@ export interface ExportLike {
   votes: unknown[];
   claims: unknown[];
   reportsFiled: unknown[];
+  connections: {
+    connected: unknown[];
+    requestsSent: unknown[];
+    requestsReceived: unknown[];
+    blocksMade: unknown[];
+  };
   receipts: { included: string[]; notIncluded?: number };
 }
 
@@ -128,6 +134,7 @@ export function exportReadme(data: ExportLike): string {
     '              Each is the same zip the site gives you, with its own README.',
     '',
     `In this download: ${data.myComments.length} comments, ${data.commentsOnMyPage.length} comments by others on your page, ${data.votes.length} votes, ${data.claims.length} claims, ${data.reportsFiled.length} reports you filed, ${data.receipts.included.length} receipts.`,
+    `Connections: ${data.connections.connected.length} connected, ${data.connections.requestsSent.length} requests sent, ${data.connections.requestsReceived.length} received, ${data.connections.blocksMade.length} members you blocked (in my-data.json).`,
     ...(data.receipts.notIncluded
       ? [
           `${data.receipts.notIncluded} more receipts did not fit; each is still in its history on the site.`,

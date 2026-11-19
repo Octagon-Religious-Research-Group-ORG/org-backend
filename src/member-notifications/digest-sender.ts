@@ -8,7 +8,7 @@ import { utcDay } from '../moderation/report-quota.store';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EmailBudgetStore, nextUtcDay } from './email-budget.store';
 import { readNotificationConfig } from './notification-config';
-import { deliveryFor } from './notification-kinds';
+import { deliveryFor, NO_LONGER_VISIBLE } from './notification-kinds';
 import { composeEmail } from './notification-mail';
 import { NotificationPrefsService } from './notification-prefs.service';
 import {
@@ -50,6 +50,15 @@ export const DIGEST_KEEP_DAYS = 30;
 
 type DigestRow = NotificationDigestRow & { _id: Types.ObjectId };
 type ItemRow = NotificationQueueRow & { _id: Types.ObjectId };
+
+/** The row's `refs` are still the version that was read. */
+export function sameRefs(refsVersion: number) {
+  return refsVersion === 0
+    ? {
+        $or: [{ refsVersion: { $exists: false } }, { refsVersion: 0 }],
+      }
+    : { refsVersion };
+}
 
 function describe(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -249,8 +258,8 @@ export class DigestSender {
       }
       // Fresh: apply what the reader's settings and access say now.
       const plan = await this.build(row, recipient);
-      for (const { id, outcome } of plan.drops) {
-        await this.drop([id], outcome);
+      for (const { id, outcome, refsVersion } of plan.drops) {
+        await this.drop([id], outcome, 'skipped', refsVersion);
       }
       for (const id of plan.toImmediate) {
         await this.queueModel
@@ -373,7 +382,13 @@ export class DigestSender {
       } else {
         const line = await this.targets.describe(item, recipient);
         if (line) shown.push({ item, line });
-        else plan.drops.push({ id: item._id, outcome: 'no longer visible' });
+        else {
+          plan.drops.push({
+            id: item._id,
+            outcome: NO_LONGER_VISIBLE,
+            refsVersion: item.refsVersion ?? 0,
+          });
+        }
       }
     }
     if (shown.length === 0) return plan;
@@ -396,10 +411,16 @@ export class DigestSender {
     ids: Types.ObjectId[],
     outcome: string,
     status: 'skipped' | 'failed' = 'skipped',
+    /** Only while `refs` is still what was described (review round 5). */
+    refsVersion?: number,
   ) {
     await this.queueModel
       .updateMany(
-        { _id: { $in: ids }, status: 'queued' },
+        {
+          _id: { $in: ids },
+          status: 'queued',
+          ...(refsVersion === undefined ? {} : sameRefs(refsVersion)),
+        },
         { $set: { status, outcome } },
       )
       .exec();
@@ -523,7 +544,8 @@ export const WITHDRAWN = 'withdrawn after unknown send';
 interface Plan {
   email?: StoredEmail;
   shownIds: Types.ObjectId[];
-  drops: Array<{ id: Types.ObjectId; outcome: string }>;
+  /** `refsVersion`: what was read, so a re-pointed item is not dropped. */
+  drops: Array<{ id: Types.ObjectId; outcome: string; refsVersion?: number }>;
   toImmediate: Types.ObjectId[];
 }
 

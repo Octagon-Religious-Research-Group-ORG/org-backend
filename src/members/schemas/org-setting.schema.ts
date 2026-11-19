@@ -4,6 +4,8 @@ import { HydratedDocument } from 'mongoose';
 export const ORG_SETTING_KEYS = [
   'voting-invite',
   'anonymous-may-vote',
+  // What the site calls a connection request (Chunk 18).
+  'connection-name',
   // Held while an admin role change runs (Chunk 12), so two admins cannot
   // demote each other at once and leave no admin. Not a setting anyone sees.
   'role-change-lock',
