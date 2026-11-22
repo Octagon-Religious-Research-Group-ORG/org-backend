@@ -11,10 +11,7 @@ import type {
  * - `named-member`: an approved page under the member's own name.
  */
 export type ViewerKind =
-  | 'guest'
-  | 'signed-in'
-  | 'anonymous-member'
-  | 'named-member';
+  'guest' | 'signed-in' | 'anonymous-member' | 'named-member';
 
 export interface Viewer {
   kind: ViewerKind;

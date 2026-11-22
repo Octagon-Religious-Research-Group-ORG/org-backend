@@ -72,10 +72,13 @@ async function cast(
 
 /** Removal turns need `$expr`, which the in-memory model lacks. */
 function allowRemovals(h: Harness) {
-  Object.assign(h.profiles.docs.find((p) => p.slug === 'open-page')!, {
-    liveTabCount: 2,
-    nextTabOrder: 3,
-  });
+  Object.assign(
+    h.profiles.docs.find((p) => p.slug === 'open-page')!,
+    {
+      liveTabCount: 2,
+      nextTabOrder: 3,
+    },
+  );
   jest
     .spyOn(
       h.editor as unknown as { takeRemovalTurn: () => Promise<unknown> },

@@ -67,11 +67,7 @@ export interface Party {
  * combination.
  */
 export type RequestRefusal =
-  | 'self'
-  | 'not-eligible'
-  | 'private-needs-public'
-  | 'cooldown'
-  | 'not-open';
+  'self' | 'not-eligible' | 'private-needs-public' | 'cooldown' | 'not-open';
 
 export function requestRefusal(input: {
   requester: Party;

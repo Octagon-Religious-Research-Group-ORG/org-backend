@@ -376,19 +376,17 @@ export class ClaimsService {
       }
     }
     return {
-      claims: rows.map(
-        (row): AdminClaimView => ({
-          claimId: String(row._id),
-          status: row.status,
-          message: row.message,
-          requestedAt: row.createdAt.toISOString(),
-          ...(row.decidedAt ? { decidedAt: row.decidedAt.toISOString() } : {}),
-          decidedBySite: row.decidedBy === SYSTEM_CLAIMS_ACTOR,
-          ...(row.reason ? { reason: row.reason } : {}),
-          claimant: { userId: row.userId, ...identities.get(row.userId) },
-          ...pageView(pages.get(String(row.profileId))),
-        }),
-      ),
+      claims: rows.map((row): AdminClaimView => ({
+        claimId: String(row._id),
+        status: row.status,
+        message: row.message,
+        requestedAt: row.createdAt.toISOString(),
+        ...(row.decidedAt ? { decidedAt: row.decidedAt.toISOString() } : {}),
+        decidedBySite: row.decidedBy === SYSTEM_CLAIMS_ACTOR,
+        ...(row.reason ? { reason: row.reason } : {}),
+        claimant: { userId: row.userId, ...identities.get(row.userId) },
+        ...pageView(pages.get(String(row.profileId))),
+      })),
     };
   }
 

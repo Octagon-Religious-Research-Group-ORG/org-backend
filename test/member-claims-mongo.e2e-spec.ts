@@ -544,11 +544,10 @@ describeWithMongo('claims on a real MongoDB', () => {
             { _id: new Types.ObjectId(asked.claimId) },
             { $set: { approvingAt: new Date(Date.now() - 10 * 60_000) } },
           )
-          .then(
-            (): Promise<unknown> =>
-              later === 'reject'
-                ? claims.reject('user_admin_two', asked.claimId, 'Synthetic')
-                : claims.withdraw(who, asked.claimId),
+          .then((): Promise<unknown> =>
+            later === 'reject'
+              ? claims.reject('user_admin_two', asked.claimId, 'Synthetic')
+              : claims.withdraw(who, asked.claimId),
           )
           .then(
             (value) => ({ value }),

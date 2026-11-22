@@ -62,8 +62,7 @@ export interface RequestOrigin {
 }
 
 export type MembershipStatus =
-  | 'none'
-  | Exclude<ProfileReviewStatus, 'claiming'>;
+  'none' | Exclude<ProfileReviewStatus, 'claiming'>;
 
 /**
  * Most existing pages named on one near-duplicate flag; a review needs a few

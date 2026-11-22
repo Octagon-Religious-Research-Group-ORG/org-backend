@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/unbound-method -- jest matchers read mocked methods off the object */
 import {
   EXIT_CODES,
   formatIndexOutcome,

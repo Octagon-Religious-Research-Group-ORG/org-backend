@@ -71,8 +71,8 @@ export const VERSION_ROW = {
   prevHash: '0'.repeat(64),
   authorUserId: 'user_owner',
 };
-export const appendVersion = jest.fn(
-  (): Promise<unknown> => Promise.resolve({ seq: 2 }),
+export const appendVersion = jest.fn((): Promise<unknown> =>
+  Promise.resolve({ seq: 2 }),
 );
 
 export const page = (

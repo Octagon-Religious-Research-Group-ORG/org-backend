@@ -282,14 +282,12 @@ export function buildImportPlan(
     for (const index of section.paragraphs) add(index, section.section);
   }
 
-  const tabs = proposal.tabs.map(
-    (tab, order): PlannedTab => ({
-      tabId: ids('tab'),
-      title: tab.title,
-      ...(tab.group ? { group: tab.group } : {}),
-      order,
-    }),
-  );
+  const tabs = proposal.tabs.map((tab, order): PlannedTab => ({
+    tabId: ids('tab'),
+    title: tab.title,
+    ...(tab.group ? { group: tab.group } : {}),
+    order,
+  }));
   proposal.tabs.forEach((tab, at) => {
     for (const index of tab.paragraphs) add(index, 'beliefs', tabs[at].tabId);
   });

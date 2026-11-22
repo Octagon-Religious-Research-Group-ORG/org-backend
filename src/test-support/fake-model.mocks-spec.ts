@@ -58,9 +58,10 @@ function unsetPath(doc: Doc, path: string) {
   const keys = path.split('.');
   const parent = keys
     .slice(0, -1)
-    .reduce<
-      Doc | undefined
-    >((value, key) => value?.[key] as Doc | undefined, doc);
+    .reduce<Doc | undefined>(
+      (value, key) => value?.[key] as Doc | undefined,
+      doc,
+    );
   if (parent) delete parent[keys.at(-1)!];
 }
 

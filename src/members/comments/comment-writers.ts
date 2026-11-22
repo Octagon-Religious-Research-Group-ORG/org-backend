@@ -34,10 +34,7 @@ export interface CommentWriter extends Viewer {
  * a form that would be refused.
  */
 export type WriteBlock =
-  | 'sign-in'
-  | 'needs-approved-page'
-  | 'verify-email'
-  | 'cannot-check';
+  'sign-in' | 'needs-approved-page' | 'verify-email' | 'cannot-check';
 
 export interface WriteStatus {
   mayComment: boolean;

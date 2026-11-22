@@ -94,10 +94,7 @@ export interface ThreadPage {
   viewerMayComment: boolean;
   /** Why the form is not offered, when it is not. */
   viewerWriteBlock?:
-    | 'sign-in'
-    | 'needs-approved-page'
-    | 'verify-email'
-    | 'cannot-check';
+    'sign-in' | 'needs-approved-page' | 'verify-email' | 'cannot-check';
   /** As above, and not the page's owner (owners edit instead). */
   viewerMaySuggest: boolean;
 }

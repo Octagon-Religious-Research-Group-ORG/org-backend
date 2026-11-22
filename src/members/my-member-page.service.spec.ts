@@ -97,9 +97,8 @@ function setup(options: Options = {}) {
     }),
   };
   const pictures = {
-    currentPicture: jest.fn(
-      (ids: string[]): Promise<string | undefined> =>
-        Promise.resolve(ids.find((id) => id !== 'gallery-1')),
+    currentPicture: jest.fn((ids: string[]): Promise<string | undefined> =>
+      Promise.resolve(ids.find((id) => id !== 'gallery-1')),
     ),
     store: jest.fn(() => {
       order.push('store');

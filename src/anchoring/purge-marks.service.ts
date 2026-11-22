@@ -138,10 +138,7 @@ interface CheckedAnchor {
 }
 
 export type PurgeShape =
-  | 'content'
-  | 'suggester'
-  | 'suggester-pending'
-  | 'invalid';
+  'content' | 'suggester' | 'suggester-pending' | 'invalid';
 
 @Injectable()
 export class PurgeMarksService {

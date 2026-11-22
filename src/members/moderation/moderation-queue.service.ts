@@ -445,9 +445,7 @@ export class ModerationQueueService {
                   row.suggestion.status === 'accepting'
                     ? 'pending'
                     : (row.suggestion.status as
-                        | 'pending'
-                        | 'accepted'
-                        | 'declined'),
+                        'pending' | 'accepted' | 'declined'),
               }
             : {}),
           ...(row.stance ? { stance: row.stance } : {}),

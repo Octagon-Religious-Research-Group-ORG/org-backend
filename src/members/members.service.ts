@@ -398,12 +398,10 @@ export class MembersService {
     const inSection = (section: string) =>
       shown.filter((block) => block.section === section);
 
-    const extras = EXTRA_SECTIONS.map(
-      (section): ExtraSectionView => ({
-        section,
-        paragraphs: paragraphs(inSection(section)),
-      }),
-    ).filter((extra) => extra.paragraphs.length > 0);
+    const extras = EXTRA_SECTIONS.map((section): ExtraSectionView => ({
+      section,
+      paragraphs: paragraphs(inSection(section)),
+    })).filter((extra) => extra.paragraphs.length > 0);
 
     const counts = await commentCounts(this.commentModel, profileId);
     const beliefBlocks = inSection('beliefs');
@@ -424,17 +422,15 @@ export class MembersService {
       removedTabs: show.manager ? await this.removedTabs(profileId) : [],
       bio: paragraphs(visible(inSection('bio'))),
       extras,
-      tabs: tabs.map(
-        (tab): TabView => ({
-          tabId: tab.tabId,
-          title: tab.title,
-          ...(tab.group ? { group: tab.group } : {}),
-          needsReview: tab.reviewStatus === 'imported-review',
-          paragraphs: paragraphs(visible(tabBlocks(tab.tabId))),
-          commentCount: counts.get(tab.tabId) ?? 0,
-          textSeq: headSeq(tabBlocks(tab.tabId).at(0)?.blockId ?? ''),
-        }),
-      ),
+      tabs: tabs.map((tab): TabView => ({
+        tabId: tab.tabId,
+        title: tab.title,
+        ...(tab.group ? { group: tab.group } : {}),
+        needsReview: tab.reviewStatus === 'imported-review',
+        paragraphs: paragraphs(visible(tabBlocks(tab.tabId))),
+        commentCount: counts.get(tab.tabId) ?? 0,
+        textSeq: headSeq(tabBlocks(tab.tabId).at(0)?.blockId ?? ''),
+      })),
       pageCommentCount: counts.get(PAGE_THREAD) ?? 0,
     };
   }

@@ -154,12 +154,7 @@ export interface TokenOptions {
   signerSerial?: string;
   signerByKeyId?: boolean;
   signingCertificate?:
-    | 'v1'
-    | 'v2'
-    | 'v2-alg'
-    | 'v2-unknown-alg'
-    | 'none'
-    | 'wrong';
+    'v1' | 'v2' | 'v2-alg' | 'v2-unknown-alg' | 'none' | 'wrong';
   duplicateAttribute?: boolean;
   badSignature?: boolean;
   twoSigners?: boolean;

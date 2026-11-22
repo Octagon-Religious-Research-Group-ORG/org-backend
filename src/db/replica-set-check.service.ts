@@ -30,8 +30,7 @@ export class ReplicaSetCheckService implements OnApplicationBootstrap {
       const hello = (await this.connection.db
         ?.admin()
         .command({ hello: 1 })) as
-        | { setName?: string; msg?: string }
-        | undefined;
+        { setName?: string; msg?: string } | undefined;
       if (!hello) throw new Error('not connected');
       if (hello.setName || hello.msg === 'isdbgrid') return 'replica-set';
       this.logger.warn(STANDALONE_WARNING);
