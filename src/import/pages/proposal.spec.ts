@@ -306,7 +306,16 @@ describe('proposeStructure', () => {
       ]);
     });
 
-    it.each(['Legal', ' LEGAL ', 'legal:', 'Legal :', 'Legal\u00a0'])(
+    it.each([
+      'Legal',
+      ' LEGAL ',
+      'legal:',
+      'Legal :',
+      'Legal\u00a0',
+      // The template's own heading, when Pages kept it on one line (Leo, Emily).
+      'Legal Requirements For Acquiring Entheogens Through ORG',
+      'legal requirements for acquiring entheogens through ORG:',
+    ])(
       'treats a section heading written %p as the Legal section',
       (heading) => {
         const doc = docx([

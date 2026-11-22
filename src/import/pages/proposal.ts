@@ -105,7 +105,14 @@ function sectionKind(heading: string): Kind {
   }
   if (/^contact( info(rmation)?)?$/.test(text)) return 'contact';
   // Exactly "Legal": "Legal Rights and Liberty" is a member's own heading.
+  // Or the template's full heading on one line, as Pages kept it in some
+  // copies (others split it into "Legal" + "Requirements For …").
   if (/^legal ?:?$/.test(text)) return 'legal';
+  if (
+    /^legal requirements for acquiring entheogens through org ?:?$/.test(text)
+  ) {
+    return 'legal';
+  }
   return 'other';
 }
 
