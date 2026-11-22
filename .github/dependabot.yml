@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Security fixes are opened automatically (repo setting "Dependabot security updates").
+  # This adds a weekly, grouped pass for minor/patch updates so the alert count stays near zero.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
