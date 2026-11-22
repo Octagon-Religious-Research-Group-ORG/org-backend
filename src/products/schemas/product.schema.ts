@@ -2,9 +2,7 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 
 export type ProductCategory =
-  | 'vaporizer-accessories'
-  | '3d-printed-parts'
-  | 'laboratory-tools';
+  'vaporizer-accessories' | '3d-printed-parts' | 'laboratory-tools';
 
 @Schema({ _id: false })
 export class ProductVariant {
