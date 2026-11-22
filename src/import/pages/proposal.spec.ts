@@ -332,6 +332,38 @@ describe('proposeStructure', () => {
       },
     );
 
+    it('keeps the Legal section whole when its lines are styled as headings (Emily)', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'a' },
+        h('Legal Requirements For Acquiring Entheogens Through ORG'),
+        h('Read the following (and sign electronically below):'),
+        h('I have read and understand ORG and About Us/Contact.'),
+        { text: 'signed' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+      expect(proposal.sections).toEqual([]);
+      expect(proposal.dropped.map((drop) => drop.paragraphs)).toEqual([
+        [3, 4, 5],
+      ]);
+    });
+
+    it('still ends the Legal section at a known section heading', () => {
+      const doc = docx([
+        h('Beliefs'),
+        { text: 'a' },
+        h('Legal'),
+        { text: 'l' },
+        h('Contact'),
+        { text: 'c' },
+      ]);
+      const proposal = proposeStructure(INPUT, doc);
+      expect(proposal.dropped.map((drop) => drop.paragraphs)).toEqual([[3]]);
+      expect(proposal.sections).toEqual([
+        { section: 'contact', paragraphs: [5] },
+      ]);
+    });
+
     it('keeps a same-level "Legal Rights" section as the member wrote it', () => {
       const doc = docx([
         h('Beliefs'),

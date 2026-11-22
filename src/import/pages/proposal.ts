@@ -420,8 +420,14 @@ function analyseStructure(
       text !== '' &&
       (kind === undefined
         ? sectionKind(text) !== 'other'
-        : level <= sectionLevel ||
-          (sectionKind(text) !== 'other' && sectionKind(text) !== 'legal'));
+        : // Inside Legal, only a known section heading ends it: some copies
+          // style each legal line as a heading (Emily), and those lines must
+          // not become sections of their own (§2b). A Legal section that grows
+          // too large is flagged for review (LEGAL_REVIEW_PARAGRAPHS).
+          kind === 'legal'
+          ? sectionKind(text) !== 'other' && sectionKind(text) !== 'legal'
+          : level <= sectionLevel ||
+            (sectionKind(text) !== 'other' && sectionKind(text) !== 'legal'));
 
     if (isSectionHeading) {
       kind = sectionKind(text);
