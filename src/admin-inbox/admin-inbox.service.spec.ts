@@ -231,6 +231,7 @@ describe('AdminInboxService', () => {
             slug: 'quiet-fern',
             displayName: 'Quiet Fern',
             reviewStatus: 'pending',
+            similarNameOf: ['quiet-harbor'],
           },
         ]),
       );
@@ -247,6 +248,7 @@ describe('AdminInboxService', () => {
           slug: 'quiet-fern',
           displayName: 'Quiet Fern',
           reviewStatus: 'pending',
+          similarNameOf: ['quiet-harbor'],
         },
         note: 'A synthetic note.',
         createdAt: CREATED.toISOString(),

@@ -27,6 +27,10 @@ export interface ExportLike {
     tabs: Array<{
       title: unknown;
       removedAt?: string;
+      removedAndBroughtBack?: Array<{
+        removedAt?: string;
+        broughtBackAt?: string;
+      }>;
       titleHistory: VersionLike[];
     }>;
     blocks: Array<{
@@ -94,6 +98,10 @@ export function exportText(data: ExportLike): string {
       lines.push(
         '',
         `Belief tab "${String(tab.title)}"${tab.removedAt ? ` (removed ${tab.removedAt})` : ''}`,
+        ...(tab.removedAndBroughtBack ?? []).map(
+          (removal) =>
+            `  Removed ${removal.removedAt}, brought back ${removal.broughtBackAt}`,
+        ),
         ...versionLines(tab.titleHistory, '  '),
       );
     }

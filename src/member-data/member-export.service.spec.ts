@@ -139,7 +139,13 @@ function build(overrides: { page?: Record<string, unknown> | null } = {}) {
       },
     ]),
     tabs: fakeModel([
-      { profileId: MINE, tabId: 'tab1', title: 'Synthetic belief', order: 0 },
+      {
+        profileId: MINE,
+        tabId: 'tab1',
+        title: 'Synthetic belief',
+        order: 0,
+        removals: [{ removedAt: T, restoredAt: T }],
+      },
       {
         profileId: MINE,
         tabId: 'tab2',
@@ -530,6 +536,9 @@ describe('MemberExportService: what is in it', () => {
       {
         tabId: 'tab1',
         title: 'Synthetic belief',
+        removedAndBroughtBack: [
+          { removedAt: T.toISOString(), broughtBackAt: T.toISOString() },
+        ],
         titleHistory: [
           {
             seq: 1,

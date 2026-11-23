@@ -68,6 +68,12 @@ export interface HistoryEntry {
 /** The author of the suggestion a version came from. */
 type AuthorLookup = (row: VersionRow) => CommentAuthorView;
 
+/** One removal of a belief and its return to the page (plan §2e). */
+export interface TabRemoval {
+  removedAt: string;
+  restoredAt: string;
+}
+
 export interface HistoryPage {
   entries: HistoryEntry[];
   page: number;
@@ -200,12 +206,26 @@ export class MemberHistoryService {
     viewer: Viewer,
     field: TabHistoryField = 'text',
     page = 1,
-  ) {
-    return this.listField(
+  ): Promise<HistoryPage & { removals?: TabRemoval[] }> {
+    const listed = await this.listField(
       await this.readableTabField(slug, tabId, viewer, field),
       page,
       viewer,
     );
+    // Each time the belief was removed and brought back (plan §2e): the
+    // dates only, shown to whoever may read this history.
+    const tab = (await this.tabModel
+      .findOne({ tabId })
+      .select({ removals: 1 })
+      .lean()
+      .exec()) as {
+      removals?: Array<{ removedAt: Date; restoredAt: Date }>;
+    } | null;
+    const removals = (tab?.removals ?? []).map((removal) => ({
+      removedAt: removal.removedAt.toISOString(),
+      restoredAt: removal.restoredAt.toISOString(),
+    }));
+    return removals.length > 0 ? { ...listed, removals } : listed;
   }
 
   /**

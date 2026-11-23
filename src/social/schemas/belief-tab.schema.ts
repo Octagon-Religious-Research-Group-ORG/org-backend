@@ -68,6 +68,19 @@ export class BeliefTab {
   removedAt?: Date;
 
   /**
+   * Each earlier time the owner removed this belief and brought it back
+   * (plan §2e, Tripp: a belief can return, and its history shows it was
+   * removed and re-added). Append-only; absent until the first return.
+   */
+  @Prop({
+    type: [
+      { _id: false, removedAt: { type: Date }, restoredAt: { type: Date } },
+    ],
+    default: undefined,
+  })
+  removals?: Array<{ removedAt: Date; restoredAt: Date }>;
+
+  /**
    * Text and title edits in progress (Chunk 9 review): the tab cannot be
    * removed while one is held. See `members/tab-text-turns.ts`.
    */

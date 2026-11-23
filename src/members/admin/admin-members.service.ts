@@ -410,9 +410,9 @@ export function memberView(row: PageRow): AdminMemberView {
     source: row.source,
     ...(row.ownerUserId ? { ownerUserId: row.ownerUserId } : {}),
     ...(row.createdAt ? { createdAt: row.createdAt.toISOString() } : {}),
-    ...(status === 'pending' && row.similarNameOf?.length
-      ? { similarNameOf: row.similarNameOf }
-      : {}),
+    // Kept for every page: pages open at once (plan §2e), so the admin
+    // checks a look-alike name on a live page.
+    ...(row.similarNameOf?.length ? { similarNameOf: row.similarNameOf } : {}),
     ...(row.removal
       ? {
           removal: {

@@ -43,6 +43,9 @@ interface Options {
   matched?: number;
   taken?: unknown;
   liveTabs?: number;
+  /** The tab `restoreTab` finds, and how many rows its update changes. */
+  tab?: unknown;
+  restoredCount?: number;
 }
 
 function setup(options: Options = {}) {
@@ -83,6 +86,23 @@ function setup(options: Options = {}) {
       order.push('tab');
       return Promise.resolve({});
     }),
+    findOne: jest.fn(() => chain(options.tab ?? null)),
+    updateOne: jest.fn(() => ({
+      exec: () => {
+        order.push('restore');
+        return Promise.resolve({ modifiedCount: options.restoredCount ?? 1 });
+      },
+    })),
+  };
+  const tallies = {
+    touch: jest.fn(() => {
+      order.push('touch');
+      return Promise.resolve('mark');
+    }),
+    settle: jest.fn(() => {
+      order.push('settle');
+      return Promise.resolve();
+    }),
   };
   const blockModel = {
     create: jest.fn(() => {
@@ -119,6 +139,7 @@ function setup(options: Options = {}) {
     blockModel as never,
     versions as never,
     pictures as never,
+    tallies as never,
   );
   return {
     service,
@@ -128,6 +149,7 @@ function setup(options: Options = {}) {
     blockModel,
     versions,
     pictures,
+    tallies,
   };
 }
 
@@ -579,6 +601,77 @@ describe('addBeliefTab', () => {
       expect(warn).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe('restoreTab (plan §2e)', () => {
+  const removedAt = new Date('2026-11-01T00:00:00Z');
+
+  it("answers 404 for a tab that is not on the owner's page, writing nothing", async () => {
+    const ctx = setup();
+    await expect(ctx.service.restoreTab('u', 'tab-x')).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(ctx.order).toEqual([]);
+  });
+
+  it('answers 404 without a page', async () => {
+    const ctx = setup({ page: null });
+    await expect(ctx.service.restoreTab('u', 'tab-x')).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  it('does nothing for a belief already on the page', async () => {
+    const ctx = setup({ tab: { _id: 't' } });
+    await expect(ctx.service.restoreTab('u', 'tab-x')).resolves.toEqual({
+      restored: true,
+    });
+    expect(ctx.order).toEqual([]);
+  });
+
+  it('takes a place, then brings it back once with the removal recorded, between the tally marks', async () => {
+    const ctx = setup({ tab: { _id: 't', removedAt } });
+    await expect(ctx.service.restoreTab('u', 'tab-x')).resolves.toEqual({
+      restored: true,
+    });
+    expect(ctx.order).toEqual(['touch', 'take', 'restore', 'settle']);
+    const [[filter, update]] = ctx.tabModel.updateOne.mock.calls as unknown as [
+      [
+        Record<string, unknown>,
+        {
+          $unset: unknown;
+          $push: { removals: { removedAt: Date; restoredAt: Date } };
+        },
+      ],
+    ];
+    expect(filter).toEqual({ profileId, tabId: 'tab-x', removedAt });
+    expect(update.$unset).toEqual({ removedAt: 1 });
+    expect(update.$push.removals.removedAt).toBe(removedAt);
+    expect(update.$push.removals.restoredAt).toBeInstanceOf(Date);
+    expect(ctx.tallies.settle).toHaveBeenCalledWith('tab-x', 'mark');
+  });
+
+  it('gives the place back when another window brought it back first', async () => {
+    const ctx = setup({ tab: { _id: 't', removedAt }, restoredCount: 0 });
+    await expect(ctx.service.restoreTab('u', 'tab-x')).resolves.toEqual({
+      restored: true,
+    });
+    expect(ctx.order).toEqual(['touch', 'take', 'restore', 'update', 'settle']);
+  });
+
+  it('refuses on a full page and still settles the tally mark', async () => {
+    const ctx = setup({
+      tab: { _id: 't', removedAt },
+      page: fullPage({ lastTabPlaceAt: LONG_AGO }),
+      taken: null,
+      liveTabs: MAX_TABS_PER_PAGE,
+    });
+    await expect(ctx.service.restoreTab('u', 'tab-x')).rejects.toThrow(
+      ConflictException,
+    );
+    expect(ctx.tabModel.updateOne).not.toHaveBeenCalled();
+    expect(ctx.order.at(-1)).toBe('settle');
+  });
 });
 
 describe('replacePicture', () => {

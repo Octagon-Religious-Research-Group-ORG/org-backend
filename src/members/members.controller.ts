@@ -227,6 +227,16 @@ export class MyMemberPageController {
     return this.editor.removeTab(getUserSub(request), tabId);
   }
 
+  /** Back on the page, with its history showing the removal (plan §2e). */
+  @Post('tabs/:tabId/restore')
+  @WriteThrottle()
+  restoreTab(
+    @Req() request: AuthenticatedRequest,
+    @Param('tabId') tabId: string,
+  ) {
+    return this.page.restoreTab(getUserSub(request), tabId);
+  }
+
   @Patch('visibility')
   @WriteThrottle()
   changeVisibility(

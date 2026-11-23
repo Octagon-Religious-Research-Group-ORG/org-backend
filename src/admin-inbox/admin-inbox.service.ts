@@ -46,7 +46,13 @@ export interface InboxEntryView {
   status: InboxStatus;
   subjectUserId: string;
   /** The member's page, when it still has one. */
-  page?: { slug: string; displayName: string; reviewStatus: string };
+  page?: {
+    slug: string;
+    displayName: string;
+    reviewStatus: string;
+    /** Existing pages whose name reads like this one (plan §2e). */
+    similarNameOf?: string[];
+  };
   note?: string;
   createdAt: string;
   handledAt?: string;
@@ -116,7 +122,8 @@ export class AdminInboxService {
   ) {}
 
   /**
-   * A new member page is waiting for approval. A second call for the same
+   * A new member page has a name like an existing one (pages open at once,
+   * plan §2e; older rows may still be waiting). A second call for the same
    * page writes nothing.
    */
   async notifyPageSubmitted(userId: string, profileId: Types.ObjectId) {
@@ -349,7 +356,13 @@ export class AdminInboxService {
         ? []
         : await this.profileModel
             .find({ _id: { $in: ids } })
-            .select({ slug: 1, displayName: 1, reviewStatus: 1, deletedAt: 1 })
+            .select({
+              slug: 1,
+              displayName: 1,
+              reviewStatus: 1,
+              deletedAt: 1,
+              similarNameOf: 1,
+            })
             .lean()
             .exec();
     const pageOf = new Map(pages.map((p) => [String(p._id), p]));
@@ -369,6 +382,9 @@ export class AdminInboxService {
                   slug: page.slug,
                   displayName: page.displayName,
                   reviewStatus: page.reviewStatus ?? 'approved',
+                  ...(page.similarNameOf?.length
+                    ? { similarNameOf: page.similarNameOf }
+                    : {}),
                 },
               }
             : {}),

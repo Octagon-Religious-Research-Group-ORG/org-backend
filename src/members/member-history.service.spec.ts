@@ -503,6 +503,27 @@ describe('history entries', () => {
     expect(blockModel.find).not.toHaveBeenCalled();
   });
 
+  it('lists each time a belief was removed and brought back, and nothing for one never removed (plan §2e)', async () => {
+    const removals = [
+      { removedAt: at(1), restoredAt: at(2) },
+      { removedAt: at(3), restoredAt: at(4) },
+    ];
+    const returned = setup({ tab: { tabId: 'tab_a', removals } });
+    const result = await returned.service.tabHistory(
+      'quiet-fern',
+      'tab_a',
+      owner,
+    );
+    expect(result.removals).toEqual([
+      { removedAt: at(1).toISOString(), restoredAt: at(2).toISOString() },
+      { removedAt: at(3).toISOString(), restoredAt: at(4).toISOString() },
+    ]);
+    const never = setup();
+    expect(
+      await never.service.tabHistory('quiet-fern', 'tab_a', owner),
+    ).not.toHaveProperty('removals');
+  });
+
   it('reads a belief’s text from all its text blocks, removed ones too, in reading order', async () => {
     const { service, blockModel } = setup();
     await service.tabHistory('quiet-fern', 'tab_a', owner);

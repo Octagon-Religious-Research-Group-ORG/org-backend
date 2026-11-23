@@ -79,7 +79,7 @@ describeWithMongo('votes on a real MongoDB', () => {
       await m[name].createCollection();
       await m[name].createIndexes();
     }
-    m.Comment = conn.model('Comment');
+    m.Comment = conn.model('Comment') as Model<any>;
     m.WebsitePage = conn.model('WebsitePage', WebsitePageSchema);
     await m.WebsitePage.collection.insertMany(seedOrgPages());
     orgPages = new OrgPagesService(m.WebsitePage);

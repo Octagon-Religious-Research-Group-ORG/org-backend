@@ -37,6 +37,7 @@ import {
 import type { AddBeliefTabDto } from './members.dto';
 import { preparePicture } from './picture-processing';
 import { PictureStore } from './picture-store.service';
+import { VoteTalliesService } from './votes/vote-tallies.service';
 
 /** Every paragraph is permanent, so one new tab is bounded. */
 export const MAX_NEW_TAB_PARAGRAPHS = 50;
@@ -56,6 +57,7 @@ export const TAB_PLACE_SETTLE_MS = 10 * 60_000;
 export const TAB_ADD_MAX_MS = 5 * 60_000;
 
 const NO_PAGE = "You don't have a member page yet.";
+const NO_REMOVED_TAB = 'That belief is not on your page.';
 const TOO_MANY_TABS = `A page can have at most ${MAX_TABS_PER_PAGE} belief tabs.`;
 const TRY_AGAIN_SOON =
   'Your page is still being updated. Please try again in a few minutes.';
@@ -93,6 +95,7 @@ export class MyMemberPageService {
     private readonly blockModel: Model<ProfileBlockDocument>,
     private readonly versions: BlockVersionsService,
     private readonly pictures: PictureStore,
+    private readonly tallies: VoteTalliesService,
   ) {}
 
   private ownedFilter(userId: string) {
@@ -197,6 +200,57 @@ export class MyMemberPageService {
       throw withoutMemberText(error);
     }
     return { tabId, title };
+  }
+
+  /**
+   * Brings a removed belief back onto the owner's page (plan §2e, Tripp).
+   * It keeps its id, text, history, comments and votes; the removal and the
+   * return are added to its `removals` list so its history shows both. It
+   * takes a place on the page like a new tab, so the page stays within
+   * {@link MAX_TABS_PER_PAGE}, and gives the place back if the belief was
+   * brought back elsewhere in the meantime.
+   *
+   * @throws NotFoundException for a tab that is not on this owner's page
+   * @throws ConflictException when the page already has the most tabs allowed
+   */
+  async restoreTab(userId: string, tabId: string) {
+    const page = await this.ownedPage(userId);
+    const tab = await this.tabModel
+      .findOne({ profileId: page._id, tabId })
+      .select({ removedAt: 1 })
+      .lean()
+      .exec();
+    if (!tab) throw new NotFoundException(NO_REMOVED_TAB);
+    if (!tab.removedAt) return { restored: true };
+
+    const mark = await this.tallies.touch(tabId, page._id);
+    try {
+      const place = await this.takeTabPlace(userId, page);
+      let restored: { modifiedCount: number };
+      try {
+        restored = await this.tabModel
+          .updateOne(
+            { profileId: page._id, tabId, removedAt: tab.removedAt },
+            {
+              $unset: { removedAt: 1 },
+              $push: {
+                removals: { removedAt: tab.removedAt, restoredAt: new Date() },
+              },
+            },
+          )
+          .exec();
+      } catch (error) {
+        await this.releaseTabPlace(userId, place);
+        throw error;
+      }
+      if (restored.modifiedCount !== 1) {
+        // Brought back in another window first: that one holds the place.
+        await this.releaseTabPlace(userId, place);
+      }
+      return { restored: true };
+    } finally {
+      await this.tallies.settle(tabId, mark);
+    }
   }
 
   /**

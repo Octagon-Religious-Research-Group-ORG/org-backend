@@ -461,6 +461,16 @@ export class MemberExportService {
           tabId: tab.tabId,
           title: tab.title,
           ...(tab.removedAt ? { removedAt: iso(tab.removedAt) } : {}),
+          ...(Array.isArray(tab.removals) && tab.removals.length > 0
+            ? {
+                removedAndBroughtBack: (
+                  tab.removals as Array<{ removedAt: Date; restoredAt: Date }>
+                ).map((removal) => ({
+                  removedAt: iso(removal.removedAt),
+                  broughtBackAt: iso(removal.restoredAt),
+                })),
+              }
+            : {}),
           titleHistory: versionsOf(titleBlockId(tab.tabId as string)).map(
             versionView,
           ),

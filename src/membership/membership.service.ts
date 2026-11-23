@@ -247,13 +247,15 @@ export class MembershipService {
   }
 
   /**
-   * Creates a new member's page, pending an admin's approval.
+   * Creates a new member's page, open at once: ORG does not approve beliefs
+   * (Tripp, plan §2e). Admins hear of it only when the name reads like an
+   * existing page's, so they can check for impersonation.
    *
    * Order: every check first; then a claim row holding the owner and address
    * (the unique indexes make the loser of a double submit or a race stop here,
    * having written nothing); then the consent record, backup contacts, tabs,
    * paragraphs with their first hash-chained version (D8); and only then is
-   * the claim filled in and turned into a pending page. A failure part-way
+   * the claim filled in and turned into an approved page. A failure part-way
    * removes the claim, so the member can retry and no half-page exists; rows
    * already written point at a profile id that never became a page.
    *
@@ -366,7 +368,7 @@ export class MembershipService {
               displayName,
               visibility: input.visibility,
               anonymous: input.anonymous,
-              reviewStatus: 'pending',
+              reviewStatus: 'approved',
               contacts,
               similarNameOf,
             },
@@ -387,21 +389,23 @@ export class MembershipService {
       throw withoutMemberText(error);
     }
 
-    await this.notifyAdmins(userId, profileId);
+    if (similarNameOf.length > 0) {
+      await this.notifyAdmins(userId, profileId);
+    }
     return this.summary(userId);
   }
 
   /**
-   * Tells the admins a page is waiting (Chunk 12). The page is saved by now,
-   * and the approval queue lists it whatever happens here, so a failed
-   * notice is logged rather than failing the join.
+   * Tells the admins a new page's name reads like an existing one. The page
+   * is saved and open by now, so a failed notice is logged rather than
+   * failing the join.
    */
   private async notifyAdmins(userId: string, profileId: Types.ObjectId) {
     try {
       await this.inbox.notifyPageSubmitted(userId, profileId);
     } catch (error) {
       this.logger.error(
-        `A new page is waiting, but the admins' notice failed: ${error instanceof Error ? error.message : String(error)}`,
+        `A new page has a name like an existing one, but the admins' notice failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

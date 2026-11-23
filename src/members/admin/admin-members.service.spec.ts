@@ -147,7 +147,7 @@ describe('AdminMembersService.list', () => {
           anonymous: undefined,
           ownerUserId: undefined,
           createdAt: undefined,
-          similarNameOf: ['ignored-when-not-pending'],
+          similarNameOf: ['quiet-harbor'],
           source: 'migrated',
         }),
         pageRow({
@@ -181,6 +181,9 @@ describe('AdminMembersService.list', () => {
       visibility: 'public',
       anonymous: false,
       source: 'migrated',
+      // Pages open at once now (plan §2e): a live page's look-alike names
+      // are what the admin checks for impersonation.
+      similarNameOf: ['quiet-harbor'],
     });
     expect(members[2].removal).toEqual({
       at: removedAt.toISOString(),

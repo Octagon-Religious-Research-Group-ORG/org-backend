@@ -142,8 +142,9 @@ export const LINE_OF: Record<
     (n) => `A moderator restored ${n} of your comments.`,
   ],
   'admin-page-submitted': [
-    'A new member page is waiting for approval.',
-    (n) => `${n} new member pages are waiting for approval.`,
+    "A new member page has a name like an existing member's. Please check it isn't impersonation.",
+    (n) =>
+      `${n} new member pages have a name like an existing member's. Please check they aren't impersonation.`,
   ],
   'admin-eam-request': [
     'A member asked to start the EaM path.',

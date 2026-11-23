@@ -426,7 +426,7 @@ describe('MembershipService', () => {
       expect(blocks.every((b) => b.profileId === tabs[0].profileId)).toBe(true);
     });
 
-    it('holds no member data on the claim, then fills in the page pending', async () => {
+    it('holds no member data on the claim, then opens the page at once (no approval, plan §2e)', async () => {
       const ctx = setup();
       await ctx.service.join('user_a', input(), origin);
       const [[row]] = ctx.profileModel.create.mock.calls as unknown as [
@@ -450,7 +450,7 @@ describe('MembershipService', () => {
         displayName: 'Quiet Fern',
         visibility: 'members',
         anonymous: true,
-        reviewStatus: 'pending',
+        reviewStatus: 'approved',
         contacts: [{ method: 'telegram', value: '@me' }],
         similarNameOf: [],
       });
@@ -861,9 +861,17 @@ describe('MembershipService', () => {
       expect(ctx.writes).toEqual([]);
     });
 
-    it('tells the admins a new page is waiting, after the page is saved (Chunk 12)', async () => {
+    it('asks no admin to approve an ordinary new page (plan §2e)', async () => {
       const ctx = setup();
       await ctx.service.join('u', input(), origin);
+      expect(ctx.inbox.notifyPageSubmitted).not.toHaveBeenCalled();
+    });
+
+    it('tells the admins about a page whose name reads like an existing one, after it is saved', async () => {
+      const ctx = setup({
+        existingNames: [{ slug: 'quiet-fern', displayName: 'Quiet Fern' }],
+      });
+      await ctx.service.join('u', input({ slug: 'quiet-fern-2' }), origin);
       expect(ctx.writes.at(-1)).toBe('finalize');
       expect(
         ctx.inbox.notifyPageSubmitted.mock.invocationCallOrder[0],
@@ -879,8 +887,14 @@ describe('MembershipService', () => {
       );
     });
 
-    it('still joins when the admins notice fails: the queue lists the page anyway', async () => {
-      const ctx = setup({ inboxError: new Error('synthetic inbox outage') });
+    it('still joins when the admins notice fails', async () => {
+      const lookAlike = {
+        existingNames: [{ slug: 'quiet-fern', displayName: 'Quiet Fern' }],
+      };
+      const ctx = setup({
+        ...lookAlike,
+        inboxError: new Error('synthetic inbox outage'),
+      });
       const errorLog = jest
         .spyOn(Logger.prototype, 'error')
         .mockImplementation(() => undefined);
@@ -890,7 +904,7 @@ describe('MembershipService', () => {
       expect(errorLog).toHaveBeenCalledWith(
         expect.stringContaining('synthetic inbox outage'),
       );
-      const raw = setup({ inboxError: 'raw failure' });
+      const raw = setup({ ...lookAlike, inboxError: 'raw failure' });
       await raw.service.join('u', input(), origin);
       expect(errorLog).toHaveBeenLastCalledWith(
         expect.stringContaining('raw failure'),
