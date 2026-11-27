@@ -11,6 +11,14 @@ updates:
       # TypeScript 7: ts-jest accepts only <7; decision 2026-11-18 to wait until 2026-12-01.
       - dependency-name: "typescript"
         versions: [">=7"]
+      # NestJS 12 goes live with the members-area release (Chunk 20), not on its own:
+      # members-area already runs it. Remove at Chunk 20. (Decision 2026-11-27, plan
+      # 2026-11-27-org-backend-nestjs-12-migration, R1 = A.)
+      - dependency-name: "@nestjs/*"
+        update-types: ["version-update:semver-major"]
+      # Types follow the runtime: engines.node is 24.x.
+      - dependency-name: "@types/node"
+        versions: [">=25"]
     groups:
       security:
         applies-to: security-updates
