@@ -26,6 +26,11 @@ interface FakeDelete {
 export interface FakeModelOptions {
   /** Each entry is one unique index, by its field names. */
   unique?: string[][];
+  /**
+   * Unique indexes that hold only for documents matching `where`, as a
+   * `partialFilterExpression` does.
+   */
+  partialUnique?: Array<{ keys: string[]; where: Filter }>;
   /** Sets createdAt/updatedAt on create, as `timestamps: true` does. */
   timestamps?: boolean;
   /** Called before every write; throw from it to inject a fault. */
@@ -292,10 +297,17 @@ export function fakeModel(
   };
 
   const checkUnique = (candidate: Doc, ignore?: Doc) => {
-    for (const keys of options.unique ?? []) {
+    const indexes = [
+      ...(options.unique ?? []).map((keys) => ({ keys, where: undefined })),
+      ...(options.partialUnique ?? []),
+    ];
+    for (const { keys, where } of indexes) {
+      const inIndex = where ? sift(where) : () => true;
+      if (!inIndex(candidate)) continue;
       const clash = docs.some(
         (doc) =>
           doc !== ignore &&
+          inIndex(doc) &&
           keys.every(
             (key) =>
               compare(getPath(doc, key), getPath(candidate, key)) === 0 &&
@@ -414,7 +426,15 @@ export function fakeModel(
         const [doc] = matching(filter);
         if (!doc) return Promise.resolve(null);
         const before = copy(doc);
-        applyUpdate(doc, change);
+        const next = copy(doc);
+        applyUpdate(next, change);
+        try {
+          checkUnique(next, doc);
+        } catch (error) {
+          return Promise.reject(error as Error);
+        }
+        for (const key of Object.keys(doc)) delete doc[key];
+        Object.assign(doc, next);
         return Promise.resolve(
           settings?.returnDocument === 'after' ? copy(doc) : before,
         );

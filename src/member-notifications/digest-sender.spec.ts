@@ -4,6 +4,7 @@ import {
   DIGEST_MAX_ATTEMPTS,
   MAX_DIGEST_ITEMS,
 } from './digest-sender';
+import type { EmailBudgetStore } from './email-budget.store';
 import { harness, NOW, recipientOf } from './notifications-harness.mocks-spec';
 
 const HOUR = 60 * 60_000;
@@ -136,6 +137,143 @@ describe('DigestSender (Chunk 14)', () => {
     });
     // Its news stays where the sending instance expects it.
     expect(item.nextAttemptAt).toBeUndefined();
+  });
+
+  it('sends once when two instances race across UTC midnight (rows for two days)', async () => {
+    const h = harness();
+    digestItem(h, 'user_a');
+    const beforeMidnight = new Date('2026-11-13T23:59:59Z');
+    const afterMidnight = new Date('2026-11-14T00:00:01Z');
+    const results = await Promise.all([
+      h.digests.forMember('user_a', beforeMidnight),
+      h.digests.forMember('user_a', afterMidnight),
+    ]);
+    expect(results.filter((result) => result === 'sent')).toHaveLength(1);
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
+    expect(h.digestRows.docs).toHaveLength(1);
+  });
+
+  it('does not send a row another instance took over after this lease ran out', async () => {
+    const h = harness();
+    digestItem(h, 'user_a');
+    const later = new Date(NOW.getTime() + DIGEST_LEASE_MS + 60_000);
+    let taker: Promise<string> | undefined;
+    // Right before this instance's send (its budget check), its lease runs
+    // out and a fresh tick elsewhere takes the row and sends it.
+    const budget: EmailBudgetStore = h.budget;
+    const take = budget.take.bind(budget) as EmailBudgetStore['take'];
+    jest
+      .spyOn(budget, 'take')
+      .mockImplementationOnce(
+        async (...args: Parameters<EmailBudgetStore['take']>) => {
+          taker = h.digests.forMember('user_a', later);
+          await taker;
+          return take(...args);
+        },
+      );
+    expect(await h.digests.forMember('user_a', NOW)).toBe('skipped');
+    expect(await taker).toBe('sent');
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
+    expect(h.digestRows.docs[0]).toMatchObject({ status: 'sent' });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('taken over before its send'),
+    );
+  });
+
+  it('leases each member from when the pass reaches them, not from its start', async () => {
+    const h = harness();
+    digestItem(h, 'user_a');
+    const start = Date.now();
+    const elapsed = DIGEST_LEASE_MS + 60_000;
+    jest
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + elapsed);
+    const leases: unknown[] = [];
+    h.targets.recipient.mockImplementationOnce((userId: string) => {
+      leases.push(h.digestRows.docs[0]?.leaseUntil);
+      return Promise.resolve(recipientOf(userId));
+    });
+    try {
+      await h.digests.run(NOW);
+    } finally {
+      jest.restoreAllMocks();
+      warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    }
+    expect(leases).toEqual([
+      new Date(NOW.getTime() + elapsed + DIGEST_LEASE_MS),
+    ]);
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes a dead row being sent before an older unfinished one, never getting stuck', async () => {
+    // State the old midnight race could leave: an older failed row with
+    // tries left, and a newer row whose send died.
+    const h = harness();
+    const older = digestItem(h, 'user_a');
+    const newer = digestItem(h, 'user_a');
+    h.digestRows.docs.push(
+      {
+        _id: older._id,
+        userId: 'user_a',
+        day: '2026-11-11',
+        status: 'failed',
+        itemIds: [older._id],
+        attempts: 1,
+        keyGen: 0,
+        createdAt: new Date('2026-11-11T15:00:00Z'),
+      },
+      {
+        _id: newer._id,
+        userId: 'user_a',
+        day: '2026-11-12',
+        status: 'sending',
+        itemIds: [newer._id],
+        attempts: 0,
+        keyGen: 0,
+        leaseUntil: new Date(NOW.getTime() - 60_000),
+        leaseToken: 'died',
+        createdAt: new Date('2026-11-12T15:00:00Z'),
+      },
+    );
+    expect(await h.digests.forMember('user_a', NOW)).toBe('sent');
+    expect(h.mail.sendNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: `org-digest-${String(newer._id)}-0`,
+      }),
+    );
+    // Today has its digest now; the older one follows the next day.
+    expect(
+      await h.digests.forMember('user_a', new Date(NOW.getTime() + 60_000)),
+    ).toBe('skipped');
+    expect(
+      await h.digests.forMember('user_a', new Date('2026-11-14T15:00:00Z')),
+    ).toBe('sent');
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops a pass that runs past UTC midnight, so the new day keeps its own hour', async () => {
+    const h = harness();
+    const late = new Date('2026-11-13T23:59:58Z');
+    digestItem(h, 'user_a', { createdAt: new Date(late.getTime() - HOUR) });
+    const start = Date.now();
+    jest
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 5_000);
+    try {
+      await h.digests.run(late);
+    } finally {
+      jest.restoreAllMocks();
+      warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    }
+    expect(h.mail.sendNotice).not.toHaveBeenCalled();
+    expect(h.digestRows.docs).toHaveLength(0);
+    // Not lost: the new day's tick at the digest hour sends it.
+    await h.digests.run(new Date('2026-11-14T14:30:00Z'));
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
   });
 
   it('takes over a dead tick’s day with the same items and the same key', async () => {

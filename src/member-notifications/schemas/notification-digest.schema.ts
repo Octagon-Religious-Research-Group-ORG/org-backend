@@ -95,5 +95,12 @@ export const NotificationDigestRowSchema = SchemaFactory.createForClass(
 
 // The claim: one digest per member per day.
 NotificationDigestRowSchema.index({ userId: 1, day: 1 }, { unique: true });
+// And at most one row per member being sent at any moment, whatever its day:
+// two instances racing across UTC midnight would otherwise each create a row
+// (D and D+1) for the same items and both send (review of d24a443, 2026-11-27).
+NotificationDigestRowSchema.index(
+  { userId: 1 },
+  { unique: true, partialFilterExpression: { status: 'sending' } },
+);
 // Old rows delete themselves.
 NotificationDigestRowSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
