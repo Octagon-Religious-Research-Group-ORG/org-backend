@@ -16,7 +16,12 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      # The 100% coverage gate and the real-MongoDB end-to-end suite run on members-area only.
+      # main still holds the code that is live today (Jest without the ESM flag, no Mongo suites).
+      # Remove this switch, and the plain unit step, at the members-area release (Chunk 20).
+      MEMBERS_AREA: ${{ github.base_ref == 'members-area' || github.ref_name == 'members-area' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -27,6 +32,38 @@ jobs:
       - name: Lint
         run: npx eslint "{src,apps,libs,test}/**/*.ts"
       - name: Unit tests
+        if: env.MEMBERS_AREA != 'true'
         run: npx jest --runInBand
+      - name: Unit tests with 100% coverage
+        if: env.MEMBERS_AREA == 'true'
+        run: npm run test:cov -- --runInBand
+      - name: Start MongoDB 7.0 (replica set + standalone)
+        if: env.MEMBERS_AREA == 'true'
+        # 7.0.14 = the mongod the local end-to-end runs use (~/.cache/mongodb-binaries), so CI and
+        # local measure the same server. Test-only containers on a throwaway runner, no auth.
+        run: |
+          docker run -d --name mongo-rs -p 27017:27017 mongo:7.0.14 --replSet rs0 --bind_ip_all
+          docker run -d --name mongo-sa -p 27018:27017 mongo:7.0.14 --bind_ip_all
+          for i in $(seq 1 60); do
+            docker exec mongo-rs mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec mongo-rs mongosh --quiet --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "127.0.0.1:27017" }] })'
+          for i in $(seq 1 60); do
+            [ "$(docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ] && break
+            sleep 1
+          done
+          [ "$(docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ]
+          for i in $(seq 1 60); do
+            docker exec mongo-sa mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec mongo-sa mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'
+      - name: End-to-end tests (real MongoDB)
+        if: env.MEMBERS_AREA == 'true'
+        env:
+          MONGO_TEST_URI: mongodb://127.0.0.1:27017/org_e2e?replicaSet=rs0
+          MONGO_STANDALONE_URI: mongodb://127.0.0.1:27018/org_e2e_sa
+        run: npm run test:e2e -- --runInBand
       - name: Build
         run: npm run build
