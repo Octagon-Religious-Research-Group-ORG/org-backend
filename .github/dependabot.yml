@@ -16,7 +16,9 @@ updates:
       # 2026-11-27-org-backend-nestjs-12-migration, R1 = A.)
       - dependency-name: "@nestjs/*"
         update-types: ["version-update:semver-major"]
-      # Types follow the runtime: engines.node is 24.x.
+      # Types follow the runtime (engines.node 24.x). main still has 26 from the 11-27
+      # batch: this holds it there (no downgrade, no 26.x patches) until the members-area
+      # release brings 24.
       - dependency-name: "@types/node"
         versions: [">=25"]
     groups:
