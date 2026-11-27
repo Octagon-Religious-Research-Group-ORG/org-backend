@@ -30,8 +30,14 @@ function joiResult(env: Record<string, string>) {
   });
 }
 
-/** What version 12 serves: the real ConfigModule, reading process.env. */
-async function nestConfig(env: Record<string, string>) {
+/**
+ * What the installed version serves: the real ConfigModule, reading this
+ * process.env and nothing else. Every value is read while the test's
+ * environment is still in place (ConfigService falls back to process.env for
+ * a key the schema left unset), together with what loading wrote back to
+ * process.env.
+ */
+async function nestConfig(env: Record<string, string>, keys = DECLARED) {
   const saved = process.env;
   process.env = { ...env };
   try {
@@ -43,7 +49,13 @@ async function nestConfig(env: Record<string, string>) {
         }),
       ],
     }).compile();
-    return moduleRef.get(ConfigService);
+    const config = moduleRef.get(ConfigService);
+    return {
+      served: Object.fromEntries(keys.map((key) => [key, config.get(key)])),
+      writtenBack: Object.fromEntries(
+        keys.map((key) => [key, process.env[key]]),
+      ),
+    };
   } finally {
     process.env = saved;
   }
@@ -105,21 +117,35 @@ describe('environment configuration on NestJS 12 matches version 11', () => {
     const env = { ...REQUIRED, ...extra };
     const expected = joiResult(env);
     expect(expected.error).toBeUndefined();
-    const config = await nestConfig(env);
+    const { served, writtenBack } = await nestConfig(env);
     for (const key of DECLARED) {
-      const served: unknown = config.get(key);
       const joi: unknown = (expected.value as Record<string, unknown>)[key];
-      expect({ key, value: served, type: typeof served }).toEqual({
+      expect({ key, value: served[key], type: typeof served[key] }).toEqual({
         key,
         value: joi,
         type: typeof joi,
+      });
+      // Code reading process.env directly (log-details.ts reads NODE_ENV)
+      // sees what it saw on version 11: given values untouched, defaults
+      // filled in as text.
+      expect({ key, env: writtenBack[key] }).toEqual({
+        key,
+        env:
+          key in env
+            ? (env as Record<string, string>)[key]
+            : joi === undefined
+              ? undefined
+              : String(joi),
       });
     }
   });
 
   it('still passes variables the schema does not declare through as they are', async () => {
-    const config = await nestConfig({ ...REQUIRED, SOMETHING_ELSE: 'kept' });
-    expect(config.get('SOMETHING_ELSE')).toBe('kept');
+    const { served } = await nestConfig(
+      { ...REQUIRED, SOMETHING_ELSE: 'kept' },
+      ['SOMETHING_ELSE'],
+    );
+    expect(served.SOMETHING_ELSE).toBe('kept');
   });
 
   it.each([
@@ -136,15 +162,31 @@ describe('environment configuration on NestJS 12 matches version 11', () => {
       { MONGODB_URI: 'mongodb://127.0.0.1:27017/org-testing' },
     ],
     ['a calendar is not https', { OTS_CALENDARS: 'http://a.example.test' }],
-  ])('refuses to start, with Joi’s message, when %s', async (_name, change) => {
-    const env = Object.fromEntries(
-      Object.entries({ ...REQUIRED, ...change }).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    );
-    const expected = joiResult(env);
-    expect(expected.error).toBeDefined();
-    const firstProblem = expected.error!.details[0].message;
-    await expect(nestConfig(env)).rejects.toThrow(firstProblem);
-  });
+    [
+      'several things are wrong at once',
+      { MONGODB_URI: undefined, PORT: 'abc', PUBLIC_APP_URL: 'not a url' },
+    ],
+  ])(
+    'refuses to start, naming every problem, when %s',
+    async (_name, change) => {
+      const env = Object.fromEntries(
+        Object.entries({ ...REQUIRED, ...change }).filter(
+          (entry): entry is [string, string] => entry[1] !== undefined,
+        ),
+      );
+      const expected = joiResult(env);
+      expect(expected.error).toBeDefined();
+      // Every one of Joi's problems is in the message. The layout differs and
+      // nothing parses it: version 11 joins them with ". ", version 12 puts
+      // each on its own line after its variable's name.
+      const thrown = await nestConfig(env).then(
+        () => '',
+        (error: Error) => error.message,
+      );
+      expect(thrown).toMatch(/^Config validation error: /);
+      for (const { message } of expected.error!.details) {
+        expect(thrown).toContain(message);
+      }
+    },
+  );
 });
