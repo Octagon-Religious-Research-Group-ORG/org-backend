@@ -667,10 +667,14 @@ describe('restoreTab (plan §2e)', () => {
         return Promise.reject(new Error('disk full'));
       },
     }));
-    await expect(ctx.service.restoreTab('u', 'tab-x')).rejects.toThrow(
+    await expect(ctx.service.restoreTab('u1', 'tab-x')).rejects.toThrow(
       'disk full',
     );
     expect(ctx.order).toEqual(['touch', 'take', 'restore', 'update', 'settle']);
+    expect(ctx.profileModel.updateOne).toHaveBeenCalledWith(
+      { ...OWNED, tabCountRepairs: { $exists: false } },
+      { $inc: { liveTabCount: -1 } },
+    );
     expect(ctx.tallies.settle).toHaveBeenCalledWith('tab-x', 'mark');
   });
 
