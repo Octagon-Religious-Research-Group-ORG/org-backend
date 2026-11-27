@@ -141,10 +141,15 @@ describe('Chunk 14 review round 2', () => {
         attempts: 0,
       });
       // The unfinished row is taken by another instance just as this one
-      // looks (its resume finds nothing).
-      jest.spyOn(h.digestRows, 'findOneAndUpdate').mockReturnValueOnce({
+      // looks (both resume steps, the dead-sending one and the rest, find
+      // nothing).
+      const nothing = {
         lean: () => ({ exec: () => Promise.resolve(null) }),
-      } as never);
+      } as never;
+      jest
+        .spyOn(h.digestRows, 'findOneAndUpdate')
+        .mockReturnValueOnce(nothing)
+        .mockReturnValueOnce(nothing);
       await h.digests.forMember('user_a', NOW);
       const fresh = h.digestRows.docs.find((d) => d.day === '2026-11-13');
       expect((fresh?.itemIds as Types.ObjectId[]).map(String)).toEqual([

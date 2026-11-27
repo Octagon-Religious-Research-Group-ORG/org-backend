@@ -207,6 +207,72 @@ describe('DigestSender (Chunk 14)', () => {
     expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
   });
 
+  it('resumes a dead row being sent before an older unfinished one, never getting stuck', async () => {
+    // State the old midnight race could leave: an older failed row with
+    // tries left, and a newer row whose send died.
+    const h = harness();
+    const older = digestItem(h, 'user_a');
+    const newer = digestItem(h, 'user_a');
+    h.digestRows.docs.push(
+      {
+        _id: older._id,
+        userId: 'user_a',
+        day: '2026-11-11',
+        status: 'failed',
+        itemIds: [older._id],
+        attempts: 1,
+        keyGen: 0,
+        createdAt: new Date('2026-11-11T15:00:00Z'),
+      },
+      {
+        _id: newer._id,
+        userId: 'user_a',
+        day: '2026-11-12',
+        status: 'sending',
+        itemIds: [newer._id],
+        attempts: 0,
+        keyGen: 0,
+        leaseUntil: new Date(NOW.getTime() - 60_000),
+        leaseToken: 'died',
+        createdAt: new Date('2026-11-12T15:00:00Z'),
+      },
+    );
+    expect(await h.digests.forMember('user_a', NOW)).toBe('sent');
+    expect(h.mail.sendNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: `org-digest-${String(newer._id)}-0`,
+      }),
+    );
+    // Today has its digest now; the older one follows the next day.
+    expect(
+      await h.digests.forMember('user_a', new Date(NOW.getTime() + 60_000)),
+    ).toBe('skipped');
+    expect(
+      await h.digests.forMember('user_a', new Date('2026-11-14T15:00:00Z')),
+    ).toBe('sent');
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops a pass that runs past UTC midnight, so the new day keeps its own hour', async () => {
+    const h = harness();
+    const late = new Date('2026-11-13T23:59:58Z');
+    digestItem(h, 'user_a', { createdAt: new Date(late.getTime() - HOUR) });
+    const start = Date.now();
+    jest
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 5_000);
+    try {
+      await h.digests.run(late);
+    } finally {
+      jest.restoreAllMocks();
+      warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    }
+    expect(h.mail.sendNotice).not.toHaveBeenCalled();
+    expect(h.digestRows.docs).toHaveLength(0);
+  });
+
   it('takes over a dead tick’s day with the same items and the same key', async () => {
     const h = harness();
     const item = digestItem(h, 'user_a');

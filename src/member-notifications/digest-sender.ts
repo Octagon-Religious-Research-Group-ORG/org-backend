@@ -164,9 +164,13 @@ export class DigestSender {
         .exec()) as Array<{ _id: string }>;
       if (waiting.length === 0) return;
       for (const { _id: userId } of waiting) {
+        const at = reachedAt();
+        // Past midnight this pass's hour gate is the old day's: stop, and let
+        // the next tick start the new day with its own (review of 8d37c1e).
+        if (utcDay(at) !== utcDay(now)) return;
         seen.push(userId);
         try {
-          if ((await this.forMember(userId, reachedAt())) === 'budget') return;
+          if ((await this.forMember(userId, at)) === 'budget') return;
         } catch (error) {
           this.logger.error(`A digest failed: ${describe(error)}`);
         }
@@ -313,6 +317,7 @@ export class DigestSender {
       .exec();
     if (stored.matchedCount !== 1) {
       // Our lease ran out and another instance took the row: it sends, not us.
+      // (The budget slot taken above stays used: a rare, harmless overcount.)
       this.logger.warn(
         `A digest row was taken over before its send; left to its new holder.`,
       );
@@ -477,20 +482,26 @@ export class DigestSender {
     if (await this.digestModel.exists({ userId, ...held })) {
       return undefined;
     }
-    let resumed: DigestRow | null;
-    try {
-      // The check above is not atomic with this update: another instance
-      // may create and start sending a row in between. The update itself
-      // must therefore never take a row whose lease is still live, or both
-      // instances send it (found by CI, 2026-11-27).
-      resumed = await this.digestModel
+    const resume = (which: Record<string, unknown>) =>
+      this.digestModel
         .findOneAndUpdate(
-          { userId, ...UNFINISHED, $nor: [held] },
+          { userId, ...which, $nor: [held] },
           { $set: { day, status: 'sending', leaseUntil, leaseToken: token } },
           { sort: { createdAt: 1 }, returnDocument: 'after' },
         )
         .lean()
-        .exec();
+        .exec() as Promise<DigestRow | null>;
+    let resumed: DigestRow | null;
+    try {
+      // The check above is not atomic with these updates: another instance
+      // may create and start sending a row in between. The updates
+      // themselves must therefore never take a row whose lease is still
+      // live, or both instances send it (found by CI, 2026-11-27).
+      // A dead 'sending' row goes first: only one row per member may be
+      // 'sending', so while it exists no other row can be resumed past it
+      // (review of 8d37c1e).
+      resumed =
+        (await resume({ status: 'sending' })) ?? (await resume(UNFINISHED));
     } catch (error) {
       // Today already has a row of its own: that one is the day's.
       if (isDuplicateKey(error)) return undefined;
