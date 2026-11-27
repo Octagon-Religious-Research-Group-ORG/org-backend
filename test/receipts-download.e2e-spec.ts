@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 // The receipt zip download over real HTTP (NestJS 12 plan, chunk 7): the real
 // controller, guards, interceptors and HTTP setup, with the receipt itself
 // faked. A unit test cannot see what an interceptor or the HTTP layer does to
