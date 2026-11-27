@@ -18,10 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # The 100% coverage gate and the real-MongoDB end-to-end suite run on members-area only.
-      # main still holds the code that is live today (Jest without the ESM flag, no Mongo suites).
-      # Remove this switch, and the plain unit step, at the members-area release (Chunk 20).
-      MEMBERS_AREA: ${{ github.base_ref == 'members-area' || github.ref_name == 'members-area' }}
+      # The 100% coverage gate and the real-MongoDB end-to-end suite run for members-area code:
+      # PRs into it, pushes to it, and the release PR FROM it into main (head_ref), whose run
+      # tests the merged result. main's own pushes and PRs keep the plain steps: main still holds
+      # the code that is live today. Remove this switch, and the plain unit step, after the
+      # members-area release (Chunk 20) has merged.
+      MEMBERS_AREA: ${{ github.base_ref == 'members-area' || github.head_ref == 'members-area' || github.ref_name == 'members-area' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
