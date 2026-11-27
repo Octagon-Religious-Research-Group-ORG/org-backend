@@ -33,7 +33,9 @@ jobs:
         run: npx eslint "{src,apps,libs,test}/**/*.ts"
       - name: Unit tests
         if: env.MEMBERS_AREA != 'true'
-        run: npx jest --runInBand
+        # The ESM flag too: NestJS 12 (members-area) is ESM-only, and the release PR
+        # into main runs this step. Harmless on NestJS 11 (measured 2026-11-27).
+        run: node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand
       - name: Unit tests with 100% coverage
         if: env.MEMBERS_AREA == 'true'
         run: npm run test:cov -- --runInBand
