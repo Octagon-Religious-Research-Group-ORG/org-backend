@@ -140,6 +140,7 @@ describe('MyMemberPageController', () => {
     changeVisibility: jest.fn(() => 'visibility'),
     addBeliefTab: jest.fn(() => 'tab'),
     replacePicture: jest.fn(() => 'picture'),
+    restoreTab: jest.fn(() => 'restored'),
   };
   const editor = {
     editBio: jest.fn(() => 'bio'),
@@ -180,6 +181,11 @@ describe('MyMemberPageController', () => {
     expect(editor.editTabTitle).toHaveBeenCalledWith('u1', 'tab_1', 'T', 0);
     expect(editor.moveTab).toHaveBeenCalledWith('u1', 'tab_1', 'up');
     expect(editor.removeTab).toHaveBeenCalledWith('u1', 'tab_1');
+  });
+
+  it('brings a removed belief back for the user in the token', () => {
+    expect(controller.restoreTab(request, 'tab_1')).toBe('restored');
+    expect(page.restoreTab).toHaveBeenCalledWith('u1', 'tab_1');
   });
 
   it('passes the uploaded bytes, or nothing when no file came', () => {

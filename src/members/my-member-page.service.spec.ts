@@ -659,6 +659,21 @@ describe('restoreTab (plan §2e)', () => {
     expect(ctx.order).toEqual(['touch', 'take', 'restore', 'update', 'settle']);
   });
 
+  it('gives the place back and passes the error on when the restore write fails', async () => {
+    const ctx = setup({ tab: { _id: 't', removedAt } });
+    ctx.tabModel.updateOne.mockImplementationOnce(() => ({
+      exec: () => {
+        ctx.order.push('restore');
+        return Promise.reject(new Error('disk full'));
+      },
+    }));
+    await expect(ctx.service.restoreTab('u', 'tab-x')).rejects.toThrow(
+      'disk full',
+    );
+    expect(ctx.order).toEqual(['touch', 'take', 'restore', 'update', 'settle']);
+    expect(ctx.tallies.settle).toHaveBeenCalledWith('tab-x', 'mark');
+  });
+
   it('refuses on a full page and still settles the tally mark', async () => {
     const ctx = setup({
       tab: { _id: 't', removedAt },
