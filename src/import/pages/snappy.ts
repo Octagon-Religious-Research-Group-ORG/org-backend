@@ -113,7 +113,9 @@ export function decompressIwa(input: Uint8Array, part: string): Uint8Array {
       }
       chunks.push(chunk);
     } catch (error) {
-      throw new Error(`${part}: ${(error as Error).message}`);
+      throw new Error(`${part}: ${(error as Error).message}`, {
+        cause: error,
+      });
     }
     position = end;
   }

@@ -7,6 +7,10 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 7: ts-jest accepts only <7; decision 2026-11-18 to wait until 2026-12-01.
+      - dependency-name: "typescript"
+        versions: [">=7"]
     groups:
       security:
         applies-to: security-updates
