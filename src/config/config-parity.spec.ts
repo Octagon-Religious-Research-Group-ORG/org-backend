@@ -119,8 +119,11 @@ describe('environment configuration on NestJS 12 matches version 11', () => {
     expect(expected.error).toBeUndefined();
     const { served, writtenBack } = await nestConfig(env);
     for (const key of DECLARED) {
-      const joi: unknown = (expected.value as Record<string, unknown>)[key];
-      expect({ key, value: served[key], type: typeof served[key] }).toEqual({
+      const joi = (expected.value as Record<string, string | number | boolean>)[
+        key
+      ];
+      const value: unknown = served[key];
+      expect({ key, value, type: typeof value }).toEqual({
         key,
         value: joi,
         type: typeof joi,
