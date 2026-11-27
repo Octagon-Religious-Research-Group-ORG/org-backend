@@ -461,20 +461,19 @@ export class DigestSender {
     const day = utcDay(now);
     const token = randomUUID();
     const leaseUntil = new Date(now.getTime() + DIGEST_LEASE_MS);
-    if (
-      await this.digestModel.exists({
-        userId,
-        status: 'sending',
-        leaseUntil: { $gte: now },
-      })
-    ) {
+    const held = { status: 'sending' as const, leaseUntil: { $gte: now } };
+    if (await this.digestModel.exists({ userId, ...held })) {
       return undefined;
     }
     let resumed: DigestRow | null;
     try {
+      // The check above is not atomic with this update: another instance
+      // may create and start sending a row in between. The update itself
+      // must therefore never take a row whose lease is still live, or both
+      // instances send it (found by CI, 2026-11-27).
       resumed = await this.digestModel
         .findOneAndUpdate(
-          { userId, ...UNFINISHED },
+          { userId, ...UNFINISHED, $nor: [held] },
           { $set: { day, status: 'sending', leaseUntil, leaseToken: token } },
           { sort: { createdAt: 1 }, returnDocument: 'after' },
         )
@@ -487,17 +486,20 @@ export class DigestSender {
     }
     if (resumed) return { row: resumed, token };
     if (await this.digestModel.exists({ userId, day })) {
-      await this.moveOn(userId, now);
+      // Another instance is still sending today's row: leave its news alone.
+      if (!(await this.digestModel.exists({ userId, day, ...held }))) {
+        await this.moveOn(userId, now);
+      }
       return undefined;
     }
-    const held = await this.itemsInFlight(userId);
+    const inFlight = await this.itemsInFlight(userId);
     const items = await this.queueModel
       .find({
         userId,
         status: 'queued',
         delivery: 'digest',
         createdAt: { $lte: now },
-        ...(held.length > 0 ? { _id: { $nin: held } } : {}),
+        ...(inFlight.length > 0 ? { _id: { $nin: inFlight } } : {}),
         ...dueBy(now),
       })
       .sort({ createdAt: 1 })
