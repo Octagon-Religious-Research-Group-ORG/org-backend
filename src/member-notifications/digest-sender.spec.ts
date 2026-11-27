@@ -271,6 +271,9 @@ describe('DigestSender (Chunk 14)', () => {
     }
     expect(h.mail.sendNotice).not.toHaveBeenCalled();
     expect(h.digestRows.docs).toHaveLength(0);
+    // Not lost: the new day's tick at the digest hour sends it.
+    await h.digests.run(new Date('2026-11-14T14:30:00Z'));
+    expect(h.mail.sendNotice).toHaveBeenCalledTimes(1);
   });
 
   it('takes over a dead tick’s day with the same items and the same key', async () => {
