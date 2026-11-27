@@ -38,6 +38,7 @@ export function safeUnzip(bytes: Uint8Array, kind: string): Unzipped {
   } catch (error) {
     throw new Error(
       refusal ?? `Not a ${kind} (zip) file: ${(error as Error).message}`,
+      { cause: error },
     );
   }
 }

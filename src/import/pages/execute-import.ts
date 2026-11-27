@@ -211,6 +211,7 @@ export async function executeImport(
     } catch (error) {
       throw new Error(
         `Image ${path} could not be converted: ${(error as Error).message}`,
+        { cause: error },
       );
     }
   }
