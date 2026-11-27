@@ -102,10 +102,17 @@ describe('receipt zip download over HTTP', () => {
     expect(res.headers['content-disposition']).toBe(
       `attachment; filename="${name}"`,
     );
-    const body = res.body as Buffer;
-    expect(body.equals(Buffer.from(receiptZip(receipt)))).toBe(true);
-    expect(strFromU8(unzipSync(new Uint8Array(body))['README.txt'])).toContain(
-      'ORG timestamp receipt',
-    );
+    // Compared file by file: a zip stamps each file with the time it was
+    // made, so two zips of the same receipt differ in those bytes.
+    const sent = unzipSync(new Uint8Array(res.body as Buffer));
+    const expected = unzipSync(receiptZip(receipt));
+    expect(Object.keys(sent).sort()).toEqual(Object.keys(expected).sort());
+    for (const file of Object.keys(expected)) {
+      expect({
+        file,
+        same: Buffer.from(sent[file]).equals(expected[file]),
+      }).toEqual({ file, same: true });
+    }
+    expect(strFromU8(sent['README.txt'])).toContain('ORG timestamp receipt');
   });
 });
