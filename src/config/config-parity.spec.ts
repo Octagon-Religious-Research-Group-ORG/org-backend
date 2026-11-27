@@ -72,7 +72,8 @@ describe('environment configuration on NestJS 12 matches version 11', () => {
       'every variable set as the text a host gives',
       {
         NODE_ENV: 'production',
-        PORT: '8080',
+        // Text that changes when converted: loading must leave it as given.
+        PORT: '08080',
         DNS_SERVERS: '1.1.1.1,8.8.8.8',
         WHITE_LISTED_EMAILS: 'a@example.test,b@example.test',
         TRUST_PROXY_HOPS: '2',
@@ -90,7 +91,7 @@ describe('environment configuration on NestJS 12 matches version 11', () => {
         SEARCH_FRAGMENT_MIN_SEARCHERS: '3',
         SEARCH_FRAGMENT_WINDOW_DAYS: '14',
         CLERK_WEBHOOK_SIGNING_SECRET: 'whsec_synthetic',
-        ANCHORING_ENABLED: 'false',
+        ANCHORING_ENABLED: 'FALSE',
         ANCHOR_HOUR_UTC: '4',
         FREETSA_URL: 'https://tsa.example.test/tsr',
         OTS_CALENDARS: 'https://a.example.test,https://b.example.test',
