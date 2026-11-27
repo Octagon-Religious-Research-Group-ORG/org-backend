@@ -139,6 +139,11 @@ export class DigestSender {
     const hourReached = now.getUTCHours() >= this.settings.digestHourUtc;
     // Before the hour, only the overdue (the catch-up).
     const upTo = hourReached ? now : new Date(now.getTime() - DAY_MS);
+    // A long pass must not lease a late member from the pass's start: that
+    // lease could already be over, and another instance would take the row
+    // while it is sent. Each member gets the time it is reached at.
+    const started = Date.now();
+    const reachedAt = () => new Date(now.getTime() + (Date.now() - started));
     const seen: string[] = [];
     for (let page = 0; page < DIGEST_PAGES_PER_PASS; page++) {
       const waiting = (await this.queueModel
@@ -161,7 +166,7 @@ export class DigestSender {
       for (const { _id: userId } of waiting) {
         seen.push(userId);
         try {
-          if ((await this.forMember(userId, now)) === 'budget') return;
+          if ((await this.forMember(userId, reachedAt())) === 'budget') return;
         } catch (error) {
           this.logger.error(`A digest failed: ${describe(error)}`);
         }
@@ -294,7 +299,7 @@ export class DigestSender {
     }
     // Stored, with when this key's first send started, BEFORE the send: a
     // crash before the result is known still counts from then (review N3).
-    await this.digestModel
+    const stored = await this.digestModel
       .updateOne(
         { _id: row._id, leaseToken: token },
         {
@@ -306,6 +311,13 @@ export class DigestSender {
         },
       )
       .exec();
+    if (stored.matchedCount !== 1) {
+      // Our lease ran out and another instance took the row: it sends, not us.
+      this.logger.warn(
+        `A digest row was taken over before its send; left to its new holder.`,
+      );
+      return 'skipped';
+    }
     const result = await this.mail.sendNotice({
       to,
       subject: email.subject,

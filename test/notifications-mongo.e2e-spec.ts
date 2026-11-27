@@ -216,12 +216,32 @@ describeWithMongo('member notifications on a real MongoDB', () => {
     expect(await keys('NotificationDigestRow')).toEqual([
       { key: { _id: 1 } },
       { key: { userId: 1, day: 1 }, unique: true },
+      { key: { userId: 1 }, unique: true, partial: { status: 'sending' } },
       { key: { expiresAt: 1 }, ttl: 0 },
     ]);
     expect(await keys('EmailBudgetDay')).toEqual([
       { key: { _id: 1 } },
       { key: { expiresAt: 1 }, ttl: 0 },
     ]);
+  });
+
+  it('refuses a second digest row being sent for the same member, whatever its day', async () => {
+    const rows = m.NotificationDigestRow.collection;
+    const base = { userId: 'user_one_sender', itemIds: [], attempts: 0 };
+    await rows.insertOne({ ...base, day: '2026-11-13', status: 'sending' });
+    await expect(
+      rows.insertOne({ ...base, day: '2026-11-14', status: 'sending' }),
+    ).rejects.toMatchObject({ code: 11000 });
+    // A finished row of another day is fine, but resuming it is not while
+    // the first one is still being sent.
+    await rows.insertOne({ ...base, day: '2026-11-12', status: 'failed' });
+    await expect(
+      rows.updateOne(
+        { userId: base.userId, day: '2026-11-12' },
+        { $set: { status: 'sending' } },
+      ),
+    ).rejects.toMatchObject({ code: 11000 });
+    await rows.deleteMany({ userId: base.userId });
   });
 
   it('queues one notice per event per reader, and lets moderation notices repeat', async () => {

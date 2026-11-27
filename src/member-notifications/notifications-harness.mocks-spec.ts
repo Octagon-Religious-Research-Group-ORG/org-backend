@@ -43,6 +43,8 @@ export function harness(
   const queue = fakeModel([], { unique: [['dedupeKey']], timestamps: true });
   const digestRows = fakeModel([], {
     unique: [['userId', 'day']],
+    // As the schema: at most one row per member being sent.
+    partialUnique: [{ keys: ['userId'], where: { status: 'sending' } }],
     timestamps: true,
   });
   const inbox = fakeModel([{ dedupeKey: 'page-submitted:p1' }]);
