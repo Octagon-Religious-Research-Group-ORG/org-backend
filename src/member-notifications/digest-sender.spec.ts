@@ -105,6 +105,39 @@ describe('DigestSender (Chunk 14)', () => {
     expect(h.digestRows.docs).toHaveLength(1);
   });
 
+  it('never resumes a row another instance is sending, even after its own “nobody is sending” check', async () => {
+    // The race CI found: this instance checked "is a send in progress?" just
+    // before the other one created its row, then the resume step picked that
+    // live row up and both sent.
+    const h = harness();
+    const item = digestItem(h, 'user_a');
+    h.digestRows.docs.push({
+      _id: item._id,
+      userId: 'user_a',
+      day: '2026-11-13',
+      status: 'sending',
+      itemIds: [item._id],
+      attempts: 0,
+      keyGen: 0,
+      leaseUntil: new Date(NOW.getTime() + DIGEST_LEASE_MS),
+      leaseToken: 'other-instance',
+    });
+    jest.spyOn(h.digestRows, 'exists').mockImplementationOnce(() =>
+      Object.assign(Promise.resolve(null), {
+        exec: () => Promise.resolve(null),
+      }),
+    );
+    expect(await h.digests.forMember('user_a', NOW)).toBe('skipped');
+    expect(h.mail.sendNotice).not.toHaveBeenCalled();
+    expect(h.digestRows.docs).toHaveLength(1);
+    expect(h.digestRows.docs[0]).toMatchObject({
+      status: 'sending',
+      leaseToken: 'other-instance',
+    });
+    // Its news stays where the sending instance expects it.
+    expect(item.nextAttemptAt).toBeUndefined();
+  });
+
   it('takes over a dead tick’s day with the same items and the same key', async () => {
     const h = harness();
     const item = digestItem(h, 'user_a');
