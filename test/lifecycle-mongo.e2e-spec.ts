@@ -1,10 +1,14 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return */
 // The whole app's start and clean close against a REAL MongoDB (NestJS 12
-// plan, chunk 8). NestJS 12 calls lifecycle hooks by module level, and its
-// Express adapter now drains requests on shutdown, so the order is pinned:
-// every scheduler stops before the database connection closes, and the
-// connection really closes. Needs MONGO_TEST_URI (a throwaway database).
-// Without it the suite is reported as SKIPPED, never as passed.
+// plan, chunk 8). A regression guard: every scheduler must start, must have a
+// stop hook that runs on close (it clears its timer), and the connection must
+// end closed. Nest itself runs every onModuleDestroy before any
+// onApplicationShutdown (where Mongo closes), so this does not test NestJS
+// 12's module-level ordering; the full recorded order was compared by hand
+// (identical shutdown on 11 and 12). Known, unchanged on both versions: a
+// scheduler run already in flight is not awaited on close.
+// Needs MONGO_TEST_URI (a throwaway database). Without it the suite is
+// reported as SKIPPED, never as passed.
 import type { INestApplication } from '@nestjs/common';
 import { ModulesContainer, NestFactory } from '@nestjs/core';
 import { getConnectionToken } from '@nestjs/mongoose';
@@ -85,15 +89,19 @@ describeWithMongo(
       order.push('started');
     });
 
-    afterAll(() => {
+    let appClosed = false;
+    afterAll(async () => {
+      // Never leave the app and its connection open, even after a failure.
+      if (app && !appClosed) await app.close();
       process.env = saved;
     });
 
-    it('starts every scheduler, then on close stops each before the database connection closes', async () => {
+    it('starts every scheduler, then on close runs each stop hook before the database connection closes', async () => {
       for (const name of SCHEDULERS) {
         expect(order).toContain(`onApplicationBootstrap ${name}`);
       }
       const connection = app.get<Connection>(getConnectionToken());
+      appClosed = true;
       await app.close();
       const closed = order.indexOf('mongo close');
       expect(closed).toBeGreaterThan(order.indexOf('started'));
